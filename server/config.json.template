@@ -1,0 +1,20 @@
+{
+  "google_api_key":  "AIzaSy_REPLACE_WITH_YOUR_GOOGLE_PLACES_API_KEY",
+  "serper_key":      "REPLACE_WITH_YOUR_SERPER_DEV_KEY",
+  "gemini_key":      "AIzaSy_REPLACE_WITH_YOUR_GEMINI_KEY",
+  "claude_key":      "sk-ant-api03-REPLACE_WITH_YOUR_CLAUDE_KEY",
+  "replicate_token": "r8_REPLACE_WITH_YOUR_REPLICATE_TOKEN",
+  "imagine_art_key": "vk-REPLACE_WITH_YOUR_IMAGINE_ART_KEY",
+  "oxylabs_key":     "REPLACE_WITH_YOUR_OXYLABS_KEY",
+  "resend_key":      "re_REPLACE_WITH_YOUR_RESEND_KEY",
+  "from_email":      "you@yourdomain.com",
+  "from_name":       "Your Name",
+  "config": {
+    "enrichment_primary":  "serper",
+    "enrichment_fallback": "oxylabs",
+    "image_provider":      "none",
+    "auto_score":          true,
+    "auto_email_copy":     true,
+    "auto_image":          false
+  }
+}

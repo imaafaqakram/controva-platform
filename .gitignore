@@ -1,0 +1,32 @@
+# ── Secrets — NEVER commit these ───────────────────
+deploy.env
+server/config.json
+*.key
+*.pem
+*.env
+!deploy.env.example
+
+# ── Python ──────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# ── OS ──────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Editor ──────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*~
+
+# ── Local generated / temp files ────────────────────
+server/mockups/
+*.log
+_debug_*.py
+changed.txt

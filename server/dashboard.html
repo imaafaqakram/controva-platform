@@ -1,0 +1,2514 @@
+<!DOCTYPE html>
+<html lang="en" class="">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Controva Intelligence Platform</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    darkMode: 'class',
+    theme: {
+      extend: {
+        colors: {
+          accent: { 50:'#eff6ff', 100:'#dbeafe', 500:'#3b82f6', 600:'#2563eb', 700:'#1d4ed8', 900:'#1e3a8a' },
+        },
+        fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'] },
+      }
+    }
+  }
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone@7.24.4/babel.min.js"></script>
+<style>
+  body { font-family: 'Inter', system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+  .scrollbar-thin::-webkit-scrollbar { width: 6px; height: 6px; }
+  .scrollbar-thin::-webkit-scrollbar-thumb { background: rgba(100,116,139,0.3); border-radius: 3px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spin { animation: spin 1s linear infinite; }
+  @keyframes pulse-glow {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(59,130,246,0.4); }
+    50% { box-shadow: 0 0 0 8px rgba(59,130,246,0); }
+  }
+  .pulse-glow { animation: pulse-glow 2s infinite; }
+  .glass { backdrop-filter: blur(8px); }
+  .fade-in { animation: fadeIn 0.3s ease-out; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+  details summary::-webkit-details-marker { display: none; }
+  details summary { list-style: none; }
+  #error-display { position: fixed; top: 0; left: 0; right: 0; background: #ef4444; color: white; padding: 12px; z-index: 9999; font-family: monospace; font-size: 12px; display: none; white-space: pre-wrap; max-height: 50vh; overflow-y: auto; }
+</style>
+</head>
+<body class="bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 transition-colors duration-200">
+<div id="error-display"></div>
+<div id="root">
+  <div style="min-height: 100vh; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 16px; color: #94a3b8;">
+    <div style="width: 48px; height: 48px; border: 3px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: spin 1s linear infinite;"></div>
+    <p style="font-size: 14px;">Loading Controva Intelligence...</p>
+    <p style="font-size: 11px; opacity: 0.6;" id="load-status">Loading React...</p>
+  </div>
+</div>
+
+<script>
+  // Global error handler - show errors visibly so we can debug
+  window.addEventListener('error', function(e) {
+    var d = document.getElementById('error-display');
+    if (d) {
+      d.style.display = 'block';
+      d.textContent = 'Error: ' + e.message + '\n\nFile: ' + e.filename + ':' + e.lineno + '\n\n' + (e.error && e.error.stack ? e.error.stack : '');
+    }
+  });
+  window.addEventListener('unhandledrejection', function(e) {
+    var d = document.getElementById('error-display');
+    if (d) {
+      d.style.display = 'block';
+      d.textContent = 'Promise rejection: ' + (e.reason && e.reason.message ? e.reason.message : e.reason);
+    }
+  });
+
+  // Update loading status as scripts load
+  var statusEl = document.getElementById('load-status');
+  var checkInterval = setInterval(function() {
+    if (!statusEl) { clearInterval(checkInterval); return; }
+    var loaded = [];
+    if (window.React) loaded.push('React');
+    if (window.ReactDOM) loaded.push('ReactDOM');
+    if (window.Babel) loaded.push('Babel');
+    statusEl.textContent = 'Loaded: ' + loaded.join(', ');
+    if (loaded.length === 3) clearInterval(checkInterval);
+  }, 200);
+</script>
+
+<script type="text/babel" data-presets="env,react" data-type="module">
+
+// ─────────────────────────────────────────────────
+//  Inline SVG Icons (no external dependency)
+// ─────────────────────────────────────────────────
+const ICONS = {
+  Search:        'M21 21l-4.35-4.35M11 19a8 8 0 100-16 8 8 0 000 16z',
+  Sparkles:      'M12 3l1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5L12 3zM18 13l.75 2.25L21 16l-2.25.75L18 19l-.75-2.25L15 16l2.25-.75L18 13zM5 16l.75 2.25L8 19l-2.25.75L5 22l-.75-2.25L2 19l2.25-.75L5 16z',
+  LayoutDashboard:'M3 3h7v9H3zM14 3h7v5h-7zM14 12h7v9h-7zM3 16h7v5H3z',
+  Users:         'M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2M23 21v-2a4 4 0 00-3-3.87M9 11a4 4 0 100-8 4 4 0 000 8zM16 3.13a4 4 0 010 7.75',
+  UserSearch:    'M21 21l-4.35-4.35M16 11a5 5 0 100-10 5 5 0 000 10zM11 17a4 4 0 100-8 4 4 0 000 8z',
+  Workflow:      'M3 3h6v6H3zM15 3h6v6h-6zM9 15h6v6H9zM6 9v3a3 3 0 003 3M18 9v3a3 3 0 01-3 3M12 9v6',
+  TrendingUp:    'M23 6l-9.5 9.5-5-5L1 18M17 6h6v6',
+  Target:        'M22 12a10 10 0 11-20 0 10 10 0 0120 0zM18 12a6 6 0 11-12 0 6 6 0 0112 0zM14 12a2 2 0 11-4 0 2 2 0 014 0z',
+  Share2:        'M16 6a3 3 0 11-6 0 3 3 0 016 0zM16 18a3 3 0 11-6 0 3 3 0 016 0zM6 12a3 3 0 11-6 0 3 3 0 016 0z M8.59 13.51l6.83 3.98M15.41 6.51l-6.82 3.98',
+  ShoppingBag:   'M6 2L3 6v14a2 2 0 002 2h14a2 2 0 002-2V6l-3-4zM3 6h18M16 10a4 4 0 11-8 0',
+  Settings:      'M12 1v6m0 6v6M4.22 4.22l4.24 4.24m7.08 7.08l4.24 4.24M1 12h6m6 0h6M4.22 19.78l4.24-4.24m7.08-7.08l4.24-4.24',
+  Sun:           'M12 1v2m0 18v2M4.22 4.22l1.42 1.42m12.72 12.72l1.42 1.42M1 12h2m18 0h2M4.22 19.78l1.42-1.42m12.72-12.72l1.42-1.42M16 12a4 4 0 11-8 0 4 4 0 018 0z',
+  Moon:          'M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z',
+  Menu:          'M3 6h18M3 12h18M3 18h18',
+  X:             'M18 6L6 18M6 6l12 12',
+  Flame:         'M8.5 14.5A2.5 2.5 0 0011 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 11-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 002.5 2.5z',
+  Mail:          'M22 6l-10 7L2 6M22 6v12a2 2 0 01-2 2H4a2 2 0 01-2-2V6a2 2 0 012-2h16a2 2 0 012 2z',
+  MapPin:        'M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0zM15 10a3 3 0 11-6 0 3 3 0 016 0z',
+  Download:      'M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3',
+  RefreshCw:     'M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15',
+  Hash:          'M4 9h16M4 15h16M10 3L8 21M16 3l-2 18',
+  BarChart3:     'M3 3v18h18M7 16v-4M12 16V8M17 16v-7',
+  Crosshair:     'M22 12a10 10 0 11-20 0 10 10 0 0120 0zM12 2v4M12 18v4M2 12h4M18 12h4',
+  Cpu:           'M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3M4 4h16v16H4zM9 9h6v6H9z',
+  Globe:         'M22 12a10 10 0 11-20 0 10 10 0 0120 0zM2 12h20M12 2a15 15 0 010 20M12 2a15 15 0 000 20',
+  History:       'M3 3v5h5M3.05 13A9 9 0 1015 4M12 7v5l3 2',
+  Link2:         'M9 17H7A5 5 0 017 7h2M15 7h2a5 5 0 010 10h-2M8 12h8',
+  Building2:     'M3 21h18M5 21V7l7-4 7 4v14M9 9h6M9 13h6M9 17h6',
+  User:          'M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2M16 7a4 4 0 11-8 0 4 4 0 018 0z',
+  CheckCircle2:  'M22 11.08V12a10 10 0 11-5.93-9.14M22 4L12 14.01l-3-3',
+  Tag:           'M20.59 13.41L13.42 20.58a2 2 0 01-2.83 0L2 12V2h10l8.59 8.59a2 2 0 010 2.82zM7 7h.01',
+  Zap:           'M13 2L3 14h9l-1 8 10-12h-9l1-8z',
+  Shield:        'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z',
+  Gift:          'M20 12v10H4V12M2 7h20v5H2zM12 22V7M12 7H7.5a2.5 2.5 0 010-5C11 2 12 7 12 7zM12 7h4.5a2.5 2.5 0 000-5C13 2 12 7 12 7z',
+  Image:         'M21 5v14a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h14a2 2 0 012 2zM8.5 11a1.5 1.5 0 100-3 1.5 1.5 0 000 3zM21 15l-5-5L5 21',
+  ToggleRight:   'M16 16H8a4 4 0 010-8h8a4 4 0 010 8zM16 12a2 2 0 11-4 0 2 2 0 014 0z',
+  Database:      'M21 5c0 1.66-4 3-9 3s-9-1.34-9-3 4-3 9-3 9 1.34 9 3zM3 5v6c0 1.66 4 3 9 3s9-1.34 9-3V5M3 11v6c0 1.66 4 3 9 3s9-1.34 9-3v-6',
+  Server:        'M22 12H2v10h20zM22 2H2v10h20zM6 6h.01M6 18h.01M10 6h8M10 18h8',
+  ListTodo:      'M9 6h11M9 12h11M9 18h11M5 6h.01M5 12h.01M5 18h.01',
+  ListFilter:    'M3 6h18M7 12h10M11 18h2',
+  HelpCircle:    'M22 12a10 10 0 11-20 0 10 10 0 0120 0zM9.09 9a3 3 0 015.83 1c0 2-3 3-3 3M12 17h.01',
+  ChevronDown:   'M6 9l6 6 6-6',
+  ExternalLink:  'M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3',
+  AlertCircle:   'M22 12a10 10 0 11-20 0 10 10 0 0120 0zM12 8v4M12 16h.01',
+  Info:          'M22 12a10 10 0 11-20 0 10 10 0 0120 0zM12 16v-4M12 8h.01',
+  Play:          'M5 3l14 9-14 9z',
+  Star:          'M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01z',
+  UserPlus:      'M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2M8.5 11a4 4 0 100-8 4 4 0 000 8zM20 8v6M23 11h-6',
+  Settings2:     'M20 7h-9M14 17H5M17 14a3 3 0 100 6 3 3 0 000-6zM7 4a3 3 0 100 6 3 3 0 000-6z',
+  Send:          'M22 2L11 13M22 2L15 22L11 13M22 2L2 9L11 13',
+  Inbox:         'M22 12h-6l-2 3h-4l-2-3H2M5.45 5.11L2 12v6a2 2 0 002 2h16a2 2 0 002-2v-6l-3.45-6.89A2 2 0 0016.76 4H7.24a2 2 0 00-1.79 1.11z',
+  Edit3:         'M12 20h9M16.5 3.5a2.121 2.121 0 113 3L7 19l-4 1 1-4L16.5 3.5z',
+  XCircle:       'M22 12a10 10 0 11-20 0 10 10 0 0120 0zM15 9l-6 6M9 9l6 6',
+  Check:         'M20 6L9 17l-5-5',
+  RotateCw:      'M23 4v6h-6M20.49 15a9 9 0 11-2.12-9.36L23 10',
+  Lock:          'M19 11H5a2 2 0 00-2 2v7a2 2 0 002 2h14a2 2 0 002-2v-7a2 2 0 00-2-2zM7 11V7a5 5 0 0110 0v4',
+  PieChart:      'M21.21 15.89A10 10 0 118 2.83M22 12A10 10 0 0012 2v10z',
+  Activity:      'M22 12h-4l-3 9L9 3l-3 9H2',
+
+};
+
+// SVG icon component
+const Icon = ({ name, className = "w-4 h-4", strokeWidth = 2 }) => {
+  const path = ICONS[name];
+  if (!path) return null;
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round"
+      className={className}>
+      {path.split('M').filter(Boolean).map((p, i) => <path key={i} d={'M' + p} />)}
+    </svg>
+  );
+};
+
+const { useState, useEffect, useCallback, useMemo, useRef } = React;
+const API = window.location.origin;
+
+// ─────────────────────────────────────────────────
+//  Theme
+// ─────────────────────────────────────────────────
+const useTheme = () => {
+  const [theme, setTheme] = useState(() => {
+    try {
+      const saved = localStorage.getItem('theme');
+      if (saved) return saved;
+      return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    } catch (e) { return 'dark'; }
+  });
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', theme === 'dark');
+    try { localStorage.setItem('theme', theme); } catch (e) {}
+  }, [theme]);
+  return [theme, () => setTheme(t => t === 'dark' ? 'light' : 'dark')];
+};
+
+// ─────────────────────────────────────────────────
+//  Toast
+// ─────────────────────────────────────────────────
+const ToastContext = React.createContext({ showToast: () => {} });
+const ToastProvider = ({ children }) => {
+  const [toasts, setToasts] = useState([]);
+  const showToast = useCallback((message, type = 'success') => {
+    const id = Date.now() + Math.random();
+    setToasts(t => [...t, { id, message, type }]);
+    setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 5000);
+  }, []);
+  return (
+    <ToastContext.Provider value={{ showToast }}>
+      {children}
+      <div className="fixed top-4 right-4 z-50 space-y-2">
+        {toasts.map(t => (
+          <div key={t.id} className={'fade-in glass max-w-md px-4 py-3 rounded-lg shadow-lg border ' + (
+            t.type === 'error' ? 'bg-red-500/10 border-red-500/30 text-red-700 dark:text-red-300' :
+            t.type === 'info' ? 'bg-blue-500/10 border-blue-500/30 text-blue-700 dark:text-blue-300' :
+            'bg-green-500/10 border-green-500/30 text-green-700 dark:text-green-300'
+          )}>
+            <div className="flex items-start gap-2">
+              <Icon name={t.type === 'error' ? 'AlertCircle' : t.type === 'info' ? 'Info' : 'CheckCircle2'} className="w-5 h-5 flex-shrink-0 mt-0.5" />
+              <p className="text-sm">{t.message}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+    </ToastContext.Provider>
+  );
+};
+const useToast = () => React.useContext(ToastContext);
+
+// ─────────────────────────────────────────────────
+//  API helper
+// ─────────────────────────────────────────────────
+const api = {
+  get: async (path) => {
+    const r = await fetch(API + path);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  },
+  post: async (path, body) => {
+    const r = await fetch(API + path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {})
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }
+};
+
+// ─────────────────────────────────────────────────
+//  UI Primitives
+// ─────────────────────────────────────────────────
+const Card = ({ children, className = '', noPad = false }) => (
+  <div className={'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-sm ' + (noPad ? '' : 'p-5') + ' ' + className}>
+    {children}
+  </div>
+);
+
+const Button = ({ children, onClick, variant = 'primary', size = 'md', disabled, className = '', icon = null }) => {
+  const variants = {
+    primary: 'bg-accent-600 hover:bg-accent-700 text-white shadow-sm',
+    secondary: 'bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-900 dark:text-slate-100',
+    ghost: 'hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300',
+    danger: 'bg-red-600 hover:bg-red-700 text-white',
+    success: 'bg-green-600 hover:bg-green-700 text-white'
+  };
+  const sizes = { sm: 'px-2.5 py-1.5 text-xs', md: 'px-4 py-2 text-sm', lg: 'px-5 py-2.5 text-sm' };
+  return (
+    <button onClick={onClick} disabled={disabled}
+      className={'inline-flex items-center justify-center gap-2 font-medium rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed ' + variants[variant] + ' ' + sizes[size] + ' ' + className}>
+      {icon && <Icon name={icon} className="w-4 h-4" />}
+      {children}
+    </button>
+  );
+};
+
+const Input = ({ value, onChange, placeholder, type = 'text', className = '', icon = null, onKeyDown }) => (
+  <div className={'relative ' + className}>
+    {icon && <Icon name={icon} className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />}
+    <input type={type} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} onKeyDown={onKeyDown}
+      className={'w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent-500 transition-all ' + (icon ? 'pl-10 pr-3' : 'px-3') + ' py-2.5'} />
+  </div>
+);
+
+const Badge = ({ children, variant = 'default' }) => {
+  const v = {
+    default: 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300',
+    success: 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400',
+    warning: 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400',
+    danger: 'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400',
+    info: 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400',
+    purple: 'bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400',
+  };
+  return <span className={'inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium ' + v[variant]}>{children}</span>;
+};
+
+const Spinner = ({ size = 'w-4 h-4' }) => (
+  <div className={size + ' border-2 border-current border-t-transparent rounded-full spin opacity-70'} />
+);
+
+const StatCard = ({ icon, label, value, color = 'blue' }) => {
+  const colorMap = {
+    blue: 'from-blue-500/10 to-blue-500/0 text-blue-600 dark:text-blue-400 border-blue-500/20',
+    green: 'from-green-500/10 to-green-500/0 text-green-600 dark:text-green-400 border-green-500/20',
+    orange: 'from-orange-500/10 to-orange-500/0 text-orange-600 dark:text-orange-400 border-orange-500/20',
+    purple: 'from-purple-500/10 to-purple-500/0 text-purple-600 dark:text-purple-400 border-purple-500/20',
+  };
+  return (
+    <Card className={'relative overflow-hidden bg-gradient-to-br ' + colorMap[color] + ' border'}>
+      <div className="flex items-start justify-between">
+        <div>
+          <p className="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wide">{label}</p>
+          <p className="text-3xl font-bold mt-2">{value}</p>
+        </div>
+        <div className="p-2.5 rounded-lg bg-white/50 dark:bg-slate-800/50">
+          <Icon name={icon} className="w-5 h-5" />
+        </div>
+      </div>
+    </Card>
+  );
+};
+
+// ─────────────────────────────────────────────────
+//  Pages
+// ─────────────────────────────────────────────────
+const DashboardPage = ({ setPage }) => {
+  const [stats, setStats] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [recent, setRecent] = useState([]);
+
+  useEffect(() => {
+    Promise.all([api.get('/stats').catch(() => null), api.get('/leads').catch(() => ({ leads: [] }))])
+      .then(([s, l]) => { setStats(s); setRecent((l.leads || []).slice(0, 6)); setLoading(false); });
+  }, []);
+
+  return (
+    <div className="space-y-6 fade-in">
+      <div>
+        <h1 className="text-2xl font-bold">Dashboard</h1>
+        <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">Real-time overview of your pipeline</p>
+      </div>
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <StatCard icon="Users" label="Total Leads" value={loading ? '...' : (stats?.total || 0)} color="blue" />
+        <StatCard icon="Flame" label="Hot Leads" value={loading ? '...' : (stats?.hot_leads || 0)} color="orange" />
+        <StatCard icon="Mail" label="With Email" value={loading ? '...' : (stats?.with_email || 0)} color="green" />
+        <StatCard icon="MapPin" label="Cities" value={loading ? '...' : (stats?.cities || 0)} color="purple" />
+      </div>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <Card className="lg:col-span-2">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="font-semibold flex items-center gap-2"><Icon name="Sparkles" /> Recent Leads</h3>
+            <Button variant="ghost" size="sm" onClick={() => setPage('leads')}>View All →</Button>
+          </div>
+          <div className="space-y-2">
+            {recent.length === 0 ? (
+              <p className="text-sm text-slate-500 py-8 text-center">No leads yet. Start with the Search page.</p>
+            ) : recent.map((l, i) => (
+              <div key={i} className="flex items-center justify-between p-3 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800">
+                <div className="flex-1 min-w-0">
+                  <p className="font-medium text-sm truncate">{l.business_name}</p>
+                  <p className="text-xs text-slate-500">{l.city} • {l.niche}</p>
+                </div>
+                <div className="flex items-center gap-1 ml-2">
+                  {l.owner_email && <Badge variant="success">📧</Badge>}
+                  {l.linkedin_url && <Badge variant="info">in</Badge>}
+                  {l.ai_score && <Badge variant="purple">{l.ai_score}/10</Badge>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+        <Card>
+          <h3 className="font-semibold mb-4 flex items-center gap-2"><Icon name="Zap" /> Quick Actions</h3>
+          <div className="space-y-2">
+            <Button onClick={() => setPage('search')} variant="primary" className="w-full justify-start" icon="Search">Search Leads</Button>
+            <Button onClick={() => setPage('seo')} variant="secondary" className="w-full justify-start" icon="TrendingUp">SEO Research</Button>
+            <Button onClick={() => setPage('competitor')} variant="secondary" className="w-full justify-start" icon="Target">Competitor Intel</Button>
+            <Button onClick={() => setPage('people')} variant="secondary" className="w-full justify-start" icon="UserSearch">Find People</Button>
+            <Button onClick={() => setPage('social')} variant="secondary" className="w-full justify-start" icon="Share2">Social Scout</Button>
+          </div>
+        </Card>
+      </div>
+    </div>
+  );
+};
+
+const SearchPage = ({ setPage }) => {
+  const [query, setQuery] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState(null);
+  const [filterMode, setFilterMode] = useState('no_website');  // no_website | with_website | all
+  const [density, setDensity] = useState('standard');  // low | standard | high
+  const [history, setHistory] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('search_history') || '[]'); } catch (e) { return []; }
+  });
+  const { showToast } = useToast();
+
+  const examples = [
+    { q: 'barber shops in Manchester UK', emoji: '💇' },
+    { q: 'luxury restaurants in Beverly Hills', emoji: '🍽️' },
+    { q: 'dental clinics in Mumbai India', emoji: '🦷' },
+    { q: 'restaurants in Lahore Pakistan', emoji: '🍛' },
+    { q: 'salons in Karachi', emoji: '✂️' },
+    { q: 'gyms in Toronto Canada', emoji: '💪' },
+    { q: 'beauty salons in Sydney Australia', emoji: '💅' },
+    { q: 'pharmacies in Dubai UAE', emoji: '💊' },
+    { q: 'cafes in Singapore', emoji: '☕' },
+    { q: 'bakeries in Manchester', emoji: '🥖' },
+  ];
+
+  const runSearch = async (q) => {
+    const sq = q || query;
+    if (!sq) return;
+    setLoading(true); setResult(null);
+    try {
+      const r = await api.post('/search', { query: sq, filter_mode: filterMode, density: density });
+      setResult(r);
+      // Save to history
+      const newHistory = [{ query: sq, time: Date.now(), result: r }, ...history.filter(h => h.query !== sq)].slice(0, 10);
+      setHistory(newHistory);
+      try { localStorage.setItem('search_history', JSON.stringify(newHistory)); } catch (e) {}
+      if (r.status === 'success') showToast('Found ' + r.total_new_leads + ' new businesses!');
+      else if (r.status === 'cache_hit') showToast('Showing cached results', 'info');
+      else showToast('Could not parse that location', 'error');
+    } catch (e) { showToast('Search failed: ' + e.message, 'error'); }
+    setLoading(false);
+  };
+
+  const clearHistory = () => {
+    setHistory([]);
+    try { localStorage.removeItem('search_history'); } catch (e) {}
+  };
+
+  return (
+    <div className="space-y-6 fade-in">
+      <div>
+        <h1 className="text-2xl font-bold">Find Leads</h1>
+        <p className="text-sm text-slate-500 mt-1">Search any business type in any city worldwide</p>
+      </div>
+
+      <Card className="bg-gradient-to-br from-accent-50 to-purple-50 dark:from-accent-900/20 dark:to-purple-900/20 border-accent-200 dark:border-accent-900/40">
+        <div className="flex gap-2">
+          <Input value={query} onChange={setQuery}
+            placeholder='Try: "restaurants in Lahore Pakistan" or "barber shops in Miami"'
+            icon="Search" className="flex-1"
+            onKeyDown={(e) => e.key === 'Enter' && runSearch()} />
+          <Button onClick={() => runSearch()} disabled={loading || !query} icon={loading ? null : 'Sparkles'} size="lg">
+            {loading ? <Spinner /> : 'Search'}
+          </Button>
+        </div>
+
+        {/* Filter Controls */}
+        <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs text-slate-500 mb-1 block font-medium uppercase tracking-wide">Website Filter</label>
+            <div className="grid grid-cols-3 gap-1 bg-slate-100 dark:bg-slate-800 p-1 rounded-lg">
+              {[
+                { id: 'no_website', label: 'No Website', desc: 'Best for pitch' },
+                { id: 'all',        label: 'All',        desc: 'Both' },
+                { id: 'with_website', label: 'Has Website', desc: 'Has site' },
+              ].map(opt => (
+                <button key={opt.id} onClick={() => setFilterMode(opt.id)}
+                  title={opt.desc}
+                  className={'px-3 py-1.5 rounded text-xs font-medium transition-colors ' + (
+                    filterMode === opt.id ? 'bg-white dark:bg-slate-900 text-accent-600 shadow-sm' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
+                  )}>
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <label className="text-xs text-slate-500 mb-1 block font-medium uppercase tracking-wide">Coverage Density</label>
+            <div className="grid grid-cols-3 gap-1 bg-slate-100 dark:bg-slate-800 p-1 rounded-lg">
+              {[
+                { id: 'low',      label: 'Fast',     desc: '5 zones, ~100 max' },
+                { id: 'standard', label: 'Standard', desc: '9 zones, ~180 max' },
+                { id: 'high',     label: 'Thorough', desc: '25 zones, ~500 max' },
+              ].map(opt => (
+                <button key={opt.id} onClick={() => setDensity(opt.id)}
+                  title={opt.desc}
+                  className={'px-3 py-1.5 rounded text-xs font-medium transition-colors ' + (
+                    density === opt.id ? 'bg-white dark:bg-slate-900 text-accent-600 shadow-sm' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
+                  )}>
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+        <div className="mt-4">
+          <p className="text-xs text-slate-500 mb-2 font-medium uppercase tracking-wide">Quick Examples</p>
+          <div className="flex flex-wrap gap-2">
+            {examples.map(ex => (
+              <button key={ex.q} onClick={() => { setQuery(ex.q); runSearch(ex.q); }}
+                className="text-xs px-3 py-1.5 rounded-full bg-white/80 dark:bg-slate-900/80 hover:bg-accent-100 dark:hover:bg-accent-900/30 hover:text-accent-700 dark:hover:text-accent-400 transition-colors border border-slate-200 dark:border-slate-700">
+                <span className="mr-1">{ex.emoji}</span>{ex.q}
+              </button>
+            ))}
+          </div>
+        </div>
+      </Card>
+
+      {result && (
+        <Card className="fade-in border-2 border-accent-200 dark:border-accent-900/40">
+          <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+            <h3 className="font-semibold flex items-center gap-2">
+              <Icon name="MapPin" className="text-accent-600" /> Search Results
+            </h3>
+            <div className="flex items-center gap-2 flex-wrap">
+              {result.filter_mode && <Badge variant="info">Filter: {result.filter_mode === 'no_website' ? 'No Website' : result.filter_mode === 'with_website' ? 'Has Website' : 'All'}</Badge>}
+              {result.density && <Badge variant="purple">Density: {result.density}</Badge>}
+              <Badge variant={result.status === 'success' ? 'success' : result.status === 'cache_hit' ? 'info' : 'warning'}>
+                {result.status === 'cache_hit' ? 'Cached' : result.status === 'success' ? 'Live' : result.status}
+              </Badge>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+            <div className="bg-gradient-to-br from-blue-50 to-blue-100 dark:from-blue-900/20 dark:to-blue-900/10 rounded-lg p-3 border border-blue-200 dark:border-blue-900/40">
+              <p className="text-xs text-slate-500 uppercase tracking-wide">Niche</p>
+              <p className="font-semibold capitalize text-blue-700 dark:text-blue-400 mt-1">{result.parsed?.niche || '—'}</p>
+            </div>
+            <div className="bg-gradient-to-br from-purple-50 to-purple-100 dark:from-purple-900/20 dark:to-purple-900/10 rounded-lg p-3 border border-purple-200 dark:border-purple-900/40">
+              <p className="text-xs text-slate-500 uppercase tracking-wide">City</p>
+              <p className="font-semibold text-purple-700 dark:text-purple-400 mt-1">{result.parsed?.city || '—'}</p>
+            </div>
+            <div className="bg-gradient-to-br from-pink-50 to-pink-100 dark:from-pink-900/20 dark:to-pink-900/10 rounded-lg p-3 border border-pink-200 dark:border-pink-900/40">
+              <p className="text-xs text-slate-500 uppercase tracking-wide">Country</p>
+              <p className="font-semibold text-pink-700 dark:text-pink-400 mt-1 font-mono">{result.parsed?.country || '—'}</p>
+            </div>
+            <div className="bg-gradient-to-br from-green-50 to-green-100 dark:from-green-900/20 dark:to-green-900/10 rounded-lg p-3 border border-green-200 dark:border-green-900/40">
+              <p className="text-xs text-slate-500 uppercase tracking-wide">New Leads</p>
+              <p className="font-bold text-2xl text-green-700 dark:text-green-400 mt-1">{result.total_new_leads}</p>
+            </div>
+          </div>
+
+          {result.leads?.length > 0 && (
+            <div className="space-y-2 max-h-96 overflow-y-auto scrollbar-thin">
+              <p className="text-xs text-slate-500 uppercase tracking-wide font-medium mb-2">Discovered Businesses</p>
+              {result.leads.map((l, i) => (
+                <div key={i} className="flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-800 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors">
+                  <div className="flex-1 min-w-0">
+                    <p className="font-medium text-sm">{l.business_name}</p>
+                    <div className="flex items-center gap-2 mt-1">
+                      {l.phone && <span className="text-xs font-mono text-cyan-600">{l.phone}</span>}
+                      {l.address && <span className="text-xs text-slate-500 truncate">• {l.address.substring(0, 60)}</span>}
+                    </div>
+                  </div>
+                  <Badge variant="warning">HOT</Badge>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {result.total_new_leads === 0 && result.status === 'cache_hit' && (
+            <p className="text-sm text-slate-500 mt-3 p-3 bg-yellow-50 dark:bg-yellow-900/20 rounded-lg">
+              💡 This query was already run in the last 24 hours. Existing leads are in the Leads tab.
+            </p>
+          )}
+
+          <div className="mt-4 flex gap-2 pt-4 border-t border-slate-200 dark:border-slate-800">
+            <Button onClick={() => setPage('leads')} variant="primary" icon="ExternalLink">View All Leads</Button>
+            <Button onClick={() => setPage('pipeline')} variant="secondary" icon="Workflow">Run Enrichment</Button>
+          </div>
+        </Card>
+      )}
+
+      {history.length > 0 && (
+        <Card>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="font-semibold flex items-center gap-2"><Icon name="History" /> Recent Searches</h3>
+            <Button variant="ghost" size="sm" onClick={clearHistory}>Clear</Button>
+          </div>
+          <div className="space-y-2">
+            {history.map((h, i) => (
+              <button key={i} onClick={() => { setQuery(h.query); runSearch(h.query); }}
+                className="w-full text-left flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg transition-colors">
+                <div>
+                  <p className="text-sm font-medium">{h.query}</p>
+                  <p className="text-xs text-slate-500">{new Date(h.time).toLocaleString()}</p>
+                </div>
+                <div className="text-right">
+                  <Badge variant="info">{h.result?.total_new_leads || 0} new</Badge>
+                </div>
+              </button>
+            ))}
+          </div>
+        </Card>
+      )}
+    </div>
+  );
+};
+
+const LeadsPage = () => {
+  const [leads, setLeads] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [filter, setFilter] = useState('all');
+  const [search, setSearch] = useState('');
+  const [sortBy, setSortBy] = useState('created_at');
+  const [sortDir, setSortDir] = useState('desc');
+  const [openLead, setOpenLead] = useState(null);
+  const [selected, setSelected] = useState(new Set());
+  const [advancedFilters, setAdvancedFilters] = useState({ city: '', country: '', niche: '', status: '' });
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const { showToast } = useToast();
+
+  const refresh = () => {
+    setLoading(true);
+    api.get('/leads').then(d => { setLeads(d.leads || []); setLoading(false); }).catch(() => setLoading(false));
+  };
+  useEffect(refresh, []);
+
+  // Unique values for filter dropdowns
+  const uniqueValues = useMemo(() => {
+    const cities = new Set(), countries = new Set(), niches = new Set(), statuses = new Set();
+    leads.forEach(l => {
+      if (l.city) cities.add(l.city);
+      if (l.country) countries.add(l.country);
+      if (l.niche) niches.add(l.niche);
+      if (l.status) statuses.add(l.status);
+    });
+    return {
+      cities: [...cities].sort(),
+      countries: [...countries].sort(),
+      niches: [...niches].sort(),
+      statuses: [...statuses].sort()
+    };
+  }, [leads]);
+
+  const filtered = useMemo(() => {
+    let r = leads;
+    if (filter === 'hot') r = r.filter(l => (l.lead_type || '').indexOf('HOT') !== -1);
+    else if (filter === 'with_email') r = r.filter(l => l.owner_email);
+    else if (filter === 'scored') r = r.filter(l => parseInt(l.ai_score) >= 7);
+    if (search) {
+      const q = search.toLowerCase();
+      r = r.filter(l => (l.business_name || '').toLowerCase().includes(q) ||
+                       (l.city || '').toLowerCase().includes(q) ||
+                       (l.country || '').toLowerCase().includes(q) ||
+                       (l.niche || '').toLowerCase().includes(q) ||
+                       (l.phone || '').includes(q) ||
+                       (l.owner_email || '').toLowerCase().includes(q));
+    }
+    if (advancedFilters.city) r = r.filter(l => l.city === advancedFilters.city);
+    if (advancedFilters.country) r = r.filter(l => l.country === advancedFilters.country);
+    if (advancedFilters.niche) r = r.filter(l => l.niche === advancedFilters.niche);
+    if (advancedFilters.status) r = r.filter(l => l.status === advancedFilters.status);
+    if (sortBy) {
+      r = [...r].sort((a, b) => {
+        let av = a[sortBy], bv = b[sortBy];
+        if (sortBy === 'ai_score') { av = parseInt(av) || 0; bv = parseInt(bv) || 0; }
+        else { av = (av || '').toString().toLowerCase(); bv = (bv || '').toString().toLowerCase(); }
+        if (av < bv) return sortDir === 'asc' ? -1 : 1;
+        if (av > bv) return sortDir === 'asc' ? 1 : -1;
+        return 0;
+      });
+    }
+    return r;
+  }, [leads, filter, search, sortBy, sortDir, advancedFilters]);
+
+  const toggleSelect = (id) => {
+    setSelected(s => {
+      const next = new Set(s);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const selectAll = () => {
+    const visible = filtered.slice(0, 100).map(l => l.id);
+    setSelected(new Set(visible));
+  };
+
+  const deselectAll = () => setSelected(new Set());
+
+  const downloadSelectedCSV = () => {
+    const ids = [...selected];
+    const rows = leads.filter(l => ids.includes(l.id));
+    if (rows.length === 0) {
+      showToast('Select some leads first', 'error');
+      return;
+    }
+    const fields = ['business_name', 'niche', 'city', 'country', 'phone', 'owner_email',
+                   'owner_name', 'linkedin_url', 'address', 'ai_score', 'status'];
+    const csv = [
+      fields.join(','),
+      ...rows.map(r => fields.map(f => {
+        const v = (r[f] || '').toString().replace(/"/g, '""');
+        return v.indexOf(',') >= 0 || v.indexOf('\n') >= 0 ? '"' + v + '"' : v;
+      }).join(','))
+    ].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'leads_selected_' + Date.now() + '.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast('Downloaded ' + rows.length + ' leads');
+  };
+
+  const downloadAllCSV = () => { window.location.href = '/leads.csv'; };
+
+  const clearFilters = () => {
+    setSearch(''); setFilter('all'); setAdvancedFilters({city:'', country:'', niche:'', status:''});
+  };
+
+  return (
+    <div className="space-y-4 fade-in">
+      <div className="flex items-center justify-between gap-4 flex-wrap">
+        <div>
+          <h1 className="text-2xl font-bold">Leads</h1>
+          <p className="text-sm text-slate-500 mt-1">
+            {filtered.length} of {leads.length} leads
+            {selected.size > 0 && <span className="ml-2 text-accent-600 font-semibold">• {selected.size} selected</span>}
+          </p>
+        </div>
+        <div className="flex gap-2 flex-wrap">
+          {selected.size > 0 && (
+            <>
+              <Button variant="success" onClick={downloadSelectedCSV} icon="Download">
+                Download Selected ({selected.size})
+              </Button>
+              <Button variant="ghost" onClick={deselectAll} icon="X">Clear</Button>
+            </>
+          )}
+          <Button variant="secondary" onClick={refresh} icon="RefreshCw">Refresh</Button>
+          <Button variant="secondary" onClick={downloadAllCSV} icon="Download">All CSV</Button>
+        </div>
+      </div>
+
+      {/* Quick filter chips */}
+      <Card>
+        <div className="flex flex-col gap-3">
+          <div className="flex gap-2 flex-wrap items-center">
+            <Input value={search} onChange={setSearch} placeholder="Search across all fields..." icon="Search" className="flex-1 min-w-[240px]" />
+            <button onClick={() => setShowAdvanced(!showAdvanced)}
+              className={'px-3 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 ' + (
+                showAdvanced ? 'bg-accent-600 text-white' : 'bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700'
+              )}>
+              <Icon name="ListFilter" /> Filters
+            </button>
+          </div>
+
+          {showAdvanced && (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 p-3 bg-slate-50 dark:bg-slate-800 rounded-lg fade-in">
+              <select value={advancedFilters.country} onChange={e => setAdvancedFilters({...advancedFilters, country: e.target.value})}
+                className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm">
+                <option value="">All Countries</option>
+                {uniqueValues.countries.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+              <select value={advancedFilters.city} onChange={e => setAdvancedFilters({...advancedFilters, city: e.target.value})}
+                className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm">
+                <option value="">All Cities</option>
+                {uniqueValues.cities.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+              <select value={advancedFilters.niche} onChange={e => setAdvancedFilters({...advancedFilters, niche: e.target.value})}
+                className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm">
+                <option value="">All Niches</option>
+                {uniqueValues.niches.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+              <select value={advancedFilters.status} onChange={e => setAdvancedFilters({...advancedFilters, status: e.target.value})}
+                className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm">
+                <option value="">All Statuses</option>
+                {uniqueValues.statuses.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+              <div className="col-span-2 md:col-span-4 flex justify-end">
+                <Button variant="ghost" size="sm" onClick={clearFilters}>Clear Filters</Button>
+              </div>
+            </div>
+          )}
+
+          <div className="flex gap-2 flex-wrap">
+            {[
+              { id: 'all', label: 'All', count: leads.length },
+              { id: 'hot', label: 'Hot (no website)', count: leads.filter(l => (l.lead_type || '').indexOf('HOT') !== -1).length },
+              { id: 'with_email', label: 'Has Email', count: leads.filter(l => l.owner_email).length },
+              { id: 'scored', label: 'High Score (7+)', count: leads.filter(l => parseInt(l.ai_score) >= 7).length },
+            ].map(f => (
+              <button key={f.id} onClick={() => setFilter(f.id)}
+                className={'px-3 py-1.5 rounded-full text-xs font-medium transition-colors ' + (
+                  filter === f.id ? 'bg-accent-600 text-white' : 'bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700'
+                )}>
+                {f.label} <span className="ml-1 opacity-60">{f.count}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      </Card>
+
+      <Card noPad>
+        {loading ? (
+          <div className="py-16 text-center"><Spinner size="w-6 h-6" /></div>
+        ) : filtered.length === 0 ? (
+          <div className="py-16 text-center text-slate-500">
+            <Icon name="Search" className="w-12 h-12 mx-auto mb-3 opacity-30" />
+            <p>No leads match your filters</p>
+            <Button variant="ghost" size="sm" onClick={clearFilters} className="mt-3">Clear Filters</Button>
+          </div>
+        ) : (
+          <div className="overflow-x-auto scrollbar-thin">
+            <table className="w-full text-sm table-fixed min-w-[960px]">
+              <thead className="bg-slate-50 dark:bg-slate-800/50 sticky top-0">
+                <tr className="border-b border-slate-200 dark:border-slate-800">
+                  <th className="py-3 px-3 w-10">
+                    <input type="checkbox" className="w-4 h-4 rounded"
+                      checked={selected.size > 0 && selected.size === filtered.slice(0, 100).length}
+                      onChange={() => selected.size === filtered.slice(0, 100).length ? deselectAll() : selectAll()} />
+                  </th>
+                  {[
+                    { key: 'business_name', label: 'Business', align: 'left',   w: 'w-[150px]' },
+                    { key: 'niche',         label: 'Niche',    align: 'left',   w: 'w-[90px]'  },
+                    { key: 'city',          label: 'City',     align: 'left',   w: 'w-[90px]'  },
+                    { key: 'country',       label: 'Country',  align: 'left',   w: 'w-[70px]'  },
+                    { key: 'phone',         label: 'Phone',    align: 'left',   w: 'w-[110px]' },
+                    { key: 'owner_email',   label: 'Email',    align: 'left',   w: 'w-[170px]' },
+                    { key: 'linkedin_url',  label: 'LinkedIn', align: 'center', w: 'w-[80px]'  },
+                    { key: 'ai_score',      label: 'Score',    align: 'center', w: 'w-[75px]'  },
+                    { key: 'status',        label: 'Status',   align: 'center', w: 'w-[120px]' },
+                  ].map(col => (
+                    <th key={col.key} onClick={() => {
+                      if (sortBy === col.key) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+                      else { setSortBy(col.key); setSortDir('asc'); }
+                    }}
+                      className={'py-3 px-3 font-semibold text-xs uppercase tracking-wide text-slate-500 cursor-pointer hover:text-slate-900 dark:hover:text-slate-100 select-none whitespace-nowrap text-' + col.align + ' ' + col.w}>
+                      <div className={'flex items-center gap-1 ' + (col.align === 'center' ? 'justify-center' : '')}>
+                        {col.label}
+                        {sortBy === col.key && <span className="text-accent-600 font-bold">{sortDir === 'asc' ? '↑' : '↓'}</span>}
+                      </div>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.slice(0, 100).map((l, i) => {
+                  const isSelected = selected.has(l.id);
+                  return (
+                    <tr key={l.id || i}
+                      className={'border-b border-slate-100 dark:border-slate-800 transition-colors ' + (
+                        isSelected ? 'bg-accent-50 dark:bg-accent-900/20' : 'hover:bg-slate-50 dark:hover:bg-slate-800/50'
+                      )}>
+                      <td className="py-3 px-3" onClick={e => e.stopPropagation()}>
+                        <input type="checkbox" className="w-4 h-4 rounded cursor-pointer"
+                          checked={isSelected}
+                          onChange={() => toggleSelect(l.id)} />
+                      </td>
+                      <td className="py-3 px-3 font-medium cursor-pointer" onClick={() => setOpenLead(l.id)}>
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="truncate">{l.business_name}</span>
+                          {l.mockup_url && <span className="text-purple-500 text-xs flex-shrink-0" title="Has mockup">🎨</span>}
+                          {l.website && <a href={l.website} target="_blank" onClick={e => e.stopPropagation()} title={l.website} className="text-green-600 text-xs hover:underline flex-shrink-0">🌐</a>}
+                        </div>
+                      </td>
+                      <td className="py-3 px-3 text-slate-600 dark:text-slate-400 capitalize cursor-pointer truncate" onClick={() => setOpenLead(l.id)}>{l.niche}</td>
+                      <td className="py-3 px-3 text-slate-600 dark:text-slate-400 cursor-pointer truncate" onClick={() => setOpenLead(l.id)}>{l.city}</td>
+                      <td className="py-3 px-3 text-slate-600 dark:text-slate-400 font-mono text-xs cursor-pointer" onClick={() => setOpenLead(l.id)}>{l.country}</td>
+                      <td className="py-3 px-3 font-mono text-xs text-cyan-600 cursor-pointer" onClick={() => setOpenLead(l.id)}>{l.phone || '—'}</td>
+                      <td className="py-3 px-3 text-xs max-w-0">{l.owner_email ? <a href={'mailto:' + l.owner_email} onClick={e => e.stopPropagation()} className="text-accent-600 hover:underline block truncate" title={l.owner_email}>{l.owner_email}</a> : '—'}</td>
+                      <td className="py-3 px-3 text-center">
+                        {l.linkedin_url ? (
+                          <a href={l.linkedin_url} target="_blank" onClick={e => e.stopPropagation()}
+                            className="inline-flex items-center justify-center w-8 h-8 rounded bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 hover:bg-blue-200 dark:hover:bg-blue-900/60 transition-colors font-bold text-xs"
+                            title={l.linkedin_url}>
+                            in
+                          </a>
+                        ) : <span className="text-slate-400">—</span>}
+                      </td>
+                      <td className="py-3 px-3 text-center cursor-pointer" onClick={() => setOpenLead(l.id)}>
+                        {l.ai_score ? <Badge variant={parseInt(l.ai_score) >= 8 ? 'success' : parseInt(l.ai_score) >= 5 ? 'info' : 'default'}>{l.ai_score}/10</Badge> : '—'}
+                      </td>
+                      <td className="py-3 px-3 text-center cursor-pointer" onClick={() => setOpenLead(l.id)}>
+                        <Badge variant={l.status === 'ready' ? 'success' : l.status === 'sent' ? 'purple' : l.status === 'enriched' ? 'info' : 'default'}>{l.status}</Badge>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            {filtered.length > 100 && (
+              <div className="py-3 text-center text-xs text-slate-500 border-t border-slate-200 dark:border-slate-800">
+                Showing first 100 of {filtered.length}. Use filters or download CSV for the rest.
+              </div>
+            )}
+          </div>
+        )}
+      </Card>
+
+      {openLead && <LeadDetailModal leadId={openLead} onClose={() => setOpenLead(null)} onUpdate={refresh} />}
+    </div>
+  );
+};
+
+const SimplePage = ({ title, subtitle, endpoint, fields, renderResult, mode, setMode, modes }) => {
+  const [vals, setVals] = useState({});
+  const [result, setResult] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const { showToast } = useToast();
+
+  const run = async () => {
+    setLoading(true); setResult(null);
+    try {
+      const r = await api.post(endpoint, vals);
+      setResult(r);
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+    setLoading(false);
+  };
+
+  return (
+    <div className="space-y-6 fade-in">
+      <div>
+        <h1 className="text-2xl font-bold">{title}</h1>
+        <p className="text-sm text-slate-500 mt-1">{subtitle}</p>
+      </div>
+      {modes && (
+        <Card>
+          <div className="flex gap-2 mb-4 border-b border-slate-200 dark:border-slate-800 -mx-5 px-5 overflow-x-auto scrollbar-thin">
+            {modes.map(t => (
+              <button key={t.id} onClick={() => { setMode(t.id); setResult(null); }}
+                className={'px-3 py-2 text-sm font-medium border-b-2 -mb-px flex items-center gap-2 whitespace-nowrap ' + (
+                  mode === t.id ? 'border-accent-500 text-accent-600' : 'border-transparent text-slate-500'
+                )}>
+                <Icon name={t.icon} /> {t.label}
+              </button>
+            ))}
+          </div>
+          <div className="flex gap-2 flex-wrap">
+            {fields.map(f => (
+              <Input key={f.key} value={vals[f.key] || ''} onChange={v => setVals({...vals, [f.key]: v})}
+                placeholder={f.placeholder} icon={f.icon} className={f.full ? 'w-full' : 'flex-1 min-w-[150px]'}
+                onKeyDown={(e) => e.key === 'Enter' && run()} />
+            ))}
+            <Button onClick={run} disabled={loading}>{loading ? <Spinner /> : 'Run'}</Button>
+          </div>
+        </Card>
+      )}
+      {!modes && (
+        <Card>
+          <div className="flex gap-2 flex-wrap">
+            {fields.map(f => (
+              <Input key={f.key} value={vals[f.key] || ''} onChange={v => setVals({...vals, [f.key]: v})}
+                placeholder={f.placeholder} icon={f.icon} className="flex-1 min-w-[150px]"
+                onKeyDown={(e) => e.key === 'Enter' && run()} />
+            ))}
+            <Button onClick={run} disabled={loading}>{loading ? <Spinner /> : 'Run'}</Button>
+          </div>
+        </Card>
+      )}
+      {result && renderResult && renderResult(result)}
+    </div>
+  );
+};
+
+const SEOPage = () => {
+  const [mode, setMode] = useState('keywords');
+  const [vals, setVals] = useState({});
+  const [result, setResult] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const { showToast } = useToast();
+
+  const run = async () => {
+    if (!vals.keyword) return showToast('Enter a keyword', 'error');
+    setLoading(true); setResult(null);
+    try {
+      const endpoint = mode === 'keywords' ? '/keywords' : mode === 'serp' ? '/serp' : '/trends';
+      const r = await api.post(endpoint, { keyword: vals.keyword, location: vals.location || '', geo: vals.location || '' });
+      setResult(r);
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+    setLoading(false);
+  };
+
+  return (
+    <div className="space-y-6 fade-in">
+      <div>
+        <h1 className="text-2xl font-bold">SEO Intelligence</h1>
+        <p className="text-sm text-slate-500 mt-1">Keyword research, SERP, trends</p>
+      </div>
+      <Card>
+        <div className="flex gap-2 mb-4 border-b border-slate-200 dark:border-slate-800 -mx-5 px-5">
+          {[
+            { id: 'keywords', label: 'Keywords', icon: 'Hash' },
+            { id: 'serp', label: 'SERP', icon: 'BarChart3' },
+            { id: 'trends', label: 'Trends', icon: 'TrendingUp' },
+          ].map(t => (
+            <button key={t.id} onClick={() => { setMode(t.id); setResult(null); }}
+              className={'px-3 py-2 text-sm font-medium border-b-2 -mb-px flex items-center gap-2 ' + (
+                mode === t.id ? 'border-accent-500 text-accent-600' : 'border-transparent text-slate-500'
+              )}>
+              <Icon name={t.icon} /> {t.label}
+            </button>
+          ))}
+        </div>
+        <div className="flex gap-2">
+          <Input value={vals.keyword || ''} onChange={v => setVals({...vals, keyword: v})}
+            placeholder="Enter keyword" icon="Search" className="flex-1"
+            onKeyDown={(e) => e.key === 'Enter' && run()} />
+          <Input value={vals.location || ''} onChange={v => setVals({...vals, location: v})}
+            placeholder="Location" icon="MapPin" className="flex-1"
+            onKeyDown={(e) => e.key === 'Enter' && run()} />
+          <Button onClick={run} disabled={loading}>{loading ? <Spinner /> : 'Analyze'}</Button>
+        </div>
+      </Card>
+      {result && mode === 'keywords' && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 fade-in">
+          <Card>
+            <h3 className="font-semibold mb-3 flex items-center gap-2"><Icon name="Hash" /> Related</h3>
+            <div className="flex flex-wrap gap-2">
+              {(result.related_keywords || []).map((k, i) => <Badge key={i} variant="info">{k}</Badge>)}
+            </div>
+          </Card>
+          <Card>
+            <h3 className="font-semibold mb-3 flex items-center gap-2"><Icon name="ListFilter" /> Autocomplete</h3>
+            <div className="space-y-1">
+              {(result.autocomplete || []).map((s, i) => (
+                <div key={i} className="text-sm py-1.5 px-3 bg-slate-50 dark:bg-slate-800 rounded">{s}</div>
+              ))}
+            </div>
+          </Card>
+          <Card className="lg:col-span-2">
+            <h3 className="font-semibold mb-3 flex items-center gap-2"><Icon name="HelpCircle" /> People Also Ask</h3>
+            <div className="space-y-2">
+              {(result.people_also_ask || []).map((q, i) => (
+                <details key={i} className="group bg-slate-50 dark:bg-slate-800 rounded-lg p-3 cursor-pointer">
+                  <summary className="font-medium text-sm flex items-center justify-between">
+                    <span>{q.question}</span>
+                    <Icon name="ChevronDown" className="w-4 h-4 group-open:rotate-180 transition-transform" />
+                  </summary>
+                  <p className="text-xs text-slate-500 mt-2">{q.answer}</p>
+                </details>
+              ))}
+            </div>
+          </Card>
+          <Card className="lg:col-span-2">
+            <h3 className="font-semibold mb-3 flex items-center gap-2"><Icon name="Globe" /> Top Competitors</h3>
+            <div className="space-y-2">
+              {(result.top_competitors || []).slice(0, 8).map((c, i) => (
+                <a key={i} href={c.url} target="_blank" className="block p-3 bg-slate-50 dark:bg-slate-800 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700">
+                  <p className="font-medium text-sm">{c.title}</p>
+                  <p className="text-xs text-accent-600 truncate">{c.url}</p>
+                </a>
+              ))}
+            </div>
+          </Card>
+        </div>
+      )}
+      {result && mode === 'serp' && (
+        <Card className="fade-in">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+            <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+              <p className="text-xs text-slate-500">Local Pack</p><p className="font-semibold">{result.has_local_pack ? '✓' : '✗'}</p>
+            </div>
+            <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+              <p className="text-xs text-slate-500">Featured</p><p className="font-semibold">{result.has_featured_snippet ? '✓' : '✗'}</p>
+            </div>
+            <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+              <p className="text-xs text-slate-500">PAA</p><p className="font-semibold">{result.people_also_ask_count}</p>
+            </div>
+            <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+              <p className="text-xs text-slate-500">Total</p><p className="font-semibold">{result.total_results}</p>
+            </div>
+          </div>
+          <div className="space-y-2">
+            {(result.organic_results || []).map(r => (
+              <div key={r.position} className="flex gap-3 p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                <div className="text-2xl font-bold text-accent-600 w-8">{r.position}</div>
+                <div className="flex-1 min-w-0">
+                  <p className="font-medium text-sm">{r.title}</p>
+                  <p className="text-xs text-accent-600 truncate">{r.url}</p>
+                  <p className="text-xs text-slate-500 mt-1">{r.snippet}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+      {result && mode === 'trends' && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 fade-in">
+          <Card>
+            <h3 className="font-semibold mb-3 flex items-center gap-2"><Icon name="TrendingUp" /> Trending</h3>
+            <div className="space-y-1">
+              {(result.trending_topics || []).map((t, i) => (
+                <div key={i} className="text-sm py-1.5 px-3 bg-slate-50 dark:bg-slate-800 rounded">{i + 1}. {t}</div>
+              ))}
+            </div>
+          </Card>
+          <Card>
+            <h3 className="font-semibold mb-3 flex items-center gap-2"><Icon name="HelpCircle" /> Rising Questions</h3>
+            <div className="space-y-2">
+              {(result.rising_queries || []).map((q, i) => (
+                <div key={i} className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                  <p className="font-medium text-sm">{q.query}</p>
+                </div>
+              ))}
+            </div>
+          </Card>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const PipelinePage = () => {
+  const [provider, setProvider] = useState('serper_then_oxylabs');
+  const [includeImages, setIncludeImages] = useState(false);
+  const [jobId, setJobId] = useState(null);
+  const [job, setJob] = useState(null);
+  const { showToast } = useToast();
+
+  const run = async () => {
+    try {
+      const r = await api.post('/run-pipeline', { provider, generate_images: includeImages });
+      setJobId(r.job_id);
+      showToast('Pipeline started', 'info');
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+  };
+
+  useEffect(() => {
+    if (!jobId) return;
+    const poll = setInterval(async () => {
+      try {
+        const j = await api.get('/job/' + jobId);
+        setJob(j);
+        if (j.status === 'completed' || j.status === 'failed') clearInterval(poll);
+      } catch (e) { clearInterval(poll); }
+    }, 2000);
+    return () => clearInterval(poll);
+  }, [jobId]);
+
+  const runStep = async (path, label) => {
+    try {
+      showToast('Running: ' + label, 'info');
+      const r = await api.post(path);
+      showToast(label + ' done: ' + (r.total || (r.results || []).length) + ' items');
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+  };
+
+  return (
+    <div className="space-y-6 fade-in max-w-3xl">
+      <div>
+        <h1 className="text-2xl font-bold">Pipeline</h1>
+        <p className="text-sm text-slate-500 mt-1">Enrich, score, prepare for outreach</p>
+      </div>
+      <Card>
+        <h3 className="font-semibold mb-4">Enrichment Strategy</h3>
+        <div className="space-y-3">
+          {[
+            { id: 'serper_only', label: 'Serper Only', desc: 'Fastest', icon: 'Zap' },
+            { id: 'oxylabs_only', label: 'Oxylabs Only', desc: 'Deep scrape', icon: 'Shield' },
+            { id: 'serper_then_oxylabs', label: 'Smart (Recommended)', desc: 'Serper first, Oxylabs for missing', icon: 'Sparkles' },
+            { id: 'free_only', label: '100% Free', desc: 'Serper + permutator', icon: 'Gift' },
+          ].map(opt => (
+            <label key={opt.id} className={'flex items-start gap-3 p-3 rounded-lg border-2 cursor-pointer ' + (
+              provider === opt.id ? 'border-accent-500 bg-accent-50 dark:bg-accent-900/20' : 'border-slate-200 dark:border-slate-800'
+            )}>
+              <input type="radio" checked={provider === opt.id} onChange={() => setProvider(opt.id)} className="mt-1" />
+              <div className="flex-1">
+                <div className="font-medium text-sm flex items-center gap-2"><Icon name={opt.icon} /> {opt.label}</div>
+                <p className="text-xs text-slate-500 mt-0.5">{opt.desc}</p>
+              </div>
+            </label>
+          ))}
+        </div>
+      </Card>
+      <Card>
+        <label className="flex items-center gap-3">
+          <input type="checkbox" checked={includeImages} onChange={e => setIncludeImages(e.target.checked)} className="w-4 h-4" />
+          <div>
+            <div className="font-medium text-sm">Generate mockup images</div>
+            <p className="text-xs text-slate-500">OFF by default to save costs</p>
+          </div>
+        </label>
+      </Card>
+      <Card>
+        <Button onClick={run} icon="Play" size="lg" className="w-full">Run Full Pipeline</Button>
+        {job && (
+          <div className="mt-4 space-y-2">
+            <div className="w-full bg-slate-100 dark:bg-slate-800 rounded-full h-2">
+              <div className="bg-gradient-to-r from-accent-500 to-green-500 h-2 rounded-full transition-all" style={{ width: (job.progress || 0) + '%' }} />
+            </div>
+            <p className="text-xs text-slate-500 capitalize">{job.status}</p>
+            <div className="bg-slate-50 dark:bg-slate-900 rounded p-2 max-h-32 overflow-y-auto font-mono text-xs">
+              {(job.log || []).map((l, i) => <div key={i}>{l}</div>)}
+            </div>
+          </div>
+        )}
+      </Card>
+      <Card>
+        <h3 className="font-semibold mb-4">Individual Steps</h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+          <Button onClick={() => runStep('/enrich', 'Enrich')} variant="secondary" icon="UserPlus">Enrich All</Button>
+          <Button onClick={() => runStep('/reenrich-missing-emails', 'Find emails')} variant="secondary" icon="Mail">Find Missing Emails</Button>
+          <Button onClick={() => runStep('/score', 'Score')} variant="secondary" icon="Star">AI Score</Button>
+          <Button onClick={() => runStep('/generate-assets', 'Assets')} variant="secondary" icon="Sparkles">Generate Copy</Button>
+        </div>
+      </Card>
+    </div>
+  );
+};
+
+const CompetitorPage = () => {
+  const [target, setTarget] = useState('');
+  const [mode, setMode] = useState('intel');
+  const [result, setResult] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const { showToast } = useToast();
+
+  const run = async () => {
+    if (!target) return;
+    setLoading(true); setResult(null);
+    try {
+      const cleanDomain = target.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+      const url = target.indexOf('http') === 0 ? target : 'https://' + cleanDomain;
+      const m = {
+        intel:     ['/competitor', { target }],
+        wayback:   ['/wayback', { url }],
+        tech:      ['/tech-stack', { domain: cleanDomain }],
+        backlinks: ['/backlinks', { url }],
+        domain:    ['/domain-intel', { domain: cleanDomain }],
+      };
+      const [ep, body] = m[mode];
+      const r = await api.post(ep, body);
+      setResult(r);
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+    setLoading(false);
+  };
+
+  return (
+    <div className="space-y-6 fade-in">
+      <div>
+        <h1 className="text-2xl font-bold">Competitor Intel</h1>
+        <p className="text-sm text-slate-500 mt-1">Analyze any competitor</p>
+      </div>
+      <Card>
+        <div className="flex gap-2 mb-4 border-b border-slate-200 dark:border-slate-800 -mx-5 px-5 overflow-x-auto scrollbar-thin">
+          {[
+            { id: 'intel', label: 'Full Intel', icon: 'Crosshair' },
+            { id: 'tech', label: 'Tech Stack', icon: 'Cpu' },
+            { id: 'domain', label: 'Domain', icon: 'Globe' },
+            { id: 'wayback', label: 'Time Machine', icon: 'History' },
+            { id: 'backlinks', label: 'Backlinks', icon: 'Link2' },
+          ].map(t => (
+            <button key={t.id} onClick={() => { setMode(t.id); setResult(null); }}
+              className={'px-3 py-2 text-sm font-medium border-b-2 -mb-px flex items-center gap-2 whitespace-nowrap ' + (
+                mode === t.id ? 'border-accent-500 text-accent-600' : 'border-transparent text-slate-500'
+              )}>
+              <Icon name={t.icon} /> {t.label}
+            </button>
+          ))}
+        </div>
+        <div className="flex gap-2">
+          <Input value={target} onChange={setTarget} placeholder="Domain or company (e.g. shopify.com)" icon="Target" className="flex-1"
+            onKeyDown={e => e.key === 'Enter' && run()} />
+          <Button onClick={run} disabled={loading}>{loading ? <Spinner /> : 'Analyze'}</Button>
+        </div>
+      </Card>
+      {result && (
+        <Card className="fade-in">
+          {mode === 'tech' && (
+            <div>
+              <h3 className="font-semibold mb-3">{result.title}</h3>
+              <p className="text-sm text-slate-600 mb-4">{result.description}</p>
+              <div className="flex flex-wrap gap-2">
+                {(result.tech_stack || []).length === 0 ? <Badge>None detected</Badge> :
+                  (result.tech_stack || []).map((t, i) => <Badge key={i} variant="purple">{t}</Badge>)}
+              </div>
+            </div>
+          )}
+          {mode === 'wayback' && (
+            <div>
+              <h3 className="font-semibold mb-3">Historical Snapshots</h3>
+              <p className="text-sm mb-3">First: <strong>{result.first_snapshot?.date}</strong></p>
+              <div className="space-y-2">
+                {(result.snapshots || []).map((s, i) => (
+                  <a key={i} href={s.snapshot_url} target="_blank" className="block p-3 bg-slate-50 dark:bg-slate-800 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700">
+                    <p className="font-medium text-sm">{s.date}</p>
+                  </a>
+                ))}
+              </div>
+            </div>
+          )}
+          {mode === 'backlinks' && (
+            <div>
+              <h3 className="font-semibold mb-3">Backlinks ({(result.backlinks || []).length})</h3>
+              <div className="space-y-2">
+                {(result.backlinks || []).map((b, i) => (
+                  <a key={i} href={b.source_url} target="_blank" className="block p-3 bg-slate-50 dark:bg-slate-800 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700">
+                    <p className="font-medium text-sm">{b.title}</p>
+                    <p className="text-xs text-accent-600 truncate">{b.source_url}</p>
+                  </a>
+                ))}
+              </div>
+            </div>
+          )}
+          {mode === 'intel' && (
+            <div className="space-y-4">
+              <div>
+                <h3 className="font-semibold mb-2">Social Presence</h3>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                  {Object.entries(result.social_presence || {}).map(([k, v]) => (
+                    <a key={k} href={v} target="_blank" className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg hover:bg-slate-100">
+                      <p className="text-xs uppercase font-medium">{k}</p>
+                      <p className="text-xs text-accent-600 truncate mt-1">View →</p>
+                    </a>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <h3 className="font-semibold mb-2">Ranking Pages</h3>
+                <div className="space-y-2">
+                  {(result.ranking_keywords || []).slice(0, 10).map((r, i) => (
+                    <a key={i} href={r.url} target="_blank" className="block p-2 bg-slate-50 dark:bg-slate-800 rounded text-xs hover:bg-slate-100">
+                      <p className="font-medium">{r.title}</p>
+                    </a>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+          {mode === 'domain' && (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-800 rounded">
+                <span className="text-sm">Title</span><span className="text-sm">{result.title || '—'}</span>
+              </div>
+              <div className="flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-800 rounded">
+                <span className="text-sm">IP</span><span className="text-sm font-mono">{result.dns?.ip || '—'}</span>
+              </div>
+              <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded">
+                <p className="text-sm font-medium mb-2">Tech</p>
+                <div className="flex flex-wrap gap-1">
+                  {(result.tech_hints || []).map((t, i) => <Badge key={i} variant="purple">{t}</Badge>)}
+                </div>
+              </div>
+            </div>
+          )}
+        </Card>
+      )}
+    </div>
+  );
+};
+
+const PeoplePage = () => {
+  const [mode, setMode] = useState('people');
+  const [vals, setVals] = useState({});
+  const [result, setResult] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const { showToast } = useToast();
+
+  const run = async () => {
+    setLoading(true); setResult(null);
+    try {
+      let r;
+      if (mode === 'people') {
+        if (!vals.company) return showToast('Company required', 'error');
+        r = await api.post('/find-people', { company_name: vals.company });
+      } else if (mode === 'emails') {
+        if (!vals.company && !vals.domain) return showToast('Company or domain required', 'error');
+        r = await api.post('/find-emails', { business_name: vals.company || '', domain: vals.domain || '', first_name: vals.firstName || '', last_name: vals.lastName || '' });
+      } else if (mode === 'verify') {
+        if (!vals.email) return showToast('Email required', 'error');
+        r = await api.post('/verify-email', { email: vals.email });
+      }
+      setResult(r);
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+    setLoading(false);
+  };
+
+  return (
+    <div className="space-y-6 fade-in">
+      <div>
+        <h1 className="text-2xl font-bold">People & Email Finder</h1>
+        <p className="text-sm text-slate-500 mt-1">Free Apollo + Hunter alternatives</p>
+      </div>
+      <Card>
+        <div className="flex gap-2 mb-4 border-b border-slate-200 dark:border-slate-800 -mx-5 px-5">
+          {[
+            { id: 'people', label: 'Find People', icon: 'UserSearch' },
+            { id: 'emails', label: 'Find Emails', icon: 'Mail' },
+            { id: 'verify', label: 'Verify Email', icon: 'CheckCircle2' },
+          ].map(t => (
+            <button key={t.id} onClick={() => { setMode(t.id); setResult(null); }}
+              className={'px-3 py-2 text-sm font-medium border-b-2 -mb-px flex items-center gap-2 ' + (
+                mode === t.id ? 'border-accent-500 text-accent-600' : 'border-transparent text-slate-500'
+              )}>
+              <Icon name={t.icon} /> {t.label}
+            </button>
+          ))}
+        </div>
+        {mode === 'people' && (
+          <div className="flex gap-2">
+            <Input value={vals.company || ''} onChange={v => setVals({...vals, company: v})}
+              placeholder="Company name (e.g. Stripe)" icon="Building2" className="flex-1"
+              onKeyDown={e => e.key === 'Enter' && run()} />
+            <Button onClick={run} disabled={loading}>{loading ? <Spinner /> : 'Find'}</Button>
+          </div>
+        )}
+        {mode === 'emails' && (
+          <div className="space-y-2">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+              <Input value={vals.company || ''} onChange={v => setVals({...vals, company: v})} placeholder="Company name" icon="Building2" />
+              <Input value={vals.domain || ''} onChange={v => setVals({...vals, domain: v})} placeholder="Domain (optional)" icon="Globe" />
+              <Input value={vals.firstName || ''} onChange={v => setVals({...vals, firstName: v})} placeholder="First name (optional)" icon="User" />
+              <Input value={vals.lastName || ''} onChange={v => setVals({...vals, lastName: v})} placeholder="Last name (optional)" icon="User" />
+            </div>
+            <Button onClick={run} disabled={loading} className="w-full">{loading ? <Spinner /> : 'Find Emails'}</Button>
+          </div>
+        )}
+        {mode === 'verify' && (
+          <div className="flex gap-2">
+            <Input value={vals.email || ''} onChange={v => setVals({...vals, email: v})}
+              placeholder="email@domain.com" icon="Mail" className="flex-1"
+              onKeyDown={e => e.key === 'Enter' && run()} />
+            <Button onClick={run} disabled={loading}>{loading ? <Spinner /> : 'Verify'}</Button>
+          </div>
+        )}
+      </Card>
+      {result && mode === 'people' && (
+        <Card className="fade-in">
+          <h3 className="font-semibold mb-3">{result.total_found} People at {result.company}</h3>
+          <div className="space-y-3">
+            {(result.people || []).map((p, i) => (
+              <div key={i} className="p-4 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                <p className="font-medium">{p.name}</p>
+                <p className="text-sm text-slate-500">{p.title}</p>
+                {p.linkedin_url && (
+                  <a href={p.linkedin_url} target="_blank" className="text-xs text-accent-600 hover:underline mt-1 block">{p.linkedin_url}</a>
+                )}
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+      {result && mode === 'emails' && (
+        <Card className="fade-in">
+          <div className="mb-4 p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+            <p className="text-xs text-slate-500">Domain</p>
+            <p className="font-mono text-sm">{result.domain}</p>
+            <p className="text-xs mt-2">MX: {result.mx_valid ? '✓' : '✗'}</p>
+          </div>
+          {(result.verified_emails || []).length > 0 && (
+            <div className="mb-4">
+              <h4 className="font-semibold text-sm mb-2 text-green-600">✓ Verified Emails</h4>
+              <div className="space-y-2">
+                {result.verified_emails.map((e, i) => (
+                  <div key={i} className="p-3 bg-green-50 dark:bg-green-900/20 rounded">
+                    <p className="font-mono text-sm">{e.email}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {(result.pattern_guesses || []).length > 0 && (
+            <div>
+              <h4 className="font-semibold text-sm mb-2">Pattern Guesses</h4>
+              <div className="space-y-1">
+                {result.pattern_guesses.map((p, i) => (
+                  <div key={i} className="flex items-center justify-between p-2 bg-slate-50 dark:bg-slate-800 rounded text-sm">
+                    <span className="font-mono">{p.email}</span>
+                    <Badge variant={p.confidence >= 80 ? 'success' : 'info'}>{p.confidence}%</Badge>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </Card>
+      )}
+      {result && mode === 'verify' && (
+        <Card className="fade-in">
+          <h3 className="font-semibold mb-3">{result.email}</h3>
+          <div className="space-y-2">
+            <div className="flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-800 rounded">
+              <span className="text-sm">Syntax Valid</span>
+              <Badge variant={result.syntax_valid ? 'success' : 'danger'}>{result.syntax_valid ? '✓' : '✗'}</Badge>
+            </div>
+            <div className="flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-800 rounded">
+              <span className="text-sm">MX Records</span>
+              <Badge variant={result.has_mx ? 'success' : 'warning'}>{result.has_mx ? '✓' : '✗'}</Badge>
+            </div>
+            <div className="flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-800 rounded">
+              <span className="text-sm">Risk</span>
+              <Badge variant={result.risk_level === 'low' ? 'success' : 'warning'}>{result.risk_level}</Badge>
+            </div>
+          </div>
+        </Card>
+      )}
+    </div>
+  );
+};
+
+const SocialPage = () => {
+  const [niche, setNiche] = useState('');
+  const [location, setLocation] = useState('');
+  const [result, setResult] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const { showToast } = useToast();
+
+  const run = async () => {
+    if (!niche) return showToast('Niche required', 'error');
+    setLoading(true); setResult(null);
+    try {
+      const r = await api.post('/social-scout', { niche, location });
+      setResult(r);
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+    setLoading(false);
+  };
+
+  const icons = { instagram: '📷', tiktok: '🎵', youtube: '📺', twitter: '🐦', linkedin: '💼', facebook: '👥' };
+
+  return (
+    <div className="space-y-6 fade-in">
+      <div>
+        <h1 className="text-2xl font-bold">Social Media Scout</h1>
+        <p className="text-sm text-slate-500 mt-1">Find top accounts in any niche</p>
+      </div>
+      <Card>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+          <Input value={niche} onChange={setNiche} placeholder="Niche (fitness, fashion, etc)" icon="Tag" onKeyDown={e => e.key === 'Enter' && run()} />
+          <Input value={location} onChange={setLocation} placeholder="Location (optional)" icon="MapPin" onKeyDown={e => e.key === 'Enter' && run()} />
+          <Button onClick={run} disabled={loading}>{loading ? <Spinner /> : 'Find Accounts'}</Button>
+        </div>
+      </Card>
+      {result && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 fade-in">
+          {Object.entries(result.profiles || {}).map(([platform, profiles]) => (
+            <Card key={platform}>
+              <h3 className="font-semibold mb-3 capitalize flex items-center gap-2">
+                <span className="text-2xl">{icons[platform] || '🌐'}</span>
+                {platform}
+                <Badge variant="info">{profiles.length}</Badge>
+              </h3>
+              <div className="space-y-2">
+                {profiles.map((p, i) => (
+                  <a key={i} href={p.url} target="_blank" className="block p-3 bg-slate-50 dark:bg-slate-800 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700">
+                    <p className="text-sm font-medium truncate">{p.title}</p>
+                    <p className="text-xs text-accent-600 truncate">{p.url}</p>
+                  </a>
+                ))}
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const EcommercePage = () => {
+  const [query, setQuery] = useState('');
+  const [platform, setPlatform] = useState('amazon');
+  const [result, setResult] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  const run = async () => {
+    if (!query) return;
+    setLoading(true); setResult(null);
+    try {
+      const r = await api.post('/ecommerce', { query, platform });
+      setResult(r);
+    } catch (e) {}
+    setLoading(false);
+  };
+
+  return (
+    <div className="space-y-6 fade-in">
+      <div>
+        <h1 className="text-2xl font-bold">E-commerce Research</h1>
+        <p className="text-sm text-slate-500 mt-1">Product trends, pricing, competition</p>
+      </div>
+      <Card>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+          <Input value={query} onChange={setQuery} placeholder="Product or niche" icon="ShoppingBag" onKeyDown={e => e.key === 'Enter' && run()} />
+          <select value={platform} onChange={e => setPlatform(e.target.value)}
+            className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-2.5 text-sm">
+            <option value="amazon">Amazon</option>
+            <option value="ebay">eBay</option>
+          </select>
+          <Button onClick={run} disabled={loading}>{loading ? <Spinner /> : 'Research'}</Button>
+        </div>
+      </Card>
+      {result && (
+        <Card className="fade-in">
+          {result.price_range && Object.keys(result.price_range).length > 0 && (
+            <div className="grid grid-cols-3 gap-3 mb-4">
+              <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                <p className="text-xs text-slate-500">Min</p>
+                <p className="font-bold">${result.price_range.min}</p>
+              </div>
+              <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                <p className="text-xs text-slate-500">Avg</p>
+                <p className="font-bold">${result.price_range.avg?.toFixed(2)}</p>
+              </div>
+              <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                <p className="text-xs text-slate-500">Max</p>
+                <p className="font-bold">${result.price_range.max}</p>
+              </div>
+            </div>
+          )}
+          <div className="space-y-2">
+            {(result.top_listings || []).map((l, i) => (
+              <a key={i} href={l.url} target="_blank" className="block p-3 bg-slate-50 dark:bg-slate-800 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700">
+                <p className="font-medium text-sm">{l.title}</p>
+                <p className="text-xs text-accent-600 truncate">{l.url}</p>
+              </a>
+            ))}
+          </div>
+        </Card>
+      )}
+    </div>
+  );
+};
+
+
+// ─────────────────────────────────────────────────
+//  API Key Editor Component
+// ─────────────────────────────────────────────────
+const ApiKeyEditor = () => {
+  const [keys, setKeys] = useState({});
+  const [editing, setEditing] = useState({});
+  const [values, setValues] = useState({});
+  const { showToast } = useToast();
+
+  useEffect(() => { api.get('/api-keys').then(setKeys).catch(() => {}); }, []);
+
+  const startEdit = (k) => { setEditing({...editing, [k]: true}); setValues({...values, [k]: ''}); };
+  const cancelEdit = (k) => { setEditing({...editing, [k]: false}); setValues({...values, [k]: ''}); };
+
+  const save = async (k) => {
+    if (!values[k]) { showToast('Enter a value first', 'error'); return; }
+    try {
+      const r = await api.post('/api-keys/update', { key: k, value: values[k] });
+      if (r.success) {
+        showToast('Updated ' + k);
+        setEditing({...editing, [k]: false});
+        // Refresh
+        api.get('/api-keys').then(setKeys).catch(() => {});
+      } else {
+        showToast('Failed', 'error');
+      }
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+  };
+
+  const labels = {
+    google_api_key:  'Google Places API',
+    serper_key:      'Serper.dev',
+    gemini_key:      'Google Gemini',
+    claude_key:      'Anthropic Claude',
+    replicate_token: 'Replicate (FLUX images)',
+    imagine_art_key: 'imagine.art',
+    oxylabs_key:     'Oxylabs AI Studio',
+    resend_key:      'Resend.com (email)',
+    from_email:      'From Email',
+    from_name:       'From Name',
+  };
+
+  return (
+    <div className="space-y-2">
+      {Object.entries(labels).map(([key, label]) => {
+        const k = keys[key] || { set: false, preview: '' };
+        const isEditing = editing[key];
+        return (
+          <div key={key} className="flex items-center gap-2 p-2 bg-slate-50 dark:bg-slate-800 rounded-lg">
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-medium">{label}</p>
+              {isEditing ? (
+                <Input value={values[key] || ''} onChange={v => setValues({...values, [key]: v})}
+                  placeholder={'Enter new ' + label} className="mt-1" type="password" />
+              ) : (
+                <p className="text-xs font-mono text-slate-500 truncate mt-0.5">
+                  {k.set ? k.preview : <span className="text-orange-500">Not set</span>}
+                </p>
+              )}
+            </div>
+            {isEditing ? (
+              <div className="flex gap-1">
+                <Button size="sm" variant="success" onClick={() => save(key)} icon="Check">Save</Button>
+                <Button size="sm" variant="ghost" onClick={() => cancelEdit(key)} icon="X">Cancel</Button>
+              </div>
+            ) : (
+              <Button size="sm" variant="secondary" onClick={() => startEdit(key)} icon="Edit3">
+                {k.set ? 'Change' : 'Set'}
+              </Button>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
+const IntentPage = () => {
+  const [query, setQuery] = useState('');
+  const [direction, setDirection] = useState('demand');
+  const [location, setLocation] = useState('');
+  const [recency, setRecency] = useState(30);
+  const [running, setRunning] = useState(false);
+  const [results, setResults] = useState([]);
+  const [status, setStatus] = useState('');
+  const [savedLeads, setSavedLeads] = useState([]);
+  const [stats, setStats] = useState(null);
+  const { showToast } = useToast();
+
+  const loadSaved = () => {
+    api.get('/intent-leads?direction=' + direction + '&limit=200')
+      .then(d => setSavedLeads(d.leads || []))
+      .catch(() => {});
+    api.get('/intent-stats').then(setStats).catch(() => {});
+  };
+
+  useEffect(() => { loadSaved(); }, [direction]);
+
+  const runSearch = async () => {
+    if (!query.trim()) { showToast('Enter a query', 'error'); return; }
+    setRunning(true); setResults([]); setStatus('');
+    try {
+      const r = await api.post('/intent-search', {
+        query, direction, location, recency_days: parseInt(recency),
+        min_confidence: 55, per_source_limit: 3, max_results: 30
+      });
+      setResults(r.results || []);
+      setStatus(r.status || '');
+      showToast(r.message || 'Done', r.total > 0 ? 'success' : 'info');
+      loadSaved();
+    } catch (e) {
+      showToast('Search failed: ' + e.message, 'error');
+    } finally { setRunning(false); }
+  };
+
+  const demandSamples = ['python developer', 'logo designer', 'marketing agency', 'shopify developer'];
+  const supplySamples = ['python developer', 'logo designer', 'video editor', 'react developer'];
+  const samples = direction === 'demand' ? demandSamples : supplySamples;
+
+  const renderRow = (r, i) => (
+    <tr key={r.lead_id || r.url || i} className="border-b border-slate-100 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50">
+      <td className="py-3 px-3">
+        <div className="font-medium truncate" title={r.name}>{r.name || '—'}</div>
+        <div className="text-xs text-slate-500 mt-0.5">{r.role_or_service || '—'}</div>
+      </td>
+      <td className="py-3 px-3 text-xs">
+        <Badge variant="info">{r.source_label || r.source}</Badge>
+      </td>
+      <td className="py-3 px-3 text-xs text-slate-500">{r.location_hint || '—'}</td>
+      <td className="py-3 px-3 text-xs">
+        {r.contact_hint ? (
+          <a href={r.contact_hint.includes('@') ? 'mailto:' + r.contact_hint : r.contact_hint}
+             target="_blank" className="text-accent-600 hover:underline">{r.contact_hint}</a>
+        ) : <span className="text-slate-400">—</span>}
+      </td>
+      <td className="py-3 px-3 text-center">
+        <Badge variant={r.confidence >= 80 ? 'success' : r.confidence >= 60 ? 'info' : 'default'}>
+          {r.confidence}%
+        </Badge>
+      </td>
+      <td className="py-3 px-3 text-center">
+        <a href={r.url || r.source_url} target="_blank" rel="noopener"
+           className="inline-flex items-center justify-center w-8 h-8 rounded bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
+           title="Open source">
+          <Icon name="ExternalLink" className="w-4 h-4" />
+        </a>
+      </td>
+    </tr>
+  );
+
+  return (
+    <div className="space-y-6 fade-in w-full">
+      <div className="flex items-center justify-between gap-4 flex-wrap">
+        <div>
+          <h1 className="text-2xl font-bold">Intent Search</h1>
+          <p className="text-sm text-slate-500 mt-1">Find buyers (who needs it) and providers (who offers it) — same query, opposite directions</p>
+        </div>
+        {stats && (
+          <div className="flex gap-2 text-xs">
+            <Badge variant="info">demand: {stats.by_direction?.demand || 0}</Badge>
+            <Badge variant="purple">supply: {stats.by_direction?.supply || 0}</Badge>
+          </div>
+        )}
+      </div>
+
+      <Card>
+        <div className="space-y-4">
+          <div className="flex gap-2 p-1 bg-slate-100 dark:bg-slate-800 rounded-lg inline-flex">
+            <button onClick={() => setDirection('demand')}
+              className={'px-4 py-2 rounded-md text-sm font-semibold transition-colors ' +
+                (direction === 'demand' ? 'bg-white dark:bg-slate-900 shadow text-accent-600' : 'text-slate-600 dark:text-slate-400')}>
+              <Icon name="Users" className="inline w-4 h-4 mr-1" /> I need this (find buyers)
+            </button>
+            <button onClick={() => setDirection('supply')}
+              className={'px-4 py-2 rounded-md text-sm font-semibold transition-colors ' +
+                (direction === 'supply' ? 'bg-white dark:bg-slate-900 shadow text-accent-600' : 'text-slate-600 dark:text-slate-400')}>
+              <Icon name="Target" className="inline w-4 h-4 mr-1" /> I provide this (find providers)
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-2">
+            <div className="md:col-span-6">
+              <Input value={query} onChange={setQuery}
+                placeholder={direction === 'demand' ? 'e.g. python developer, logo designer, marketing agency' : 'e.g. python developer, designer'}
+                icon="Search" onKeyDown={e => e.key === 'Enter' && runSearch()} />
+            </div>
+            <div className="md:col-span-3">
+              <Input value={location} onChange={setLocation}
+                placeholder="Location (optional)" icon="MapPin"
+                onKeyDown={e => e.key === 'Enter' && runSearch()} />
+            </div>
+            <div className="md:col-span-2">
+              <select value={recency} onChange={e => setRecency(e.target.value)}
+                className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm">
+                <option value="1">Past day</option>
+                <option value="7">Past week</option>
+                <option value="30">Past month</option>
+                <option value="365">Past year</option>
+              </select>
+            </div>
+            <div className="md:col-span-1">
+              <Button onClick={runSearch} disabled={running} className="w-full">
+                {running ? <Spinner /> : <Icon name="Search" className="w-4 h-4" />}
+              </Button>
+            </div>
+          </div>
+
+          <div className="flex gap-2 flex-wrap items-center text-xs text-slate-500">
+            <span>Try:</span>
+            {samples.map(s => (
+              <button key={s} onClick={() => setQuery(s)}
+                className="px-2 py-1 rounded bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300">
+                {s}
+              </button>
+            ))}
+          </div>
+        </div>
+      </Card>
+
+      {results.length > 0 && (
+        <Card noPad>
+          <div className="p-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between flex-wrap gap-2">
+            <div>
+              <h3 className="font-semibold">Fresh results</h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                {results.length} qualified hits {status === 'cache_hit' ? '(from 12h cache)' : '(saved to leads)'}
+              </p>
+            </div>
+          </div>
+          <div className="overflow-x-auto scrollbar-thin">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 dark:bg-slate-800/50">
+                <tr className="border-b border-slate-200 dark:border-slate-800">
+                  <th className="py-3 px-3 text-left font-semibold text-xs uppercase tracking-wide text-slate-500">Name / Role</th>
+                  <th className="py-3 px-3 text-left font-semibold text-xs uppercase tracking-wide text-slate-500">Source</th>
+                  <th className="py-3 px-3 text-left font-semibold text-xs uppercase tracking-wide text-slate-500">Location</th>
+                  <th className="py-3 px-3 text-left font-semibold text-xs uppercase tracking-wide text-slate-500">Contact</th>
+                  <th className="py-3 px-3 text-center font-semibold text-xs uppercase tracking-wide text-slate-500">Confidence</th>
+                  <th className="py-3 px-3 text-center font-semibold text-xs uppercase tracking-wide text-slate-500">Link</th>
+                </tr>
+              </thead>
+              <tbody>{results.map(renderRow)}</tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
+      <Card noPad>
+        <div className="p-4 border-b border-slate-200 dark:border-slate-800">
+          <h3 className="font-semibold">Saved {direction} leads</h3>
+          <p className="text-xs text-slate-500 mt-0.5">{savedLeads.length} stored — sorted by confidence</p>
+        </div>
+        {savedLeads.length === 0 ? (
+          <div className="py-12 text-center text-slate-500">
+            <Icon name="Search" className="w-12 h-12 mx-auto mb-3 opacity-30" />
+            <p>No {direction} leads yet. Run a search above to start.</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto scrollbar-thin">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 dark:bg-slate-800/50">
+                <tr className="border-b border-slate-200 dark:border-slate-800">
+                  <th className="py-3 px-3 text-left font-semibold text-xs uppercase tracking-wide text-slate-500">Name / Role</th>
+                  <th className="py-3 px-3 text-left font-semibold text-xs uppercase tracking-wide text-slate-500">Source</th>
+                  <th className="py-3 px-3 text-left font-semibold text-xs uppercase tracking-wide text-slate-500">Location</th>
+                  <th className="py-3 px-3 text-left font-semibold text-xs uppercase tracking-wide text-slate-500">Contact</th>
+                  <th className="py-3 px-3 text-center font-semibold text-xs uppercase tracking-wide text-slate-500">Confidence</th>
+                  <th className="py-3 px-3 text-center font-semibold text-xs uppercase tracking-wide text-slate-500">Link</th>
+                </tr>
+              </thead>
+              <tbody>{savedLeads.map(renderRow)}</tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+};
+
+const SettingsPage = () => {
+  const [config, setConfig] = useState(null);
+  const { showToast } = useToast();
+
+  useEffect(() => { api.get('/config').then(setConfig).catch(() => {}); }, []);
+
+  const update = async (key, val) => {
+    const newConfig = { ...config, [key]: val };
+    setConfig(newConfig);
+    try { await api.post('/config', { [key]: val }); showToast('Updated'); }
+    catch (e) { showToast('Failed', 'error'); }
+  };
+
+  if (!config) return <div className="text-center py-12"><Spinner size="w-6 h-6" /></div>;
+
+  return (
+    <div className="space-y-6 fade-in max-w-2xl">
+      <div>
+        <h1 className="text-2xl font-bold">Settings</h1>
+        <p className="text-sm text-slate-500 mt-1">Configure providers and behavior</p>
+      </div>
+      <Card>
+        <h3 className="font-semibold mb-3 flex items-center gap-2"><Icon name="Database" /> Enrichment</h3>
+        <div className="space-y-3">
+          <div>
+            <label className="text-sm font-medium block mb-2">Primary Provider</label>
+            <select value={config.enrichment_primary} onChange={e => update('enrichment_primary', e.target.value)}
+              className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-2 text-sm">
+              <option value="serper">Serper.dev (Default)</option>
+              <option value="oxylabs">Oxylabs AI Studio</option>
+            </select>
+          </div>
+          <div>
+            <label className="text-sm font-medium block mb-2">Fallback</label>
+            <select value={config.enrichment_fallback} onChange={e => update('enrichment_fallback', e.target.value)}
+              className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-2 text-sm">
+              <option value="oxylabs">Oxylabs (if no email)</option>
+              <option value="none">None</option>
+            </select>
+          </div>
+        </div>
+      </Card>
+      <Card>
+        <h3 className="font-semibold mb-3 flex items-center gap-2"><Icon name="Image" /> Image Generation</h3>
+        <div>
+          <label className="text-sm font-medium block mb-2">Provider</label>
+          <select value={config.image_provider} onChange={e => update('image_provider', e.target.value)}
+            className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-2 text-sm">
+            <option value="none">None (OFF)</option>
+            <option value="replicate">Replicate FLUX</option>
+            <option value="imagine_art">imagine.art</option>
+          </select>
+          <p className="text-xs text-slate-500 mt-2">Mockups cost money. Keep OFF unless needed.</p>
+        </div>
+      </Card>
+      <Card>
+        <h3 className="font-semibold mb-3 flex items-center gap-2"><Icon name="Lock" /> API Keys</h3>
+        <ApiKeyEditor />
+      </Card>
+
+      <Card>
+        <h3 className="font-semibold mb-3 flex items-center gap-2"><Icon name="ToggleRight" /> Automation</h3>
+        <div className="space-y-2">
+          {[
+            { key: 'auto_score', label: 'Auto-score with Gemini' },
+            { key: 'auto_email_copy', label: 'Auto-generate email copy' },
+            { key: 'auto_image', label: 'Auto-generate mockup images' },
+          ].map(opt => (
+            <label key={opt.key} className="flex items-start gap-3 p-3 bg-slate-50 dark:bg-slate-800 rounded-lg cursor-pointer">
+              <input type="checkbox" checked={!!config[opt.key]} onChange={e => update(opt.key, e.target.checked)} className="mt-1 w-4 h-4" />
+              <div className="font-medium text-sm">{opt.label}</div>
+            </label>
+          ))}
+        </div>
+      </Card>
+    </div>
+  );
+};
+
+
+
+// ─────────────────────────────────────────────────
+//  Lead Detail Modal
+// ─────────────────────────────────────────────────
+const LeadDetailModal = ({ leadId, onClose, onUpdate }) => {
+  const [lead, setLead] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [sending, setSending] = useState(false);
+  const [editingEmail, setEditingEmail] = useState(false);
+  const [editedSubject, setEditedSubject] = useState('');
+  const [editedBody, setEditedBody] = useState('');
+  const { showToast } = useToast();
+
+  useEffect(() => {
+    if (!leadId) return;
+    setLoading(true);
+    api.get('/lead/' + leadId).then(d => {
+      setLead(d);
+      setEditedSubject(d.email_subject || '');
+      setEditedBody(d.email_body || '');
+      setLoading(false);
+    }).catch(e => { showToast('Failed to load: ' + e.message, 'error'); setLoading(false); });
+  }, [leadId]);
+
+  const sendEmail = async () => {
+    if (!confirm('Send this email to ' + lead.owner_email + '?')) return;
+    setSending(true);
+    try {
+      const r = await api.post('/lead/' + leadId + '/send', {});
+      if (r.success) {
+        showToast('Email sent successfully!');
+        if (onUpdate) onUpdate();
+        onClose();
+      } else {
+        showToast('Failed: ' + (r.error || 'Unknown error'), 'error');
+      }
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+    setSending(false);
+  };
+
+  const approve = async () => {
+    try { await api.post('/lead/' + leadId + '/approve', {}); showToast('Approved'); if (onUpdate) onUpdate(); }
+    catch (e) { showToast('Failed', 'error'); }
+  };
+  const reject = async () => {
+    if (!confirm('Reject this lead?')) return;
+    try { await api.post('/lead/' + leadId + '/reject', {}); showToast('Rejected'); if (onUpdate) onUpdate(); onClose(); }
+    catch (e) { showToast('Failed', 'error'); }
+  };
+  const regenerate = async () => {
+    try {
+      const r = await api.post('/lead/' + leadId + '/regenerate-email', {});
+      if (r.success) {
+        setEditedSubject(r.subject);
+        setEditedBody(r.body);
+        showToast('Email regenerated');
+      }
+    } catch (e) { showToast('Failed', 'error'); }
+  };
+
+  if (!leadId) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white dark:bg-slate-900 rounded-xl shadow-2xl max-w-3xl w-full max-h-[90vh] overflow-y-auto scrollbar-thin" onClick={e => e.stopPropagation()}>
+        {loading ? (
+          <div className="p-12 text-center"><Spinner size="w-8 h-8" /></div>
+        ) : !lead ? (
+          <div className="p-12 text-center text-slate-500">Lead not found</div>
+        ) : (
+          <>
+            <div className="sticky top-0 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 p-5 flex items-center justify-between">
+              <div className="min-w-0 flex-1">
+                <h2 className="text-lg font-bold truncate">{lead.business_name}</h2>
+                <p className="text-xs text-slate-500">{lead.niche} • {lead.city}, {lead.country} • Status: <Badge variant="info">{lead.status}</Badge></p>
+              </div>
+              <button onClick={onClose} className="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg">
+                <Icon name="X" className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-5 space-y-4">
+              {/* Contact info */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                  <p className="text-xs text-slate-500">Phone</p>
+                  <p className="font-mono text-sm text-cyan-600">{lead.phone || '—'}</p>
+                </div>
+                <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                  <p className="text-xs text-slate-500">Email</p>
+                  <p className="font-mono text-sm text-cyan-600 truncate">{lead.owner_email || '—'}</p>
+                </div>
+                <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                  <p className="text-xs text-slate-500">Owner</p>
+                  <p className="text-sm">{lead.owner_name || '—'}</p>
+                </div>
+                <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                  <p className="text-xs text-slate-500">AI Score</p>
+                  <p className="text-sm font-bold">{lead.ai_score ? lead.ai_score + '/10' : '—'}</p>
+                </div>
+              </div>
+              {lead.address && (
+                <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                  <p className="text-xs text-slate-500">Address</p>
+                  <p className="text-sm">{lead.address}</p>
+                </div>
+              )}
+              {lead.linkedin_url && (
+                <a href={lead.linkedin_url} target="_blank" className="block p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg hover:bg-blue-100">
+                  <p className="text-xs text-slate-500">LinkedIn</p>
+                  <p className="text-sm text-blue-600">{lead.linkedin_url}</p>
+                </a>
+              )}
+
+              {/* Mockup */}
+              {lead.mockup_url && (
+                <div>
+                  <p className="text-xs text-slate-500 mb-2 uppercase font-medium">Website Mockup</p>
+                  <img src={lead.mockup_url} alt="Mockup" className="w-full rounded-lg border border-slate-200 dark:border-slate-800" />
+                </div>
+              )}
+
+              {/* Email preview / editor */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <p className="text-xs text-slate-500 uppercase font-medium">Email Preview</p>
+                  <div className="flex gap-2">
+                    <Button size="sm" variant="ghost" onClick={() => setEditingEmail(!editingEmail)} icon="Edit3">
+                      {editingEmail ? 'Done' : 'Edit'}
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={regenerate} icon="RotateCw">Regenerate</Button>
+                  </div>
+                </div>
+                {editingEmail ? (
+                  <div className="space-y-2">
+                    <Input value={editedSubject} onChange={setEditedSubject} placeholder="Subject" />
+                    <textarea value={editedBody} onChange={e => setEditedBody(e.target.value)}
+                      className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-3 text-sm font-mono min-h-[200px]" />
+                  </div>
+                ) : (
+                  <div className="bg-slate-50 dark:bg-slate-800 rounded-lg p-4 border border-slate-200 dark:border-slate-700">
+                    <p className="font-semibold text-sm mb-2">{editedSubject || lead.email_subject || '(no subject)'}</p>
+                    <div className="text-sm whitespace-pre-wrap">{editedBody || lead.email_body || '(no body)'}</div>
+                  </div>
+                )}
+              </div>
+
+              {/* Actions */}
+              <div className="flex gap-2 sticky bottom-0 bg-white dark:bg-slate-900 pt-3 border-t border-slate-200 dark:border-slate-800">
+                <Button onClick={sendEmail} variant="success" icon="Send" disabled={sending || !lead.owner_email || lead.status === 'sent'}>
+                  {sending ? <Spinner /> : lead.status === 'sent' ? 'Already Sent' : 'Send Email'}
+                </Button>
+                <Button onClick={approve} variant="primary" icon="Check">Approve</Button>
+                <Button onClick={reject} variant="danger" icon="XCircle">Reject</Button>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────
+//  Outreach Page - Ready-to-send queue
+// ─────────────────────────────────────────────────
+const OutreachPage = () => {
+  const [leads, setLeads] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [selectedLead, setSelectedLead] = useState(null);
+  const [outreachLog, setOutreachLog] = useState([]);
+  const [view, setView] = useState('ready');
+
+  const refresh = () => {
+    setLoading(true);
+    Promise.all([
+      api.get('/leads').catch(() => ({ leads: [] })),
+      api.get('/outreach').catch(() => ({ log: [] }))
+    ]).then(([l, o]) => {
+      setLeads(l.leads || []);
+      setOutreachLog(o.log || []);
+      setLoading(false);
+    });
+  };
+  useEffect(refresh, []);
+
+  const readyLeads = leads.filter(l => l.status === 'ready' && l.owner_email);
+  const approvedLeads = leads.filter(l => l.status === 'approved');
+  const sentCount = outreachLog.length;
+
+  let displayed = readyLeads;
+  if (view === 'approved') displayed = approvedLeads;
+  else if (view === 'sent') displayed = outreachLog;
+
+  return (
+    <div className="space-y-6 fade-in">
+      <div>
+        <h1 className="text-2xl font-bold">Outreach</h1>
+        <p className="text-sm text-slate-500 mt-1">Review and send personalized emails</p>
+      </div>
+
+      <div className="grid grid-cols-3 gap-3">
+        <button onClick={() => setView('ready')}
+          className={'p-4 rounded-xl border-2 text-left transition-colors ' + (
+            view === 'ready' ? 'border-accent-500 bg-accent-50 dark:bg-accent-900/20' : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900'
+          )}>
+          <div className="flex items-center gap-2">
+            <Icon name="Inbox" className="w-5 h-5 text-accent-600" />
+            <span className="text-sm font-medium">Ready</span>
+          </div>
+          <p className="text-2xl font-bold mt-1">{readyLeads.length}</p>
+        </button>
+        <button onClick={() => setView('approved')}
+          className={'p-4 rounded-xl border-2 text-left ' + (
+            view === 'approved' ? 'border-green-500 bg-green-50 dark:bg-green-900/20' : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900'
+          )}>
+          <div className="flex items-center gap-2">
+            <Icon name="Check" className="w-5 h-5 text-green-600" />
+            <span className="text-sm font-medium">Approved</span>
+          </div>
+          <p className="text-2xl font-bold mt-1">{approvedLeads.length}</p>
+        </button>
+        <button onClick={() => setView('sent')}
+          className={'p-4 rounded-xl border-2 text-left ' + (
+            view === 'sent' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900'
+          )}>
+          <div className="flex items-center gap-2">
+            <Icon name="Send" className="w-5 h-5 text-purple-600" />
+            <span className="text-sm font-medium">Sent</span>
+          </div>
+          <p className="text-2xl font-bold mt-1">{sentCount}</p>
+        </button>
+      </div>
+
+      {loading ? (
+        <Card><div className="py-12 text-center"><Spinner size="w-6 h-6" /></div></Card>
+      ) : view === 'sent' ? (
+        <Card>
+          <h3 className="font-semibold mb-3">Sent Emails</h3>
+          {outreachLog.length === 0 ? (
+            <p className="text-sm text-slate-500 py-8 text-center">No emails sent yet</p>
+          ) : (
+            <div className="space-y-2">
+              {outreachLog.map((o, i) => (
+                <div key={i} className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                  <div className="flex items-center justify-between">
+                    <div className="min-w-0 flex-1">
+                      <p className="font-medium text-sm">{o.business_name}</p>
+                      <p className="text-xs text-slate-500 truncate">{o.email_subject}</p>
+                      <p className="text-xs font-mono text-cyan-600 truncate">{o.email_to}</p>
+                    </div>
+                    <div className="ml-2 text-right text-xs">
+                      <Badge variant={o.status === 'sent' ? 'success' : 'info'}>{o.status}</Badge>
+                      <p className="text-slate-500 mt-1">{o.sent_at ? new Date(o.sent_at).toLocaleString() : ''}</p>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+      ) : (
+        <div className="space-y-3">
+          {displayed.length === 0 ? (
+            <Card>
+              <div className="py-12 text-center text-slate-500">
+                <p>No leads {view === 'ready' ? 'ready for review' : 'approved'} yet</p>
+                <p className="text-xs mt-2">Go to <strong>Pipeline</strong> page and run enrichment first</p>
+              </div>
+            </Card>
+          ) : displayed.map((l, i) => (
+            <Card key={i} className="hover:border-accent-300 transition-colors cursor-pointer" >
+              <div onClick={() => setSelectedLead(l.id || l.business_name)} className="cursor-pointer">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 mb-2">
+                      <h3 className="font-semibold">{l.business_name}</h3>
+                      {l.ai_score && <Badge variant={parseInt(l.ai_score) >= 8 ? 'success' : 'info'}>{l.ai_score}/10</Badge>}
+                      <Badge variant="info">{l.city}</Badge>
+                    </div>
+                    <p className="text-sm text-slate-600 dark:text-slate-400">
+                      <strong>To:</strong> {l.owner_email}
+                    </p>
+                    {l.email_subject && (
+                      <p className="text-sm font-medium mt-2">{l.email_subject}</p>
+                    )}
+                    {l.email_body && (
+                      <p className="text-xs text-slate-500 mt-1 line-clamp-2">{l.email_body.substring(0, 200)}...</p>
+                    )}
+                  </div>
+                  {l.mockup_url && (
+                    <img src={l.mockup_url} alt="Mockup" className="w-24 h-16 object-cover rounded border border-slate-200 dark:border-slate-800" />
+                  )}
+                </div>
+                <div className="mt-3 flex justify-end">
+                  <Button size="sm" variant="ghost" icon="ExternalLink">Open</Button>
+                </div>
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
+
+      {selectedLead && (
+        <LeadDetailModal leadId={selectedLead} onClose={() => setSelectedLead(null)} onUpdate={refresh} />
+      )}
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────
+//  Analytics / Charts Page
+// ─────────────────────────────────────────────────
+const SimpleBarChart = ({ data, label = 'count', max }) => {
+  const maxVal = max || Math.max(...data.map(d => d[label]), 1);
+  return (
+    <div className="space-y-2">
+      {data.map((d, i) => (
+        <div key={i} className="flex items-center gap-2">
+          <div className="text-xs w-32 truncate text-slate-600 dark:text-slate-400">{d.niche || d.city || d.status || d.bucket || d.date}</div>
+          <div className="flex-1 h-6 bg-slate-100 dark:bg-slate-800 rounded overflow-hidden relative">
+            <div className="h-full bg-gradient-to-r from-accent-500 to-purple-500 rounded transition-all"
+              style={{ width: ((d[label] / maxVal) * 100) + '%' }} />
+            <span className="absolute right-2 top-1/2 -translate-y-1/2 text-xs font-medium">{d[label]}</span>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+};
+
+const AnalyticsPage = () => {
+  const [charts, setCharts] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    api.get('/stats-chart').then(d => { setCharts(d); setLoading(false); }).catch(() => setLoading(false));
+  }, []);
+
+  if (loading) return <div className="text-center py-12"><Spinner size="w-6 h-6" /></div>;
+  if (!charts) return <div>Failed to load</div>;
+
+  return (
+    <div className="space-y-6 fade-in">
+      <div>
+        <h1 className="text-2xl font-bold">Analytics</h1>
+        <p className="text-sm text-slate-500 mt-1">Visualize pipeline performance</p>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <Card>
+          <h3 className="font-semibold mb-4 flex items-center gap-2"><Icon name="Activity" /> Leads Per Day (14 days)</h3>
+          {charts.leads_per_day.length === 0 ? (
+            <p className="text-sm text-slate-500 py-8 text-center">No data yet</p>
+          ) : (
+            <SimpleBarChart data={charts.leads_per_day} />
+          )}
+        </Card>
+
+        <Card>
+          <h3 className="font-semibold mb-4 flex items-center gap-2"><Icon name="PieChart" /> Status Breakdown</h3>
+          <SimpleBarChart data={charts.status_breakdown} />
+        </Card>
+
+        <Card>
+          <h3 className="font-semibold mb-4 flex items-center gap-2"><Icon name="Tag" /> Top Niches</h3>
+          <SimpleBarChart data={charts.niche_breakdown} />
+        </Card>
+
+        <Card>
+          <h3 className="font-semibold mb-4 flex items-center gap-2"><Icon name="MapPin" /> Top Cities</h3>
+          <SimpleBarChart data={charts.city_breakdown} />
+        </Card>
+
+        <Card className="lg:col-span-2">
+          <h3 className="font-semibold mb-4 flex items-center gap-2"><Icon name="Star" /> AI Score Distribution</h3>
+          <SimpleBarChart data={charts.score_distribution} />
+        </Card>
+      </div>
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────
+//  Auth: Login Screen
+// ─────────────────────────────────────────────────
+const LoginScreen = ({ onLogin }) => {
+  const [username, setUsername] = useState('admin');
+  const [password, setPassword] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const submit = async () => {
+    setLoading(true); setError('');
+    try {
+      const r = await api.post('/auth/login', { username, password });
+      if (r.success) {
+        localStorage.setItem('auth_token', r.token);
+        onLogin(r.token);
+      } else {
+        setError(r.error || 'Invalid credentials');
+      }
+    } catch (e) { setError('Login failed: ' + e.message); }
+    setLoading(false);
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center p-4 bg-gradient-to-br from-slate-50 to-blue-50 dark:from-slate-950 dark:to-slate-900">
+      <Card className="w-full max-w-md">
+        <div className="text-center mb-6">
+          <div className="w-16 h-16 mx-auto bg-gradient-to-br from-accent-500 to-purple-600 rounded-2xl flex items-center justify-center text-white font-bold text-2xl shadow-xl pulse-glow">C</div>
+          <h1 className="text-xl font-bold mt-4">Controva Intelligence</h1>
+          <p className="text-sm text-slate-500 mt-1">Sign in to continue</p>
+        </div>
+        <div className="space-y-3">
+          <div>
+            <label className="text-xs font-medium text-slate-500 mb-1 block">Username</label>
+            <Input value={username} onChange={setUsername} icon="User" />
+          </div>
+          <div>
+            <label className="text-xs font-medium text-slate-500 mb-1 block">Password</label>
+            <Input value={password} onChange={setPassword} type="password" icon="Lock"
+              onKeyDown={e => e.key === 'Enter' && submit()} />
+          </div>
+          {error && <p className="text-xs text-red-600 dark:text-red-400">{error}</p>}
+          <Button onClick={submit} disabled={loading} className="w-full" icon="Lock">
+            {loading ? <Spinner /> : 'Sign In'}
+          </Button>
+        </div>
+      </Card>
+    </div>
+  );
+};
+
+
+// ─────────────────────────────────────────────────
+//  Main App
+// ─────────────────────────────────────────────────
+const App = () => {
+  const [theme, toggleTheme] = useTheme();
+  const [page, setPage] = useState('dashboard');
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  const nav = [
+    { id: 'dashboard', label: 'Dashboard', icon: 'LayoutDashboard' },
+    { id: 'search',    label: 'Search',    icon: 'Search' },
+    { id: 'leads',     label: 'Leads',     icon: 'Users' },
+    { id: 'pipeline',  label: 'Pipeline',  icon: 'Workflow' },
+    { id: 'outreach',  label: 'Outreach',  icon: 'Send' },
+    { id: 'analytics', label: 'Analytics', icon: 'Activity' },
+    { id: 'divider1' },
+    { id: 'intent',    label: 'Intent',    icon: 'Crosshair' },
+    { id: 'seo',         label: 'SEO',         icon: 'TrendingUp' },
+    { id: 'competitor',  label: 'Competitors', icon: 'Target' },
+    { id: 'people',      label: 'People',      icon: 'UserSearch' },
+    { id: 'social',      label: 'Social',      icon: 'Share2' },
+    { id: 'ecommerce',   label: 'E-commerce',  icon: 'ShoppingBag' },
+    { id: 'divider2' },
+    { id: 'settings',  label: 'Settings',  icon: 'Settings' },
+  ];
+
+  let CurrentPage = DashboardPage;
+  if (page === 'search') CurrentPage = SearchPage;
+  else if (page === 'leads') CurrentPage = LeadsPage;
+  else if (page === 'pipeline') CurrentPage = PipelinePage;
+  else if (page === 'seo') CurrentPage = SEOPage;
+  else if (page === 'competitor') CurrentPage = CompetitorPage;
+  else if (page === 'people') CurrentPage = PeoplePage;
+  else if (page === 'social') CurrentPage = SocialPage;
+  else if (page === 'ecommerce') CurrentPage = EcommercePage;
+  else if (page === 'outreach') CurrentPage = OutreachPage;
+  else if (page === 'analytics') CurrentPage = AnalyticsPage;
+  else if (page === 'intent') CurrentPage = IntentPage;
+  else if (page === 'settings') CurrentPage = SettingsPage;
+
+  return (
+    <div className="min-h-screen flex">
+      <aside className={(sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0') + ' fixed lg:sticky top-0 z-40 w-64 h-screen bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-800 transition-transform flex flex-col'}>
+        <div className="p-5 border-b border-slate-200 dark:border-slate-800">
+          <div className="flex items-center gap-2">
+            <div className="w-9 h-9 bg-gradient-to-br from-accent-500 to-purple-600 rounded-lg flex items-center justify-center text-white font-bold shadow-lg pulse-glow">C</div>
+            <div>
+              <p className="font-bold text-sm leading-tight">Controva</p>
+              <p className="text-xs text-slate-500">Intelligence Platform</p>
+            </div>
+          </div>
+        </div>
+        <nav className="p-3 space-y-0.5 overflow-y-auto scrollbar-thin flex-1">
+          {nav.map(item => item.id.indexOf('divider') === 0 ? (
+            <div key={item.id} className="my-2 border-t border-slate-200 dark:border-slate-800" />
+          ) : (
+            <button key={item.id} onClick={() => { setPage(item.id); setSidebarOpen(false); }}
+              className={'w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ' + (
+                page === item.id ? 'bg-accent-50 dark:bg-accent-900/30 text-accent-700 dark:text-accent-400'
+                                 : 'text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+              )}>
+              <Icon name={item.icon} className="w-4 h-4" />
+              {item.label}
+            </button>
+          ))}
+        </nav>
+        <div className="p-3 border-t border-slate-200 dark:border-slate-800">
+          <button onClick={toggleTheme} className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium hover:bg-slate-100 dark:hover:bg-slate-800">
+            <Icon name={theme === 'dark' ? 'Sun' : 'Moon'} className="w-4 h-4" />
+            {theme === 'dark' ? 'Light Mode' : 'Dark Mode'}
+          </button>
+        </div>
+      </aside>
+      {sidebarOpen && <div onClick={() => setSidebarOpen(false)} className="fixed inset-0 z-30 bg-black/50 lg:hidden" />}
+      <main className="flex-1 min-w-0">
+        <header className="sticky top-0 z-20 bg-white/80 dark:bg-slate-950/80 glass border-b border-slate-200 dark:border-slate-800">
+          <div className="px-5 py-3 flex items-center justify-between">
+            <button onClick={() => setSidebarOpen(true)} className="lg:hidden p-2 rounded hover:bg-slate-100 dark:hover:bg-slate-800">
+              <Icon name="Menu" className="w-5 h-5" />
+            </button>
+            <div className="flex items-center gap-2 text-xs text-slate-500">
+              <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+              <span>Server online</span>
+            </div>
+          </div>
+        </header>
+        <div className="p-5 lg:p-8 w-full">
+          <CurrentPage setPage={setPage} />
+        </div>
+      </main>
+    </div>
+  );
+};
+
+// Auth wrapper
+const AuthWrapper = () => {
+  const [authToken, setAuthToken] = useState(() => {
+    try { return localStorage.getItem('auth_token'); } catch (e) { return null; }
+  });
+  const [checking, setChecking] = useState(true);
+
+  useEffect(() => {
+    if (!authToken) { setChecking(false); return; }
+    api.post('/auth/check', { token: authToken })
+      .then(r => { if (!r.authenticated) { setAuthToken(null); try { localStorage.removeItem('auth_token'); } catch (e) {} } })
+      .finally(() => setChecking(false));
+  }, []);
+
+  if (checking) return <div className="min-h-screen flex items-center justify-center"><Spinner size="w-8 h-8" /></div>;
+  if (!authToken) return <LoginScreen onLogin={(t) => setAuthToken(t)} />;
+  return <App />;
+};
+
+// Mount
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <ToastProvider><AuthWrapper /></ToastProvider>
+);
+</script>
+
+</body>
+</html>

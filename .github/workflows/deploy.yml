@@ -1,0 +1,118 @@
+name: Deploy to Server
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'server/leads_api.py'
+      - 'server/dashboard.html'
+      - 'server/migrations/**'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2   # need previous commit to detect what changed
+
+      # ── Detect which files changed ──────────────────────────
+      - name: Detect changes
+        id: changes
+        run: |
+          git diff --name-only HEAD~1 HEAD > changed.txt
+          cat changed.txt
+
+          echo "api=false"         >> $GITHUB_OUTPUT
+          echo "ui=false"          >> $GITHUB_OUTPUT
+          echo "migrations=false"  >> $GITHUB_OUTPUT
+
+          grep -q "server/leads_api.py"       changed.txt && echo "api=true"        >> $GITHUB_OUTPUT || true
+          grep -q "server/dashboard.html"     changed.txt && echo "ui=true"         >> $GITHUB_OUTPUT || true
+          grep -q "server/migrations/"        changed.txt && echo "migrations=true" >> $GITHUB_OUTPUT || true
+
+      # ── Upload API (if changed) ─────────────────────────────
+      - name: Upload leads_api.py
+        if: steps.changes.outputs.api == 'true'
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SERVER_USER }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          port: 22
+          source: server/leads_api.py
+          target: ${{ secrets.REMOTE_DIR }}
+          strip_components: 1
+
+      # ── Upload dashboard (if changed) ───────────────────────
+      - name: Upload dashboard.html
+        if: steps.changes.outputs.ui == 'true'
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SERVER_USER }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          port: 22
+          source: server/dashboard.html
+          target: ${{ secrets.REMOTE_DIR }}
+          strip_components: 1
+
+      # ── Upload + run migrations (if new .sql files) ─────────
+      - name: Upload migrations
+        if: steps.changes.outputs.migrations == 'true'
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SERVER_USER }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          port: 22
+          source: server/migrations/
+          target: /tmp/leadgen_migrations/
+          strip_components: 2
+
+      - name: Run new migrations
+        if: steps.changes.outputs.migrations == 'true'
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SERVER_USER }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          script: |
+            for f in /tmp/leadgen_migrations/*.sql; do
+              echo "Running migration: $f"
+              docker exec leadgen_postgres psql -U leadgen -d leadgen_db -f /tmp/$(basename $f)
+            done
+
+      # ── Restart service (only if API changed) ───────────────
+      - name: Restart API service
+        if: steps.changes.outputs.api == 'true'
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SERVER_USER }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          script: |
+            systemctl restart leadgen-api
+            sleep 4
+            STATUS=$(systemctl is-active leadgen-api)
+            echo "Service status: $STATUS"
+            if [ "$STATUS" != "active" ]; then
+              journalctl -u leadgen-api -n 30 --no-pager
+              exit 1
+            fi
+            curl -s http://localhost:8080/health | head -c 100
+
+      # ── Summary ─────────────────────────────────────────────
+      - name: Deployment summary
+        run: |
+          echo "## Deploy complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Component | Deployed |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| API (leads_api.py) | ${{ steps.changes.outputs.api }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Dashboard (dashboard.html) | ${{ steps.changes.outputs.ui }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Migrations | ${{ steps.changes.outputs.migrations }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Live at: http://${{ secrets.SERVER_IP }}:8080/" >> $GITHUB_STEP_SUMMARY

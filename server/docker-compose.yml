@@ -1,0 +1,67 @@
+version: "3.9"
+
+services:
+
+  # ── PostgreSQL 16 — Primary Lead Database ──────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: leadgen_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: leadgen
+      POSTGRES_PASSWORD: LeadGen_Secure_2024!
+      POSTGRES_DB: leadgen_db
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - /opt/leadgen/postgres/data:/var/lib/postgresql/data
+      - /opt/leadgen/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "0.0.0.0:5432:5432"   # Internal only — NOT exposed publicly
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U leadgen -d leadgen_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - leadgen_network
+
+  # ── Redis 7 — Queue Manager & Deduplication ────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: leadgen_redis
+    restart: always
+    command: redis-server --requirepass "Redis_Secure_2024!" --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - /opt/leadgen/redis/data:/data
+    ports:
+      - "0.0.0.0:6379:6379"   # Internal only
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "Redis_Secure_2024!", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - leadgen_network
+
+  # ── Crawl4AI — Self-Hosted Web Scraper (Oxylabs backup) ────
+  crawl4ai:
+    image: unclecode/crawl4ai:latest
+    container_name: leadgen_crawl4ai
+    restart: always
+    environment:
+      - CRAWL4AI_API_TOKEN=crawl4ai_secret_token_2024
+    ports:
+      - "0.0.0.0:11235:11235"  # Internal only
+    shm_size: "1gb"
+    volumes:
+      - /opt/leadgen/crawl4ai:/crawl4ai
+    networks:
+      - leadgen_network
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+networks:
+  leadgen_network:
+    driver: bridge

@@ -1,0 +1,16 @@
+[Unit]
+Description=LeadGen Leads API Server
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/leadgen
+ExecStart=/usr/bin/python3 /opt/leadgen/leads_api.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+
