@@ -619,7 +619,10 @@ const LeadsPage = () => {
   const filtered = useMemo(() => {
     let r = leads;
     if (filter === 'hot') r = r.filter(l => (l.lead_type || '').indexOf('HOT') !== -1);
+    else if (filter === 'enriched') r = r.filter(l => !['discovered', 'rejected'].includes(l.status));
     else if (filter === 'with_email') r = r.filter(l => l.owner_email);
+    else if (filter === 'with_linkedin') r = r.filter(l => l.linkedin_url);
+    else if (filter === 'with_contact') r = r.filter(l => l.owner_email || l.linkedin_url);
     else if (filter === 'scored') r = r.filter(l => parseInt(l.ai_score) >= 7);
     if (search) {
       const q = search.toLowerCase();
@@ -762,10 +765,13 @@ const LeadsPage = () => {
 
           <div className="flex gap-2 flex-wrap">
             {[
-              { id: 'all', label: 'All', count: leads.length },
-              { id: 'hot', label: 'Hot (no website)', count: leads.filter(l => (l.lead_type || '').indexOf('HOT') !== -1).length },
-              { id: 'with_email', label: 'Has Email', count: leads.filter(l => l.owner_email).length },
-              { id: 'scored', label: 'High Score (7+)', count: leads.filter(l => parseInt(l.ai_score) >= 7).length },
+              { id: 'all',           label: 'All',                count: leads.length },
+              { id: 'hot',           label: 'Hot (no website)',   count: leads.filter(l => (l.lead_type || '').indexOf('HOT') !== -1).length },
+              { id: 'enriched',      label: 'Enriched',           count: leads.filter(l => !['discovered', 'rejected'].includes(l.status)).length },
+              { id: 'with_email',    label: 'Has Email',          count: leads.filter(l => l.owner_email).length },
+              { id: 'with_linkedin', label: 'Has LinkedIn',       count: leads.filter(l => l.linkedin_url).length },
+              { id: 'with_contact',  label: 'Has Email or LinkedIn', count: leads.filter(l => l.owner_email || l.linkedin_url).length },
+              { id: 'scored',        label: 'High Score (7+)',    count: leads.filter(l => parseInt(l.ai_score) >= 7).length },
             ].map(f => (
               <button key={f.id} onClick={() => setFilter(f.id)}
                 className={'px-3 py-1.5 rounded-full text-xs font-medium transition-colors ' + (

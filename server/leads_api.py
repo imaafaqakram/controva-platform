@@ -41,7 +41,7 @@ CONFIG = {
     'enrichment_fallback': 'oxylabs',     # oxylabs | none
     'image_provider': 'none',             # none | replicate | imagine_art
     'auto_score': True,                   # Run Gemini scoring during pipeline
-    'auto_email_copy': True,              # Run Claude email writing
+    'auto_email_copy': False,             # Claude email writing OFF by default (saves credits)
     'auto_image': False,                  # Image generation OFF by default
 }
 
