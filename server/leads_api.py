@@ -41,7 +41,7 @@ CONFIG = {
     'enrichment_fallback': 'oxylabs',     # oxylabs | none
     'image_provider': 'none',             # none | replicate | imagine_art
     'auto_score': True,                   # Run Gemini scoring during pipeline
-    'auto_email_copy': True,              # Run Claude email writing
+    'auto_email_copy': False,             # Claude email writing OFF by default (saves credits)
     'auto_image': False,                  # Image generation OFF by default
 }
 
@@ -1146,6 +1146,12 @@ def generate_image(business_name, niche, city, provider=None):
 #  CLAUDE EMAIL COPYWRITING
 # ──────────────────────────────────────────────────────────────
 def generate_email_copy(business_name, niche, city, owner_name=None):
+    if not CONFIG.get('auto_email_copy', True):
+        print('[claude] skipped: auto_email_copy disabled in settings')
+        return None
+    if not CLAUDE_KEY:
+        print('[claude] skipped: no CLAUDE_KEY configured')
+        return None
     name_part = owner_name if owner_name else 'there'
     prompt = f"""Write a 120-word personalized cold outreach message for a small business owner.
 
@@ -2376,6 +2382,10 @@ def regenerate_email_for_lead(lead_id, extra_instructions=""):
     )
 
     if not email:
+        if not CONFIG.get('auto_email_copy', True):
+            return {"success": False, "error": "Claude email generation is OFF. Enable it in Settings > Pipeline Automation."}
+        if not CLAUDE_KEY:
+            return {"success": False, "error": "No Claude API key configured. Add one in Settings > API Keys."}
         return {"success": False, "error": "Claude generation failed"}
 
     conn = db_conn(); cur = conn.cursor()
