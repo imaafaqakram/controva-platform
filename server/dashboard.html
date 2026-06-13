@@ -824,6 +824,7 @@ const LeadsPage = () => {
                     { key: 'linkedin_url',  label: 'LinkedIn', align: 'center', w: 'w-[80px]'  },
                     { key: 'ai_score',      label: 'Score',    align: 'center', w: 'w-[75px]'  },
                     { key: 'status',        label: 'Status',   align: 'center', w: 'w-[120px]' },
+                    { key: 'date_found',    label: 'Discovered', align: 'left', w: 'w-[130px]' },
                   ].map(col => (
                     <th key={col.key} onClick={() => {
                       if (sortBy === col.key) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
@@ -857,6 +858,7 @@ const LeadsPage = () => {
                           {l.mockup_url && <span className="text-purple-500 text-xs flex-shrink-0" title="Has mockup">🎨</span>}
                           {l.website && <a href={l.website} target="_blank" onClick={e => e.stopPropagation()} title={l.website} className="text-green-600 text-xs hover:underline flex-shrink-0">🌐</a>}
                         </div>
+                        {l.date_found && <div className="text-xs text-slate-400 mt-0.5">{l.date_found}</div>}
                       </td>
                       <td className="py-3 px-3 text-slate-600 dark:text-slate-400 capitalize cursor-pointer truncate" onClick={() => setOpenLead(l.id)}>{l.niche}</td>
                       <td className="py-3 px-3 text-slate-600 dark:text-slate-400 cursor-pointer truncate" onClick={() => setOpenLead(l.id)}>{l.city}</td>
@@ -877,6 +879,12 @@ const LeadsPage = () => {
                       </td>
                       <td className="py-3 px-3 text-center cursor-pointer" onClick={() => setOpenLead(l.id)}>
                         <Badge variant={l.status === 'ready' ? 'success' : l.status === 'sent' ? 'purple' : l.status === 'enriched' ? 'info' : 'default'}>{l.status}</Badge>
+                      </td>
+                      <td className="py-3 px-3 cursor-pointer" onClick={() => setOpenLead(l.id)}>
+                        <div className="text-xs text-slate-500 font-mono whitespace-nowrap">{l.date_found || '—'}</div>
+                        {l.date_updated && l.date_updated !== l.date_found && (
+                          <div className="text-xs text-blue-400 font-mono whitespace-nowrap" title="Last updated">{l.date_updated}</div>
+                        )}
                       </td>
                     </tr>
                   );
@@ -2119,6 +2127,30 @@ const LeadDetailModal = ({ leadId, onClose, onUpdate }) => {
                   <p className="text-sm text-blue-600">{lead.linkedin_url}</p>
                 </a>
               )}
+
+              {/* Timeline */}
+              <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                <p className="text-xs text-slate-500 uppercase font-medium mb-2">Activity Timeline</p>
+                <div className="space-y-1.5">
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="w-2 h-2 rounded-full bg-green-400 flex-shrink-0"></span>
+                    <span className="text-slate-500 w-24">Discovered</span>
+                    <span className="font-mono text-slate-700 dark:text-slate-300">{lead.date_found || '—'}</span>
+                  </div>
+                  {lead.status !== 'discovered' && (
+                    <div className="flex items-center gap-2 text-xs">
+                      <span className="w-2 h-2 rounded-full bg-blue-400 flex-shrink-0"></span>
+                      <span className="text-slate-500 w-24">Last updated</span>
+                      <span className="font-mono text-slate-700 dark:text-slate-300">{lead.date_updated || '—'}</span>
+                    </div>
+                  )}
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="w-2 h-2 rounded-full bg-purple-400 flex-shrink-0"></span>
+                    <span className="text-slate-500 w-24">Status</span>
+                    <Badge variant={lead.status === 'ready' ? 'success' : lead.status === 'sent' ? 'purple' : lead.status === 'enriched' ? 'info' : 'default'}>{lead.status}</Badge>
+                  </div>
+                </div>
+              </div>
 
               {/* Mockup */}
               {lead.mockup_url && (
