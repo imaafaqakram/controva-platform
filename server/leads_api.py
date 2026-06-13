@@ -2155,6 +2155,7 @@ def get_leads():
                COALESCE((SELECT content FROM assets WHERE lead_id=l.id AND asset_type='email_subject' LIMIT 1),'') as email_subject,
                COALESCE((SELECT content FROM assets WHERE lead_id=l.id AND asset_type='email_body' LIMIT 1),'') as email_body,
                to_char(l.created_at,'YYYY-MM-DD HH24:MI') as date_found,
+               to_char(l.updated_at,'YYYY-MM-DD HH24:MI') as date_updated,
                CASE WHEN l.has_website THEN 'Has Website' ELSE 'NO WEBSITE - HOT LEAD' END as lead_type
         FROM leads l LEFT JOIN contacts c ON c.lead_id=l.id
         ORDER BY l.ai_score DESC NULLS LAST, l.created_at DESC""")
