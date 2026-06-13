@@ -1941,13 +1941,16 @@ const SettingsPage = () => {
         <h3 className="font-semibold mb-3 flex items-center gap-2"><Icon name="ToggleRight" /> Automation</h3>
         <div className="space-y-2">
           {[
-            { key: 'auto_score', label: 'Auto-score with Gemini' },
-            { key: 'auto_email_copy', label: 'Auto-generate email copy' },
-            { key: 'auto_image', label: 'Auto-generate mockup images' },
+            { key: 'auto_score', label: 'Auto-score with Gemini', cost: 'Cheap — Gemini free tier covers most use' },
+            { key: 'auto_email_copy', label: 'Auto-generate email copy (Claude)', cost: 'Uses Claude API credits — turn OFF to save spend' },
+            { key: 'auto_image', label: 'Auto-generate mockup images', cost: 'Uses Replicate/imagine.art credits' },
           ].map(opt => (
             <label key={opt.key} className="flex items-start gap-3 p-3 bg-slate-50 dark:bg-slate-800 rounded-lg cursor-pointer">
               <input type="checkbox" checked={!!config[opt.key]} onChange={e => update(opt.key, e.target.checked)} className="mt-1 w-4 h-4" />
-              <div className="font-medium text-sm">{opt.label}</div>
+              <div>
+                <div className="font-medium text-sm">{opt.label}</div>
+                <div className="text-xs text-slate-500 mt-0.5">{opt.cost}</div>
+              </div>
             </label>
           ))}
         </div>
