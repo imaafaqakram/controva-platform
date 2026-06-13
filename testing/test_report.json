@@ -1,0 +1,487 @@
+{
+  "started_at": "2026-06-13T19:57:39.876846Z",
+  "platform_url": "http://127.0.0.1:8080",
+  "tests": [
+    {
+      "test": "health check",
+      "endpoint": "GET /health",
+      "status_code": 200,
+      "duration_ms": 3,
+      "pass": true,
+      "cost_note": "FREE",
+      "response_preview": {
+        "status": "ok",
+        "version": "5.0",
+        "modules": "<list len=7>",
+        "providers": {
+          "serper": true,
+          "oxylabs": false,
+          "gemini": true,
+          "claude": true,
+          "replicate": true,
+          "imagine_art": false
+        }
+      }
+    },
+    {
+      "test": "auth login",
+      "endpoint": "POST /auth/login",
+      "status_code": 200,
+      "duration_ms": 1,
+      "pass": true,
+      "cost_note": "FREE",
+      "response_preview": {
+        "success": true,
+        "token": "nhBEqR09umSZMnOAMm7aIUL7Qj7RdNBDsN2XChGlyBQ"
+      }
+    },
+    {
+      "test": "config read",
+      "endpoint": "GET /config",
+      "status_code": 200,
+      "duration_ms": 1,
+      "pass": true,
+      "cost_note": "FREE",
+      "response_preview": {
+        "enrichment_primary": "serper",
+        "enrichment_fallback": "oxylabs",
+        "image_provider": "none",
+        "auto_score": true,
+        "auto_email_copy": true,
+        "auto_image": false
+      }
+    },
+    {
+      "test": "api-keys masked view",
+      "endpoint": "GET /api-keys",
+      "status_code": 200,
+      "duration_ms": 1,
+      "pass": true,
+      "cost_note": "FREE",
+      "response_preview": {
+        "google_api_key": {
+          "set": true,
+          "preview": "****i6Dw"
+        },
+        "serper_key": {
+          "set": true,
+          "preview": "****492b"
+        },
+        "gemini_key": {
+          "set": true,
+          "preview": "****IcU4"
+        },
+        "claude_key": {
+          "set": true,
+          "preview": "****EwAA"
+        },
+        "replicate_token": {
+          "set": true,
+          "preview": "****KRMn"
+        },
+        "imagine_art_key": {
+          "set": false,
+          "preview": ""
+        },
+        "oxylabs_key": {
+          "set": true,
+          "preview": "****EgOW"
+        },
+        "resend_key": {
+          "set": true,
+          "preview": "****nzzx"
+        },
+        "from_email": {
+          "set": true,
+          "preview": "Support@controvallc.com"
+        },
+        "from_name": {
+          "set": true,
+          "preview": "Controva LLC"
+        }
+      }
+    },
+    {
+      "test": "stats (pre-search)",
+      "endpoint": "GET /stats",
+      "status_code": 200,
+      "duration_ms": 16,
+      "pass": true,
+      "cost_note": "FREE",
+      "response_preview": {
+        "hot_leads": 0,
+        "total": 0,
+        "enriched": 0,
+        "ready": 0,
+        "high_score": 0,
+        "with_email": 0,
+        "cities": 0
+      }
+    },
+    {
+      "test": "leads list (pre-search)",
+      "endpoint": "GET /leads",
+      "status_code": 200,
+      "duration_ms": 14,
+      "pass": true,
+      "cost_note": "FREE",
+      "response_preview": {
+        "status": "ok",
+        "total": 0,
+        "columns": "<list len=20>",
+        "leads": "<list len=0>"
+      }
+    },
+    {
+      "test": "natural-language search",
+      "endpoint": "POST /search",
+      "status_code": 200,
+      "duration_ms": 747,
+      "pass": true,
+      "cost_note": "~$0.085 (5 Places + 1 Gemini parse)",
+      "response_preview": {
+        "status": "success",
+        "parsed": {
+          "niche": "clinic",
+          "city": "Cambridge",
+          "country": "GB",
+          "modifiers": []
+        },
+        "filter_mode": "all",
+        "density": "low",
+        "total_new_leads": 30,
+        "leads": "<list len=30>",
+        "message": "Found 30 businesses for \"dental clinics in Cambridge UK\"",
+        "_first_lead": {
+          "place_id": "ChIJaazpuMdw2EcRTOa3zW-uPCs",
+          "business_name": "Huntingdon Road Surgery",
+          "niche": "clinic",
+          "city": "Cambridge",
+          "phone": "01223 364127",
+          "has_website": true,
+          "website": "https://www.huntingdonroadsurgery.nhs.uk/"
+        }
+      }
+    },
+    {
+      "test": "leads list (post-search)",
+      "endpoint": "GET /leads",
+      "status_code": 200,
+      "duration_ms": 16,
+      "pass": true,
+      "cost_note": "FREE",
+      "response_preview": {
+        "status": "ok",
+        "total": 30,
+        "columns": "<list len=20>",
+        "leads": "<list len=30>",
+        "_first_lead": {
+          "id": "1f43fb10-d8b1-4686-bfbe-fd748aaf758e",
+          "business_name": "The Fields Cambridge City Child and Family Centre",
+          "niche": "clinic",
+          "city": "Cambridge",
+          "country": "GB",
+          "phone": "",
+          "address": "9 Galfrid Rd, Cambridge CB5 8ND, UK",
+          "website": "",
+          "ai_score": "",
+          "score_reason": "",
+          "status": "discovered",
+          "owner_name": "",
+          "owner_email": "",
+          "linkedin_url": "",
+          "job_title": "",
+          "mockup_url": "",
+          "email_subject": "",
+          "email_body": "",
+          "date_found": "2026-06-13 19:57",
+          "lead_type": "NO WEBSITE - HOT LEAD"
+        }
+      }
+    },
+    {
+      "test": "enrich (serper-only, 3 leads)",
+      "endpoint": "POST /enrich",
+      "status_code": 200,
+      "duration_ms": 425,
+      "pass": true,
+      "cost_note": "~$0.015 Serper (3 leads)",
+      "response_preview": {
+        "status": "completed",
+        "total": 1,
+        "results": "<list len=1>",
+        "_first_result": {
+          "business_name": "The Fields Cambridge City Child and Family Centre",
+          "city": "Cambridge",
+          "email_found": false,
+          "linkedin_found": false,
+          "email": null,
+          "sources": [
+            "serper"
+          ]
+        }
+      }
+    },
+    {
+      "test": "Gemini scoring (enriched leads)",
+      "endpoint": "POST /score",
+      "status_code": 200,
+      "duration_ms": 443,
+      "pass": true,
+      "cost_note": "~$0.005 Gemini",
+      "response_preview": {
+        "status": "completed",
+        "total": 1,
+        "results": "<list len=1>",
+        "_first_result": {
+          "business_name": "The Fields Cambridge City Child and Family Centre",
+          "score": 5
+        }
+      }
+    },
+    {
+      "test": "generate email copy (no image)",
+      "endpoint": "POST /generate-assets",
+      "status_code": 200,
+      "duration_ms": 5605,
+      "pass": true,
+      "cost_note": "~$0.01-0.03 Claude (no image gen)",
+      "response_preview": {
+        "status": "completed",
+        "total": 1,
+        "results": "<list len=1>",
+        "_first_result": {
+          "business_name": "The Fields Cambridge City Child and Family Centre",
+          "mockup": false,
+          "email_subject": "Built something for Fields Cambridge Centre"
+        }
+      }
+    },
+    {
+      "test": "find emails (stripe.com)",
+      "endpoint": "POST /find-emails",
+      "status_code": 200,
+      "duration_ms": 36,
+      "pass": true,
+      "cost_note": "~$0.005 Serper",
+      "response_preview": {
+        "business": "",
+        "domain": "stripe.com",
+        "verified_emails": "<list len=0>",
+        "pattern_guesses": "<list len=7>",
+        "mx_valid": true
+      }
+    },
+    {
+      "test": "find decision-makers",
+      "endpoint": "POST /find-people",
+      "status_code": 200,
+      "duration_ms": 104,
+      "pass": true,
+      "cost_note": "~$0.005 Serper",
+      "response_preview": {
+        "company": "Stripe",
+        "location": "",
+        "people": "<list len=0>",
+        "total_found": 0
+      }
+    },
+    {
+      "test": "verify support@stripe.com",
+      "endpoint": "POST /verify-email",
+      "status_code": 200,
+      "duration_ms": 15,
+      "pass": true,
+      "cost_note": "FREE (SMTP)",
+      "response_preview": {
+        "email": "support@stripe.com",
+        "syntax_valid": true,
+        "domain_resolves": true,
+        "has_mx": false,
+        "mailbox_exists": null,
+        "risk_level": "high",
+        "details": "<list len=1>",
+        "type": "unknown"
+      }
+    },
+    {
+      "test": "verify definitely-fake-9k3jh@gmail.com",
+      "endpoint": "POST /verify-email",
+      "status_code": 200,
+      "duration_ms": 6,
+      "pass": true,
+      "cost_note": "FREE (SMTP)",
+      "response_preview": {
+        "email": "definitely-fake-9k3jh@gmail.com",
+        "syntax_valid": true,
+        "domain_resolves": true,
+        "has_mx": false,
+        "mailbox_exists": null,
+        "risk_level": "medium",
+        "details": "<list len=2>",
+        "type": "free_provider"
+      }
+    },
+    {
+      "test": "keyword research",
+      "endpoint": "POST /keywords",
+      "status_code": 200,
+      "duration_ms": 39,
+      "pass": true,
+      "cost_note": "~$0.01 Serper",
+      "response_preview": {
+        "seed": "dental clinic Cambridge",
+        "location": "Cambridge, UK",
+        "related_keywords": "<list len=0>",
+        "people_also_ask": "<list len=0>",
+        "autocomplete": "<list len=0>",
+        "top_competitors": "<list len=0>"
+      }
+    },
+    {
+      "test": "SERP analysis",
+      "endpoint": "POST /serp",
+      "status_code": 200,
+      "duration_ms": 48,
+      "pass": true,
+      "cost_note": "~$0.005 Serper",
+      "response_preview": "None"
+    },
+    {
+      "test": "intent search (demand side)",
+      "endpoint": "POST /intent-search",
+      "status_code": 200,
+      "duration_ms": 356,
+      "pass": true,
+      "cost_note": "~$0.02 Serper + Gemini",
+      "response_preview": {
+        "status": "success",
+        "direction": "demand",
+        "query": "looking for dental marketing agency",
+        "total": 0,
+        "results": "<list len=0>",
+        "message": "Found 0 demand signals for \"looking for dental marketing agency\""
+      }
+    },
+    {
+      "test": "intent stats",
+      "endpoint": "GET /intent-stats",
+      "status_code": 200,
+      "duration_ms": 15,
+      "pass": true,
+      "cost_note": "FREE",
+      "response_preview": {
+        "by_direction": {
+          "business": 30
+        },
+        "by_source": "<list len=0>"
+      }
+    },
+    {
+      "test": "intent leads list",
+      "endpoint": "GET /intent-leads",
+      "status_code": 200,
+      "duration_ms": 15,
+      "pass": true,
+      "cost_note": "FREE",
+      "response_preview": {
+        "total": 0,
+        "leads": "<list len=0>"
+      }
+    },
+    {
+      "test": "stats (final)",
+      "endpoint": "GET /stats",
+      "status_code": 200,
+      "duration_ms": 14,
+      "pass": true,
+      "cost_note": "FREE",
+      "response_preview": {
+        "hot_leads": 1,
+        "total": 30,
+        "enriched": 0,
+        "ready": 1,
+        "high_score": 0,
+        "with_email": 0,
+        "cities": 1
+      }
+    },
+    {
+      "test": "stats-chart",
+      "endpoint": "GET /stats-chart",
+      "status_code": 200,
+      "duration_ms": 15,
+      "pass": true,
+      "cost_note": "FREE",
+      "response_preview": {
+        "leads_per_day": "<list len=1>",
+        "status_breakdown": "<list len=2>",
+        "niche_breakdown": "<list len=1>",
+        "city_breakdown": "<list len=1>",
+        "score_distribution": "<list len=2>"
+      }
+    },
+    {
+      "test": "outreach log",
+      "endpoint": "GET /outreach",
+      "status_code": 200,
+      "duration_ms": 14,
+      "pass": true,
+      "cost_note": "FREE",
+      "response_preview": {
+        "total": 0,
+        "log": "<list len=0>"
+      }
+    },
+    {
+      "test": "approve a lead",
+      "endpoint": "POST /lead/1f43fb10-d8b1-4686-bfbe-fd748aaf758e/approve",
+      "status_code": 200,
+      "duration_ms": 16,
+      "pass": true,
+      "cost_note": "FREE",
+      "response_preview": {
+        "success": true,
+        "lead_id": "1f43fb10-d8b1-4686-bfbe-fd748aaf758e",
+        "status": "approved"
+      }
+    },
+    {
+      "test": "lead detail read-back",
+      "endpoint": "GET /lead/1f43fb10-d8b1-4686-bfbe-fd748aaf758e",
+      "status_code": 200,
+      "duration_ms": 14,
+      "pass": true,
+      "cost_note": "FREE",
+      "response_preview": {
+        "id": "1f43fb10-d8b1-4686-bfbe-fd748aaf758e",
+        "business_name": "The Fields Cambridge City Child and Family Centre",
+        "niche": "clinic",
+        "city": "Cambridge",
+        "country": "GB",
+        "phone": "",
+        "address": "9 Galfrid Rd, Cambridge CB5 8ND, UK",
+        "ai_score": 5,
+        "score_reason": "Default",
+        "status": "approved"
+      }
+    },
+    {
+      "test": "CSV export",
+      "endpoint": "GET /leads.csv",
+      "status_code": 200,
+      "duration_ms": 15,
+      "pass": true,
+      "cost_note": "FREE",
+      "response_preview": "omitted"
+    }
+  ],
+  "summary": {
+    "total_tests": 26,
+    "passed": 26,
+    "failed": 0,
+    "pass_rate_pct": 100.0,
+    "finished_at": "2026-06-13T19:57:48.041216Z",
+    "estimated_spend_usd_range": "$0.20-0.40"
+  }
+}
