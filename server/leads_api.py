@@ -2167,6 +2167,21 @@ def get_leads():
 # ──────────────────────────────────────────────────────────────
 #  BACKGROUND JOBS
 # ──────────────────────────────────────────────────────────────
+def run_step_bg(job_id, step_fn, step_name, *args):
+    """Generic single-step background runner."""
+    try:
+        JOBS[job_id] = {'status': 'running', 'progress': 0, 'log': [f'Starting: {step_name}...'], 'step': step_name}
+        results = step_fn(*args)
+        count = len(results) if isinstance(results, list) else (results or 0)
+        JOBS[job_id]['progress'] = 100
+        JOBS[job_id]['status'] = 'completed'
+        JOBS[job_id]['log'].append(f'Done — {count} items processed.')
+        JOBS[job_id]['results'] = {'total': count}
+    except Exception as e:
+        JOBS[job_id]['status'] = 'failed'
+        JOBS[job_id]['error'] = str(e)
+        JOBS[job_id]['log'].append(f'Error: {e}')
+
 def run_pipeline_bg(job_id, provider_strategy='serper_then_oxylabs', generate_images=False):
     try:
         JOBS[job_id] = {'status': 'enriching', 'progress': 0, 'log': []}
@@ -2728,34 +2743,41 @@ class Handler(BaseHTTPRequestHandler):
         elif p == '/enrich':
             try:
                 strategy = body.get('provider', 'serper_then_oxylabs')
-                results = enrich_all_discovered(strategy)
-                self.send_json(200, {'status': 'completed', 'total': len(results), 'results': results})
+                job_id = f'job_{int(time.time())}'
+                t = threading.Thread(target=run_step_bg, args=(job_id, enrich_all_discovered, 'Enrich all leads', strategy))
+                t.daemon = True; t.start()
+                self.send_json(200, {'job_id': job_id, 'status': 'started'})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
         elif p == '/reenrich-missing-emails':
             try:
                 use_oxy = body.get('use_oxylabs', True)
-                results = reenrich_missing_emails(use_oxy)
-                self.send_json(200, {'status': 'completed', 'total': len(results), 'results': results})
+                job_id = f'job_{int(time.time())}'
+                t = threading.Thread(target=run_step_bg, args=(job_id, reenrich_missing_emails, 'Find missing emails', use_oxy))
+                t.daemon = True; t.start()
+                self.send_json(200, {'job_id': job_id, 'status': 'started'})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
         elif p == '/score':
             try:
-                results = score_all_enriched()
-                self.send_json(200, {'status': 'completed', 'total': len(results), 'results': results})
+                job_id = f'job_{int(time.time())}'
+                t = threading.Thread(target=run_step_bg, args=(job_id, score_all_enriched, 'AI score leads'))
+                t.daemon = True; t.start()
+                self.send_json(200, {'job_id': job_id, 'status': 'started'})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
         elif p == '/generate-assets':
             try:
-                # Allow toggling image gen
                 img_prov = body.get('image_provider', 'none')
                 CONFIG['image_provider'] = img_prov
                 min_score = body.get('min_score', 5)
-                results = generate_assets_for_top_leads(min_score)
-                self.send_json(200, {'status': 'completed', 'total': len(results), 'results': results})
+                job_id = f'job_{int(time.time())}'
+                t = threading.Thread(target=run_step_bg, args=(job_id, generate_assets_for_top_leads, 'Generate email copy & assets', min_score))
+                t.daemon = True; t.start()
+                self.send_json(200, {'job_id': job_id, 'status': 'started'})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
