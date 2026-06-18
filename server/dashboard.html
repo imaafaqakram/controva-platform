@@ -1148,12 +1148,19 @@ const PipelinePage = () => {
   const [includeImages, setIncludeImages] = useState(false);
   const [jobId, setJobId] = useState(null);
   const [job, setJob] = useState(null);
+  const [stepLabel, setStepLabel] = useState('');
   const { showToast } = useToast();
+
+  const startPolling = (id, label) => {
+    setJobId(id);
+    setStepLabel(label || '');
+    setJob(null);
+  };
 
   const run = async () => {
     try {
       const r = await api.post('/run-pipeline', { provider, generate_images: includeImages });
-      setJobId(r.job_id);
+      startPolling(r.job_id, 'Full Pipeline');
       showToast('Pipeline started', 'info');
     } catch (e) { showToast('Failed: ' + e.message, 'error'); }
   };
@@ -1164,17 +1171,28 @@ const PipelinePage = () => {
       try {
         const j = await api.get('/job/' + jobId);
         setJob(j);
-        if (j.status === 'completed' || j.status === 'failed') clearInterval(poll);
+        if (j.status === 'completed') {
+          clearInterval(poll);
+          const count = j.results ? (j.results.total ?? j.results.enriched ?? '') : '';
+          showToast(`${stepLabel || 'Job'} completed${count !== '' ? ': ' + count + ' items' : ''}`, 'success');
+        } else if (j.status === 'failed') {
+          clearInterval(poll);
+          showToast(`${stepLabel || 'Job'} failed: ${j.error || 'unknown error'}`, 'error');
+        }
       } catch (e) { clearInterval(poll); }
     }, 2000);
     return () => clearInterval(poll);
   }, [jobId]);
 
-  const runStep = async (path, label) => {
+  const runStep = async (path, label, extraBody = {}) => {
     try {
-      showToast('Running: ' + label, 'info');
-      const r = await api.post(path);
-      showToast(label + ' done: ' + (r.total || (r.results || []).length) + ' items');
+      showToast('Starting: ' + label, 'info');
+      const r = await api.post(path, extraBody);
+      if (r.job_id) {
+        startPolling(r.job_id, label);
+      } else {
+        showToast(label + ' done: ' + (r.total ?? (r.results || []).length) + ' items', 'success');
+      }
     } catch (e) { showToast('Failed: ' + e.message, 'error'); }
   };
 
@@ -1218,13 +1236,41 @@ const PipelinePage = () => {
         <Button onClick={run} icon="Play" size="lg" className="w-full">Run Full Pipeline</Button>
         {job && (
           <div className="mt-4 space-y-2">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-xs font-semibold text-slate-600 dark:text-slate-400">
+                {stepLabel || 'Pipeline'} —&nbsp;
+                <span className={
+                  job.status === 'completed' ? 'text-green-600' :
+                  job.status === 'failed'    ? 'text-red-500' :
+                  'text-amber-500'
+                }>{job.status}</span>
+              </span>
+              {(job.status === 'completed' || job.status === 'failed') && (
+                <button onClick={() => { setJob(null); setJobId(null); }}
+                  className="text-xs text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 underline">Clear</button>
+              )}
+            </div>
             <div className="w-full bg-slate-100 dark:bg-slate-800 rounded-full h-2">
-              <div className="bg-gradient-to-r from-accent-500 to-green-500 h-2 rounded-full transition-all" style={{ width: (job.progress || 0) + '%' }} />
+              {job.status === 'running' || (job.progress > 0 && job.progress < 100)
+                ? <div className="bg-gradient-to-r from-accent-500 to-green-500 h-2 rounded-full animate-pulse" style={{ width: Math.max(job.progress || 8, 8) + '%' }} />
+                : <div className={`h-2 rounded-full transition-all ${job.status === 'completed' ? 'bg-green-500' : job.status === 'failed' ? 'bg-red-500' : 'bg-gradient-to-r from-accent-500 to-green-500'}`} style={{ width: (job.progress || 0) + '%' }} />
+              }
             </div>
-            <p className="text-xs text-slate-500 capitalize">{job.status}</p>
-            <div className="bg-slate-50 dark:bg-slate-900 rounded p-2 max-h-32 overflow-y-auto font-mono text-xs">
-              {(job.log || []).map((l, i) => <div key={i}>{l}</div>)}
+            <div className="bg-slate-50 dark:bg-slate-900 rounded p-2 max-h-40 overflow-y-auto font-mono text-xs space-y-0.5">
+              {(job.log || []).map((l, i) => (
+                <div key={i} className={l.startsWith('Error') ? 'text-red-500' : l.startsWith('Done') ? 'text-green-600 font-semibold' : 'text-slate-600 dark:text-slate-400'}>{l}</div>
+              ))}
+              {(job.status === 'running' || job.status === 'enriching' || job.status === 'scoring' || job.status === 'generating') && (
+                <div className="flex items-center gap-1 text-amber-500 mt-1"><Spinner /><span>Working…</span></div>
+              )}
             </div>
+            {job.status === 'completed' && job.results && (
+              <div className="flex flex-wrap gap-2 pt-1">
+                {Object.entries(job.results).map(([k, v]) => (
+                  <span key={k} className="text-xs bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300 px-2 py-0.5 rounded-full">{k}: {v}</span>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </Card>
