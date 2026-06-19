@@ -803,14 +803,15 @@ def save_enrichment(result):
         cur.close(); conn.close()
 
 def enrich_all_discovered(provider_strategy='serper_then_oxylabs'):
-    """Enrich all discovered leads, smart about what's already done."""
+    """Enrich all discovered leads that don't have contact info yet."""
     conn = db_conn(); cur = conn.cursor()
-    # Only get leads that don't have any contact info yet
+    # Target: status=discovered, regardless of has_website, with no useful contact info yet
     cur.execute("""
         SELECT l.id, l.business_name, l.city, l.phone, l.niche
         FROM leads l
         LEFT JOIN contacts c ON c.lead_id = l.id
-        WHERE l.status = 'discovered' AND l.has_website = FALSE AND c.id IS NULL
+        WHERE l.status = 'discovered'
+          AND (c.id IS NULL OR (COALESCE(c.email,'') = '' AND COALESCE(c.linkedin_url,'') = ''))
         ORDER BY l.created_at ASC
     """)
     leads = cur.fetchall()
@@ -2182,6 +2183,71 @@ def run_step_bg(job_id, step_fn, step_name, *args):
         JOBS[job_id]['error'] = str(e)
         JOBS[job_id]['log'].append(f'Error: {e}')
 
+def run_enrich_bg(job_id, provider_strategy='serper_then_oxylabs'):
+    """Enrichment background job with per-lead progress tracking."""
+    try:
+        JOBS[job_id] = {'status': 'running', 'progress': 0, 'log': ['Checking which leads need enriching...'], 'step': 'Enrich'}
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("""
+            SELECT l.id, l.business_name, l.city, l.phone, l.niche
+            FROM leads l
+            LEFT JOIN contacts c ON c.lead_id = l.id
+            WHERE l.status = 'discovered'
+              AND (c.id IS NULL OR (COALESCE(c.email,'') = '' AND COALESCE(c.linkedin_url,'') = ''))
+            ORDER BY l.created_at ASC
+        """)
+        leads = cur.fetchall(); cur.close(); conn.close()
+        total = len(leads)
+
+        if total == 0:
+            JOBS[job_id]['status'] = 'completed'
+            JOBS[job_id]['progress'] = 100
+            JOBS[job_id]['log'].append('All leads are already enriched — nothing to do.')
+            JOBS[job_id]['results'] = {'processed': 0, 'emails_found': 0, 'linkedin_found': 0}
+            return
+
+        JOBS[job_id]['log'].append(f'Found {total} leads to enrich.')
+
+        if provider_strategy == 'serper_only':
+            providers = ['serper']
+        elif provider_strategy == 'oxylabs_only':
+            providers = ['oxylabs']
+        elif provider_strategy == 'serper_then_oxylabs':
+            providers = ['serper', 'oxylabs']
+        elif provider_strategy == 'free_only':
+            providers = ['serper', 'permutator']
+        else:
+            providers = ['serper']
+
+        done = 0; found_email = 0; found_linkedin = 0
+        for ld in leads:
+            lead_id, bname, city, phone, niche = ld
+            try:
+                r = enrich_lead(str(lead_id), bname, city, phone, niche, providers)
+                save_enrichment(r)
+                done += 1
+                got_email = bool(r.get('email'))
+                got_li = bool(r.get('linkedin_url'))
+                if got_email: found_email += 1
+                if got_li: found_linkedin += 1
+                tags = ' '.join(filter(None, ['✓ email' if got_email else '', '✓ linkedin' if got_li else '']))
+                JOBS[job_id]['log'].append(f'[{done}/{total}] {bname}: {tags or "no contact found"}')
+                JOBS[job_id]['progress'] = int(done / total * 100)
+                time.sleep(0.3)
+            except Exception as e:
+                done += 1
+                JOBS[job_id]['log'].append(f'[{done}/{total}] Error on {bname}: {str(e)[:60]}')
+                JOBS[job_id]['progress'] = int(done / total * 100)
+
+        JOBS[job_id]['status'] = 'completed'
+        JOBS[job_id]['progress'] = 100
+        JOBS[job_id]['log'].append(f'Done — {total} processed · {found_email} emails · {found_linkedin} LinkedIn profiles found.')
+        JOBS[job_id]['results'] = {'processed': total, 'emails_found': found_email, 'linkedin_found': found_linkedin}
+    except Exception as e:
+        JOBS[job_id]['status'] = 'failed'
+        JOBS[job_id]['error'] = str(e)
+        JOBS[job_id]['log'].append(f'Error: {e}')
+
 def run_pipeline_bg(job_id, provider_strategy='serper_then_oxylabs', generate_images=False):
     try:
         JOBS[job_id] = {'status': 'enriching', 'progress': 0, 'log': []}
@@ -2599,8 +2665,11 @@ class Handler(BaseHTTPRequestHandler):
                     SELECT
                       COUNT(*) FILTER (WHERE has_website = FALSE) as hot_leads,
                       COUNT(*) as total,
+                      COUNT(*) FILTER (WHERE status = 'discovered') as discovered,
                       COUNT(*) FILTER (WHERE status = 'enriched') as enriched,
+                      COUNT(*) FILTER (WHERE status = 'scored') as scored,
                       COUNT(*) FILTER (WHERE status = 'ready') as ready,
+                      COUNT(*) FILTER (WHERE status = 'sent') as sent,
                       COUNT(*) FILTER (WHERE ai_score >= 7) as high_score
                     FROM leads
                 """)
@@ -2611,8 +2680,9 @@ class Handler(BaseHTTPRequestHandler):
                 cities = cur.fetchone()[0]
                 cur.close(); conn.close()
                 self.send_json(200, {
-                    'hot_leads': row[0], 'total': row[1], 'enriched': row[2],
-                    'ready': row[3], 'high_score': row[4],
+                    'hot_leads': row[0], 'total': row[1], 'discovered': row[2],
+                    'enriched': row[3], 'scored': row[4], 'ready': row[5],
+                    'sent': row[6], 'high_score': row[7],
                     'with_email': with_email, 'cities': cities
                 })
             except Exception as e:
@@ -2744,7 +2814,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 strategy = body.get('provider', 'serper_then_oxylabs')
                 job_id = f'job_{int(time.time())}'
-                t = threading.Thread(target=run_step_bg, args=(job_id, enrich_all_discovered, 'Enrich all leads', strategy))
+                t = threading.Thread(target=run_enrich_bg, args=(job_id, strategy))
                 t.daemon = True; t.start()
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
             except Exception as e:
