@@ -2814,6 +2814,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 strategy = body.get('provider', 'serper_then_oxylabs')
                 job_id = f'job_{int(time.time())}'
+                JOBS[job_id] = {'status': 'running', 'progress': 0, 'log': ['Checking which leads need enriching...'], 'step': 'Enrich'}
                 t = threading.Thread(target=run_enrich_bg, args=(job_id, strategy))
                 t.daemon = True; t.start()
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
@@ -2824,6 +2825,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 use_oxy = body.get('use_oxylabs', True)
                 job_id = f'job_{int(time.time())}'
+                JOBS[job_id] = {'status': 'running', 'progress': 0, 'log': ['Starting: Find missing emails...'], 'step': 'Find missing emails'}
                 t = threading.Thread(target=run_step_bg, args=(job_id, reenrich_missing_emails, 'Find missing emails', use_oxy))
                 t.daemon = True; t.start()
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
@@ -2833,6 +2835,7 @@ class Handler(BaseHTTPRequestHandler):
         elif p == '/score':
             try:
                 job_id = f'job_{int(time.time())}'
+                JOBS[job_id] = {'status': 'running', 'progress': 0, 'log': ['Starting: AI score leads...'], 'step': 'AI Score'}
                 t = threading.Thread(target=run_step_bg, args=(job_id, score_all_enriched, 'AI score leads'))
                 t.daemon = True; t.start()
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
@@ -2845,6 +2848,7 @@ class Handler(BaseHTTPRequestHandler):
                 CONFIG['image_provider'] = img_prov
                 min_score = body.get('min_score', 5)
                 job_id = f'job_{int(time.time())}'
+                JOBS[job_id] = {'status': 'running', 'progress': 0, 'log': ['Starting: Generate email copy & assets...'], 'step': 'Generate Assets'}
                 t = threading.Thread(target=run_step_bg, args=(job_id, generate_assets_for_top_leads, 'Generate email copy & assets', min_score))
                 t.daemon = True; t.start()
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
