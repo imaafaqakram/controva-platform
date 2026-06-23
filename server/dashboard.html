@@ -651,7 +651,7 @@ const LeadsPage = () => {
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('all');
   const [search, setSearch] = useState('');
-  const [sortBy, setSortBy] = useState('created_at');
+  const [sortBy, setSortBy] = useState('date_found');
   const [sortDir, setSortDir] = useState('desc');
   const [openLead, setOpenLead] = useState(null);
   const [selected, setSelected] = useState(new Set());
@@ -840,23 +840,39 @@ const LeadsPage = () => {
             </div>
           )}
 
-          <div className="flex gap-2 flex-wrap">
-            {[
-              { id: 'all',           label: 'All',                count: leads.length },
-              { id: 'hot',           label: 'Hot (no website)',   count: leads.filter(l => (l.lead_type || '').indexOf('HOT') !== -1).length },
-              { id: 'enriched',      label: 'Enriched',           count: leads.filter(l => !['discovered', 'rejected'].includes(l.status)).length },
-              { id: 'with_email',    label: 'Has Email',          count: leads.filter(l => l.owner_email).length },
-              { id: 'with_linkedin', label: 'Has LinkedIn',       count: leads.filter(l => l.linkedin_url).length },
-              { id: 'with_contact',  label: 'Has Email or LinkedIn', count: leads.filter(l => l.owner_email || l.linkedin_url).length },
-              { id: 'scored',        label: 'High Score (7+)',    count: leads.filter(l => parseInt(l.ai_score) >= 7).length },
-            ].map(f => (
-              <button key={f.id} onClick={() => setFilter(f.id)}
-                className={'px-3 py-1.5 rounded-full text-xs font-medium transition-colors ' + (
-                  filter === f.id ? 'bg-accent-600 text-white' : 'bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700'
-                )}>
-                {f.label} <span className="ml-1 opacity-60">{f.count}</span>
-              </button>
-            ))}
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div className="flex gap-2 flex-wrap">
+              {[
+                { id: 'all',           label: 'All',                count: leads.length },
+                { id: 'hot',           label: 'Hot (no website)',   count: leads.filter(l => (l.lead_type || '').indexOf('HOT') !== -1).length },
+                { id: 'enriched',      label: 'Enriched',           count: leads.filter(l => !['discovered', 'rejected'].includes(l.status)).length },
+                { id: 'with_email',    label: 'Has Email',          count: leads.filter(l => l.owner_email).length },
+                { id: 'with_linkedin', label: 'Has LinkedIn',       count: leads.filter(l => l.linkedin_url).length },
+                { id: 'with_contact',  label: 'Has Email or LinkedIn', count: leads.filter(l => l.owner_email || l.linkedin_url).length },
+                { id: 'scored',        label: 'High Score (7+)',    count: leads.filter(l => parseInt(l.ai_score) >= 7).length },
+              ].map(f => (
+                <button key={f.id} onClick={() => setFilter(f.id)}
+                  className={'px-3 py-1.5 rounded-full text-xs font-medium transition-colors ' + (
+                    filter === f.id ? 'bg-accent-600 text-white' : 'bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700'
+                  )}>
+                  {f.label} <span className="ml-1 opacity-60">{f.count}</span>
+                </button>
+              ))}
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <span className="text-xs text-slate-500 whitespace-nowrap">Sort by</span>
+              <select value={sortBy + '|' + sortDir}
+                onChange={e => { const [k, d] = e.target.value.split('|'); setSortBy(k); setSortDir(d); }}
+                className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1.5 text-xs font-medium">
+                <option value="date_found|desc">Newest First</option>
+                <option value="date_found|asc">Oldest First</option>
+                <option value="ai_score|desc">Highest Score</option>
+                <option value="business_name|asc">Name A → Z</option>
+                <option value="business_name|desc">Name Z → A</option>
+                <option value="city|asc">City A → Z</option>
+                <option value="niche|asc">Niche A → Z</option>
+              </select>
+            </div>
           </div>
         </div>
       </Card>
@@ -894,7 +910,7 @@ const LeadsPage = () => {
                   ].map(col => (
                     <th key={col.key} onClick={() => {
                       if (sortBy === col.key) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
-                      else { setSortBy(col.key); setSortDir('asc'); }
+                      else { setSortBy(col.key); setSortDir(['date_found','date_updated','ai_score'].includes(col.key) ? 'desc' : 'asc'); }
                     }}
                       className={'py-3 px-3 font-semibold text-xs uppercase tracking-wide text-slate-500 cursor-pointer hover:text-slate-900 dark:hover:text-slate-100 select-none whitespace-nowrap text-' + col.align + ' ' + col.w}>
                       <div className={'flex items-center gap-1 ' + (col.align === 'center' ? 'justify-center' : '')}>
