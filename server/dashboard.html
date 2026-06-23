@@ -383,6 +383,9 @@ const SearchPage = ({ setPage }) => {
     try { return JSON.parse(localStorage.getItem('search_history') || '[]'); } catch (e) { return []; }
   });
   const { showToast } = useToast();
+  const [job, setJob] = useState(null);
+  const [jobId, setJobId] = useState(null);
+  const [lastQuery, setLastQuery] = useState('');
 
   const examples = [
     { q: 'barber shops in Manchester UK', emoji: '💇' },
@@ -397,23 +400,59 @@ const SearchPage = ({ setPage }) => {
     { q: 'bakeries in Manchester', emoji: '🥖' },
   ];
 
-  const runSearch = async (q) => {
-    const sq = q || query;
+  // Poll the background discovery job for live progress
+  useEffect(() => {
+    if (!jobId) return;
+    const poll = setInterval(async () => {
+      try {
+        const j = await api.get('/job/' + jobId);
+        setJob(j);
+        if (j.status === 'completed') {
+          clearInterval(poll); setLoading(false); setJobId(null);
+          const res = j.results || {};
+          const r = {
+            status: res.discover_status || 'success',
+            parsed: { niche: res.niche, city: res.city, country: res.country },
+            filter_mode: res.filter_mode, density: res.density,
+            total_new_leads: res.total_new_leads ?? 0,
+            leads: res.leads || [],
+          };
+          setResult(r);
+          const sq = lastQuery;
+          if (sq) {
+            const newHistory = [{ query: sq, time: Date.now(), result: r }, ...history.filter(h => h.query !== sq)].slice(0, 10);
+            setHistory(newHistory);
+            try { localStorage.setItem('search_history', JSON.stringify(newHistory)); } catch (e) {}
+          }
+          if (res.discover_status === 'geocode_failed') showToast('Could not find that location — add the country', 'error');
+          else if ((res.total_new_leads ?? 0) === 0) showToast(res.discover_status === 'exhausted' ? 'Area fully explored — no new leads left' : 'No new leads this round — try Find More', 'info');
+          else showToast('Found ' + res.total_new_leads + ' new businesses!', 'success');
+        } else if (j.status === 'failed') {
+          clearInterval(poll); setLoading(false); setJobId(null);
+          showToast('Search failed: ' + (j.error || 'unknown error'), 'error');
+        }
+      } catch (e) { /* transient — keep polling */ }
+    }, 2000);
+    return () => clearInterval(poll);
+  }, [jobId]);
+
+  const startSearch = async (sq, findMore = false) => {
     if (!sq) return;
-    setLoading(true); setResult(null);
+    setLoading(true); setResult(null); setJob(null); setLastQuery(sq);
     try {
-      const r = await api.post('/search', { query: sq, filter_mode: filterMode, density: density });
-      setResult(r);
-      // Save to history
-      const newHistory = [{ query: sq, time: Date.now(), result: r }, ...history.filter(h => h.query !== sq)].slice(0, 10);
-      setHistory(newHistory);
-      try { localStorage.setItem('search_history', JSON.stringify(newHistory)); } catch (e) {}
-      if (r.status === 'success') showToast('Found ' + r.total_new_leads + ' new businesses!');
-      else if (r.status === 'cache_hit') showToast('Showing cached results', 'info');
-      else showToast('Could not parse that location', 'error');
-    } catch (e) { showToast('Search failed: ' + e.message, 'error'); }
-    setLoading(false);
+      const r = await api.post('/search', { query: sq, filter_mode: filterMode, density: density, find_more: findMore });
+      if (r.job_id) {
+        setJob({ status: 'running', progress: 0, log: [findMore ? 'Widening the search…' : 'Starting search…'], step: 'Discover' });
+        setJobId(r.job_id);
+      } else {
+        setLoading(false);
+        showToast(r.error || 'Could not start search', 'error');
+      }
+    } catch (e) { setLoading(false); showToast('Search failed: ' + e.message, 'error'); }
   };
+
+  const runSearch = (q) => startSearch(q || query, false);
+  const findMore = () => startSearch(lastQuery || query, true);
 
   const clearHistory = () => {
     setHistory([]);
@@ -462,9 +501,9 @@ const SearchPage = ({ setPage }) => {
             <label className="text-xs text-slate-500 mb-1 block font-medium uppercase tracking-wide">Coverage Density</label>
             <div className="grid grid-cols-3 gap-1 bg-slate-100 dark:bg-slate-800 p-1 rounded-lg">
               {[
-                { id: 'low',      label: 'Fast',     desc: '5 zones, ~100 max' },
-                { id: 'standard', label: 'Standard', desc: '9 zones, ~180 max' },
-                { id: 'high',     label: 'Thorough', desc: '25 zones, ~500 max' },
+                { id: 'low',      label: 'Fast',     desc: 'City-wide, quick' },
+                { id: 'standard', label: 'Standard', desc: 'City + 1 ring' },
+                { id: 'high',     label: 'Thorough', desc: 'Multi-ring + OpenStreetMap' },
               ].map(opt => (
                 <button key={opt.id} onClick={() => setDensity(opt.id)}
                   title={opt.desc}
@@ -490,6 +529,28 @@ const SearchPage = ({ setPage }) => {
         </div>
       </Card>
 
+      {job && (loading || job.status === 'running') && (
+        <Card className="fade-in border-2 border-amber-300 dark:border-amber-700/50 bg-amber-50/50 dark:bg-amber-900/10">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <Spinner />
+              <span className="font-semibold text-sm">Searching Google Places + OpenStreetMap for leads…</span>
+            </div>
+            <span className="text-sm font-mono text-amber-700 dark:text-amber-400">{job.progress || 0}%</span>
+          </div>
+          <div className="w-full bg-amber-100 dark:bg-amber-900/30 rounded-full h-2 overflow-hidden mb-3">
+            <div className="bg-amber-500 h-2 rounded-full transition-all duration-500 animate-pulse" style={{ width: (job.progress || 0) + '%' }}></div>
+          </div>
+          {job.log && job.log.length > 0 && (
+            <div className="bg-white/70 dark:bg-slate-900/50 rounded-lg p-3 max-h-40 overflow-y-auto scrollbar-thin space-y-1">
+              {job.log.slice(-8).map((line, i) => (
+                <p key={i} className="text-xs font-mono text-slate-600 dark:text-slate-400">{line}</p>
+              ))}
+            </div>
+          )}
+        </Card>
+      )}
+
       {result && (
         <Card className="fade-in border-2 border-accent-200 dark:border-accent-900/40">
           <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
@@ -499,8 +560,8 @@ const SearchPage = ({ setPage }) => {
             <div className="flex items-center gap-2 flex-wrap">
               {result.filter_mode && <Badge variant="info">Filter: {result.filter_mode === 'no_website' ? 'No Website' : result.filter_mode === 'with_website' ? 'Has Website' : 'All'}</Badge>}
               {result.density && <Badge variant="purple">Density: {result.density}</Badge>}
-              <Badge variant={result.status === 'success' ? 'success' : result.status === 'cache_hit' ? 'info' : 'warning'}>
-                {result.status === 'cache_hit' ? 'Cached' : result.status === 'success' ? 'Live' : result.status}
+              <Badge variant={result.status === 'success' ? 'success' : 'warning'}>
+                {result.status === 'exhausted' ? 'Fully explored' : result.status === 'success' ? 'Live' : result.status}
               </Badge>
             </div>
           </div>
@@ -541,14 +602,19 @@ const SearchPage = ({ setPage }) => {
             </div>
           )}
 
-          {result.total_new_leads === 0 && result.status === 'cache_hit' && (
+          {result.total_new_leads === 0 && (
             <p className="text-sm text-slate-500 mt-3 p-3 bg-yellow-50 dark:bg-yellow-900/20 rounded-lg">
-              💡 This query was already run in the last 24 hours. Existing leads are in the Leads tab.
+              {result.status === 'exhausted'
+                ? '🏁 This area looks fully explored — few new businesses left. Try a different city or niche.'
+                : '💡 No brand-new businesses this round. Click "Find More Leads" to widen the radius, add AI-generated synonyms, and pull from OpenStreetMap.'}
             </p>
           )}
 
-          <div className="mt-4 flex gap-2 pt-4 border-t border-slate-200 dark:border-slate-800">
-            <Button onClick={() => setPage('leads')} variant="primary" icon="ExternalLink">View All Leads</Button>
+          <div className="mt-4 flex gap-2 pt-4 border-t border-slate-200 dark:border-slate-800 flex-wrap">
+            <Button onClick={findMore} disabled={loading} variant="primary" icon={loading ? null : 'Sparkles'}>
+              {loading ? <Spinner /> : 'Find More Leads'}
+            </Button>
+            <Button onClick={() => setPage('leads')} variant="secondary" icon="ExternalLink">View All Leads</Button>
             <Button onClick={() => setPage('pipeline')} variant="secondary" icon="Workflow">Run Enrichment</Button>
           </div>
         </Card>

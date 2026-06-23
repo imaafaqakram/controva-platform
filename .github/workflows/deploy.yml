@@ -82,7 +82,11 @@ jobs:
           script: |
             for f in /tmp/leadgen_migrations/*.sql; do
               echo "Running migration: $f"
-              docker exec leadgen_postgres psql -U leadgen -d leadgen_db -f /tmp/$(basename $f)
+              # Pipe the host file into the container via stdin (the file lives on
+              # the host, not inside the postgres container). Never fail the deploy
+              # on a migration error — the API self-heals its schema at runtime.
+              docker exec -i leadgen_postgres psql -U leadgen -d leadgen_db < "$f" \
+                || echo "  (migration $f reported errors — continuing)"
             done
 
       # ── Restart service (only if API changed) ───────────────

@@ -524,115 +524,401 @@ def search_zone(place_type, lat, lng, radius):
     resp = urllib.request.urlopen(req, timeout=15)
     return json.loads(resp.read().decode())
 
-def discover_leads_smart(niche, city, country='', original_query='', filter_mode='no_website', density='standard'):
-    """Smart discovery with configurable filtering and density.
+# ──────────────────────────────────────────────────────────────
+#  MULTI-SOURCE DISCOVERY ENGINE  (v2)
+#  - Google Places Text Search (New) + pageToken pagination → up to 60/query
+#    (the old searchNearby was hard-capped at 20 and rejected non-place-type
+#     niches like "marketing agency" → that's why many searches returned 0)
+#  - Gemini-driven niche expansion (synonyms / subtypes / related / OSM tags)
+#  - OpenStreetMap Overpass (free, no key) as a second source
+#  - Round-based widening so "Find More" keeps surfacing NEW businesses
+#  - Cross-source dedup on place_id / phone / domain
+# ──────────────────────────────────────────────────────────────
+PLACES_TEXT_URL = 'https://places.googleapis.com/v1/places:searchText'
+TEXT_FIELD_MASK = ('places.id,places.displayName,places.formattedAddress,places.location,'
+                   'places.websiteUri,places.nationalPhoneNumber,places.rating,'
+                   'places.userRatingCount,nextPageToken')
+OVERPASS_ENDPOINTS = [
+    'https://overpass-api.de/api/interpreter',
+    'https://overpass.kumi.systems/api/interpreter',
+]
+NICHE_EXPANSION_CACHE = {}
 
-    filter_mode: 'no_website' (default), 'with_website', 'all'
-    density: 'low' (5 zones), 'standard' (9 zones), 'high' (25 zones)
-    """
-    # Smart cache check - include filter+density in cache key
-    cache_payload = {'niche': niche, 'city': city, 'country': country,
-                    'filter': filter_mode, 'density': density}
-    if is_query_cached('discover', cache_payload, max_age_hours=24):
-        print(f'Cache hit: {niche} in {city} ({filter_mode}) - returning existing')
+
+def _places_text_post(body, tries=3):
+    """POST to Places Text Search with retry/backoff.
+    A 400 right after getting a nextPageToken usually means the token isn't
+    valid yet (propagation delay) → back off and retry. 429 = rate limited."""
+    headers = {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': GOOGLE_API_KEY,
+        'X-Goog-FieldMask': TEXT_FIELD_MASK,
+    }
+    delay = 2.0
+    for attempt in range(tries):
+        try:
+            req = urllib.request.Request(PLACES_TEXT_URL, data=json.dumps(body).encode(),
+                                         method='POST', headers=headers)
+            resp = urllib.request.urlopen(req, timeout=20)
+            return json.loads(resp.read().decode())
+        except Exception as e:
+            code = getattr(e, 'code', None)
+            if code in (400, 429) and attempt < tries - 1:
+                time.sleep(delay); delay *= 2; continue
+            print(f'TextSearch error (code={code}): {e}')
+            return {}
+    return {}
+
+
+def text_search_places(text_query, lat=None, lng=None, radius_m=None, rank='RELEVANCE', max_pages=3):
+    """Google Places Text Search (New). Free-text → ANY niche works (no place-type
+    enum needed). Paginates via nextPageToken up to ~60 results. Optionally bounded
+    to a circular tile via locationRestriction."""
+    base = {'textQuery': text_query, 'pageSize': 20}
+    if rank in ('DISTANCE', 'RELEVANCE'):
+        base['rankPreference'] = rank
+    if lat is not None and lng is not None and radius_m:
+        base['locationRestriction'] = {'circle': {
+            'center': {'latitude': float(lat), 'longitude': float(lng)},
+            'radius': float(min(radius_m, 50000))}}
+    results, token = [], None
+    for _page in range(max_pages):
+        body = dict(base)
+        if token:
+            body['pageToken'] = token
+        data = _places_text_post(body)
+        results.extend(data.get('places', []))
+        token = data.get('nextPageToken')
+        if not token:
+            break
+        time.sleep(2.0)  # nextPageToken needs a moment to become valid
+    return results
+
+
+def gemini_expand_niche(niche, city, country=''):
+    """Use Gemini to expand a niche into search variants (cached per niche+city).
+    Returns synonyms / subtypes / related / osm_tags / adjacent_areas."""
+    key = f'{niche.lower()}|{city.lower()}|{country.lower()}'
+    if key in NICHE_EXPANSION_CACHE:
+        return NICHE_EXPANSION_CACHE[key]
+    data = {'synonyms': [], 'subtypes': [], 'related': [], 'osm_tags': [], 'adjacent_areas': []}
+    prompt = f"""You expand a business niche into search variants for a B2B lead-gen tool.
+Niche: "{niche}"   Location: {city}, {country}
+
+Return ONLY valid JSON:
+{{"synonyms":["..."],"subtypes":["..."],"related":["..."],"osm_tags":["amenity=dentist"],"adjacent_areas":["..."]}}
+
+Rules:
+- synonyms: direct equivalents (dentist -> dental clinic, dental surgery)
+- subtypes: narrower kinds (orthodontist, cosmetic dentist, pediatric dentist)
+- related: adjacent business types serving similar customers (dental lab)
+- osm_tags: valid OpenStreetMap key=value tags for this niche. Examples:
+  amenity=dentist, healthcare=dentist, amenity=restaurant, amenity=cafe,
+  shop=hairdresser, shop=beauty, office=lawyer, craft=plumber, craft=electrician,
+  leisure=fitness_centre, amenity=pharmacy, shop=car_repair, amenity=clinic
+- adjacent_areas: up to 6 suburbs / nearby towns of {city}
+Max 8 items per list. Keep terms short."""
+    out = gemini_call(prompt, 700)
+    if out:
+        try:
+            m = re.search(r'\{[\s\S]*\}', out)
+            if m:
+                parsed = json.loads(m.group())
+                for k in data:
+                    v = parsed.get(k)
+                    if isinstance(v, list):
+                        data[k] = [str(x).strip() for x in v if str(x).strip()][:8]
+        except Exception as e:
+            print(f'Niche expansion parse error: {e}')
+    NICHE_EXPANSION_CACHE[key] = data
+    return data
+
+
+def overpass_search(osm_tags, lat, lng, radius_m=8000, timeout=50):
+    """Free local-business search via OpenStreetMap Overpass API. No key required.
+    osm_tags: list like ['amenity=dentist','healthcare=dentist']."""
+    clauses = []
+    for tag in (osm_tags or []):
+        if '=' not in tag:
+            continue
+        k, v = tag.split('=', 1)
+        k = re.sub(r'[^a-zA-Z0-9_:]', '', k)
+        v = re.sub(r'["\\]', '', v)
+        if k and v:
+            clauses.append(f'nwr["{k}"="{v}"](around:{int(radius_m)},{lat},{lng});')
+    if not clauses:
+        return []
+    query = f'[out:json][timeout:{timeout}];\n(\n' + '\n'.join(clauses) + '\n);\nout center tags;'
+    for endpoint in OVERPASS_ENDPOINTS:
+        try:
+            req = urllib.request.Request(
+                endpoint, data=urllib.parse.urlencode({'data': query}).encode(),
+                headers={'User-Agent': 'controva-leadgen/1.0 (lead discovery)'})
+            resp = urllib.request.urlopen(req, timeout=timeout + 25)
+            data = json.loads(resp.read().decode())
+            out = []
+            for el in data.get('elements', []):
+                t = el.get('tags', {})
+                name = t.get('name')
+                if not name:
+                    continue
+                if el.get('type') == 'node':
+                    elat, elng = el.get('lat'), el.get('lon')
+                else:
+                    c = el.get('center') or {}
+                    elat, elng = c.get('lat'), c.get('lon')
+                addr_parts = [t.get('addr:housenumber'), t.get('addr:street'),
+                              t.get('addr:city'), t.get('addr:postcode')]
+                out.append({
+                    'source': 'osm',
+                    'source_id': f"osm_{el.get('type')}_{el.get('id')}",
+                    'name': name,
+                    'phone': t.get('phone') or t.get('contact:phone') or '',
+                    'website': t.get('website') or t.get('contact:website') or t.get('url') or None,
+                    'address': ', '.join(p for p in addr_parts if p),
+                    'lat': elat, 'lng': elng, 'rating': None, 'review_count': 0,
+                })
+            return out
+        except Exception as e:
+            print(f'Overpass error ({endpoint}): {e}')
+            time.sleep(1)
+    return []
+
+
+def norm_phone(phone):
+    """Loose cross-source phone key = last 10 digits."""
+    if not phone:
+        return ''
+    d = re.sub(r'\D', '', str(phone))
+    return d[-10:] if len(d) >= 10 else d
+
+
+def norm_domain(website):
+    """Registrable-ish domain, stripped of scheme/www/path."""
+    if not website:
+        return ''
+    w = str(website).lower().strip()
+    w = re.sub(r'^https?://', '', w)
+    w = re.sub(r'^www\.', '', w)
+    return w.split('/')[0].split('?')[0]
+
+
+def _norm_google_place(p):
+    name = (p.get('displayName') or {}).get('text', 'Unknown')
+    loc = p.get('location') or {}
+    return {
+        'source': 'google',
+        'source_id': p.get('id', ''),
+        'name': name,
+        'phone': p.get('nationalPhoneNumber', '') or '',
+        'website': p.get('websiteUri') or None,
+        'address': p.get('formattedAddress', '') or '',
+        'lat': loc.get('latitude'), 'lng': loc.get('longitude'),
+        'rating': p.get('rating'), 'review_count': p.get('userRatingCount', 0),
+    }
+
+
+def build_tiles(lat, lng, city_radius, rnd):
+    """Concentric-ring tiling. Round 0 = one city-wide query; each extra round
+    adds a finer/wider ring so every 'Find More' reaches businesses the previous
+    runs never queried. Hard-capped so a single run never explodes API cost."""
+    import math
+    city_radius = max(3000, min(int(city_radius), 50000))
+    if rnd <= 0:
+        return [(lat, lng, city_radius)]
+    tiles = [(lat, lng, city_radius)]
+    tile_r = max(2500, int(city_radius * 0.55))
+    ring_specs = [(6, 0.55), (10, 0.9), (12, 1.25)][:min(rnd, 3)]
+    for (count, frac) in ring_specs:
+        dist = city_radius * frac
+        for k in range(count):
+            ang = 2 * math.pi * k / count
+            dlat = (dist * math.cos(ang)) / 111320.0
+            dlng = (dist * math.sin(ang)) / (111320.0 * max(0.2, math.cos(math.radians(lat))))
+            tiles.append((lat + dlat, lng + dlng, tile_r))
+    return tiles[:25]
+
+
+def ensure_discovery_tables():
+    """Self-healing schema for discovery state + dedup columns (idempotent).
+    Runs at discovery time so it works even if the SQL migration didn't."""
+    try:
         conn = db_conn(); cur = conn.cursor()
-        if filter_mode == 'no_website':
-            cur.execute("SELECT place_id, business_name FROM leads WHERE niche=%s AND city ILIKE %s AND has_website=FALSE",
-                       (niche.lower(), f'%{city}%'))
-        elif filter_mode == 'with_website':
-            cur.execute("SELECT place_id, business_name FROM leads WHERE niche=%s AND city ILIKE %s AND has_website=TRUE",
-                       (niche.lower(), f'%{city}%'))
-        else:
-            cur.execute("SELECT place_id, business_name FROM leads WHERE niche=%s AND city ILIKE %s",
-                       (niche.lower(), f'%{city}%'))
-        existing = [{'place_id': r[0], 'business_name': r[1], 'cached': True} for r in cur.fetchall()]
-        cur.close(); conn.close()
-        return existing, 'cache_hit'
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS discovery_state (
+                id          SERIAL PRIMARY KEY,
+                niche       VARCHAR(200) NOT NULL,
+                city        VARCHAR(200) NOT NULL,
+                country     VARCHAR(200) NOT NULL DEFAULT '',
+                round       INTEGER NOT NULL DEFAULT 0,
+                exhausted   BOOLEAN NOT NULL DEFAULT FALSE,
+                total_found INTEGER NOT NULL DEFAULT 0,
+                updated_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                UNIQUE(niche, city, country)
+            )""")
+        cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS phone_norm VARCHAR(20)")
+        cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS domain VARCHAR(255)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_leads_phone_norm ON leads(phone_norm)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_leads_domain ON leads(domain)")
+        conn.commit(); cur.close(); conn.close()
+    except Exception as e:
+        print(f'ensure_discovery_tables error: {e}')
 
-    # Geocode
+
+def discover_leads_smart(niche, city, country='', original_query='',
+                         filter_mode='no_website', density='standard',
+                         find_more=False, job_id=None):
+    """Multi-source, round-based discovery.
+
+    filter_mode : 'no_website' | 'with_website' | 'all'
+    density     : 'low' | 'standard' | 'high' (how aggressive each round starts)
+    find_more   : advance to the next round → wider radius, more synonyms, +OSM
+    job_id      : if set, live progress is written to JOBS[job_id]
+    """
+    ensure_discovery_tables()
+
+    def _log(msg, pct=None):
+        if job_id and job_id in JOBS:
+            JOBS[job_id]['log'].append(msg)
+            if pct is not None:
+                JOBS[job_id]['progress'] = int(pct)
+
     geo = geocode_city(city, country)
     if not geo:
         return [], 'geocode_failed'
+    lat, lng, base_rad = geo['lat'], geo['lng'], geo['radius']
 
-    lat, lng, rad = geo['lat'], geo['lng'], geo['radius']
-    place_type = NICHE_MAP.get(niche.lower(), niche.lower())
-
-    # Build zones based on density
-    if density == 'low':
-        # 5 zones (original)
-        sub = int(rad/2); off = (rad/4)/111000
-        zones = [
-            (city+' Center', lat, lng),
-            (city+' North',  lat+off, lng),
-            (city+' South',  lat-off, lng),
-            (city+' East',   lat, lng+off),
-            (city+' West',   lat, lng-off),
-        ]
-    elif density == 'high':
-        # 25 zones (5x5 grid) - very thorough
-        sub = max(int(rad/4), 2000)  # smaller sub-radius for tight packing
-        step = (rad/2.5)/111000
-        zones = []
-        for i in range(-2, 3):
-            for j in range(-2, 3):
-                zlat = lat + (i * step)
-                zlng = lng + (j * step)
-                zones.append((f'{city} ({i},{j})', zlat, zlng))
-    else:  # standard - 9 zones (3x3 grid)
-        sub = int(rad/2)
-        step = (rad/2.5)/111000
-        zones = []
-        for i in range(-1, 2):
-            for j in range(-1, 2):
-                zlat = lat + (i * step)
-                zlng = lng + (j * step)
-                zones.append((f'{city} ({i},{j})', zlat, zlng))
-
-    all_leads = []
-    seen_pids = set()
+    # ── load / advance the round counter for this (niche, city) ──
+    cc = (country or '').upper()
     conn = db_conn(); cur = conn.cursor()
+    cur.execute("SELECT round, total_found FROM discovery_state WHERE niche=%s AND city=%s AND country=%s",
+                (niche.lower(), city.lower(), cc))
+    row = cur.fetchone()
+    if row:
+        rnd = row[0] + 1 if find_more else row[0]
+    else:
+        rnd = 0
+        cur.execute("""INSERT INTO discovery_state(niche,city,country,round)
+                       VALUES(%s,%s,%s,0) ON CONFLICT (niche,city,country) DO NOTHING""",
+                    (niche.lower(), city.lower(), cc))
+        conn.commit()
+    cur.close(); conn.close()
 
-    for zn, zlat, zlng in zones:
+    # density sets how much we widen even on the first run
+    aggression = {'low': 0, 'standard': 1, 'high': 2}.get(density, 1)
+    eff_round = rnd + aggression
+
+    # ── build the query-term list (round controls how deep we go) ──
+    exp = gemini_expand_niche(niche, city, country)
+    ordered = [niche] + exp['synonyms'] + exp['subtypes'] + exp['related']
+    seen_t, terms = set(), []
+    for t in ordered:
+        tl = t.lower().strip()
+        if tl and tl not in seen_t:
+            seen_t.add(tl); terms.append(t)
+    term_count = min(len(terms), 3 + eff_round)
+    round_terms = terms[:term_count] or [niche]
+
+    tiles = build_tiles(lat, lng, base_rad, eff_round)
+    # cost guard: never exceed ~36 searches in a single run
+    MAX_SEARCHES = 36
+    if len(tiles) * len(round_terms) > MAX_SEARCHES:
+        tiles = tiles[:max(1, MAX_SEARCHES // len(round_terms))]
+    use_osm = eff_round >= 1 and bool(exp['osm_tags'])
+
+    _log(f'Round {rnd} · {len(round_terms)} search terms · {len(tiles)} map tiles · '
+         f'sources: Google Places{" + OpenStreetMap" if use_osm else ""}')
+    if len(round_terms) > 1:
+        _log(f'Terms: {", ".join(round_terms)}')
+
+    # ── harvest (collect raw, dedup in-memory by source_id) ──
+    raw = {}
+    total_units = len(tiles) * len(round_terms) + (len(tiles) if use_osm else 0)
+    done_units = 0
+    for (tlat, tlng, trad) in tiles:
+        for term in round_terms:
+            try:
+                for p in text_search_places(term, tlat, tlng, trad):
+                    pid = p.get('id')
+                    if pid and pid not in raw:
+                        raw[pid] = _norm_google_place(p)
+            except Exception as e:
+                print(f'text_search error: {e}')
+            done_units += 1
+            if done_units % 2 == 0 or done_units >= total_units:
+                _log(f'Searched {done_units}/{total_units} · {len(raw)} candidates so far',
+                     pct=min(85, done_units / max(1, total_units) * 85))
+        if use_osm:
+            try:
+                for o in overpass_search(exp['osm_tags'], tlat, tlng, int(trad * 1.2)):
+                    if o['source_id'] not in raw:
+                        raw[o['source_id']] = o
+            except Exception as e:
+                print(f'overpass error: {e}')
+            done_units += 1
+
+    _log(f'Collected {len(raw)} unique candidates. De-duplicating against your database…', pct=88)
+
+    # ── dedup against DB (place_id / phone / domain) + insert NEW ──
+    new_leads = []
+    conn = db_conn(); cur = conn.cursor()
+    for cand in raw.values():
+        website = cand.get('website')
+        has_website = bool(website)
+        if filter_mode == 'no_website' and has_website:
+            continue
+        if filter_mode == 'with_website' and not has_website:
+            continue
+        pid = cand.get('source_id')
+        if not pid:
+            continue
+        pn = norm_phone(cand.get('phone'))
+        dom = norm_domain(website)
         try:
-            data = search_zone(place_type, zlat, zlng, sub)
-            for p in data.get('places', []):
-                pid = p.get('id', '')
-                if not pid or pid in seen_pids: continue
-                seen_pids.add(pid)
-
-                has_website = bool(p.get('websiteUri'))
-
-                # Apply filter
-                if filter_mode == 'no_website' and has_website: continue
-                if filter_mode == 'with_website' and not has_website: continue
-
-                # Skip if already in DB
-                cur.execute("SELECT 1 FROM leads WHERE place_id=%s", (pid,))
-                if cur.fetchone(): continue
-
-                name = (p.get('displayName') or {}).get('text', 'Unknown')
-                addr = p.get('formattedAddress', '') or ''
-                phone = p.get('nationalPhoneNumber', '') or ''
-                website = p.get('websiteUri', '') if has_website else None
-                lat2 = (p.get('location') or {}).get('latitude')
-                lng2 = (p.get('location') or {}).get('longitude')
-                rat = p.get('rating'); rc = p.get('userRatingCount', 0)
-
-                cur.execute("""INSERT INTO leads(place_id,business_name,niche,city,country,address,phone,
-                              website,latitude,longitude,google_rating,review_count,status)
-                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'discovered') ON CONFLICT (place_id) DO NOTHING""",
-                    (pid, name, niche.lower(), city, country, addr, phone, website, lat2, lng2, rat, rc))
-                cur.execute("INSERT INTO processed_cache(cache_key,cache_type) VALUES(%s,'place') ON CONFLICT DO NOTHING",(pid,))
-                all_leads.append({
-                    'place_id': pid, 'business_name': name, 'niche': niche, 'city': city,
-                    'phone': phone, 'has_website': has_website, 'website': website
+            cur.execute("""SELECT 1 FROM leads
+                           WHERE place_id=%s
+                              OR (%s <> '' AND phone_norm=%s)
+                              OR (%s <> '' AND domain=%s)
+                           LIMIT 1""",
+                        (pid, pn, pn, dom, dom))
+            if cur.fetchone():
+                continue
+            cur.execute("""INSERT INTO leads(place_id,business_name,niche,city,country,address,phone,
+                          website,latitude,longitude,google_rating,review_count,status,source,phone_norm,domain)
+                VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'discovered',%s,%s,%s)
+                ON CONFLICT (place_id) DO NOTHING RETURNING id""",
+                (pid, (cand.get('name') or 'Unknown')[:480], niche.lower(), city, country,
+                 cand.get('address', ''), cand.get('phone', ''), website,
+                 cand.get('lat'), cand.get('lng'), cand.get('rating'),
+                 cand.get('review_count', 0), cand.get('source', 'google'),
+                 pn or None, dom or None))
+            if cur.fetchone():
+                new_leads.append({
+                    'place_id': pid, 'business_name': cand.get('name', 'Unknown'),
+                    'niche': niche, 'city': city, 'phone': cand.get('phone', ''),
+                    'has_website': has_website, 'website': website,
+                    'address': cand.get('address', ''), 'source': cand.get('source', 'google'),
                 })
+            conn.commit()
         except Exception as e:
-            print(f'Zone {zn} error: {e}')
+            print(f'dedup/insert error: {e}')
+            conn.rollback()
+    cur.close(); conn.close()
 
-    conn.commit(); cur.close(); conn.close()
-    mark_query_cached('discover', cache_payload)
-    return all_leads, 'success'
+    # ── persist round state; mark exhausted if a widening round found little ──
+    exhausted = find_more and len(new_leads) < 3
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("""UPDATE discovery_state
+                       SET round=%s, exhausted=%s, total_found=total_found+%s, updated_at=NOW()
+                       WHERE niche=%s AND city=%s AND country=%s""",
+                    (rnd, exhausted, len(new_leads), niche.lower(), city.lower(), cc))
+        conn.commit(); cur.close(); conn.close()
+    except Exception as e:
+        print(f'discovery_state update error: {e}')
+
+    _log(f'Done — {len(new_leads)} NEW leads added (round {rnd}).', pct=100)
+    return new_leads, ('exhausted' if exhausted else 'success')
 
 
 # ──────────────────────────────────────────────────────────────
@@ -2183,6 +2469,35 @@ def run_step_bg(job_id, step_fn, step_name, *args):
         JOBS[job_id]['error'] = str(e)
         JOBS[job_id]['log'].append(f'Error: {e}')
 
+def run_discover_bg(job_id, niche, city, country, filter_mode, density, find_more, original_query=''):
+    """Discovery background job — runs the multi-source engine and reports live progress."""
+    try:
+        if job_id not in JOBS:
+            JOBS[job_id] = {'status': 'running', 'progress': 0,
+                            'log': [f'Discovering "{niche}" in {city}…'], 'step': 'Discover'}
+        leads, status = discover_leads_smart(
+            niche, city, country, original_query,
+            filter_mode=filter_mode, density=density,
+            find_more=find_more, job_id=job_id)
+        JOBS[job_id]['status'] = 'completed'
+        JOBS[job_id]['progress'] = 100
+        if status == 'geocode_failed':
+            JOBS[job_id]['log'].append('Could not find that location — try adding the country.')
+        elif status == 'exhausted':
+            JOBS[job_id]['log'].append('This area looks fully explored — few new businesses left.')
+        JOBS[job_id]['results'] = {
+            'total': len(leads), 'total_new_leads': len(leads),
+            'leads': leads[:200], 'discover_status': status,
+            'niche': niche, 'city': city, 'country': country,
+            'filter_mode': filter_mode, 'density': density, 'find_more': find_more,
+        }
+    except Exception as e:
+        JOBS[job_id] = JOBS.get(job_id, {'log': []})
+        JOBS[job_id]['status'] = 'failed'
+        JOBS[job_id]['error'] = str(e)
+        JOBS[job_id].setdefault('log', []).append(f'Error: {e}')
+
+
 def run_enrich_bg(job_id, provider_strategy='serper_then_oxylabs'):
     """Enrichment background job with per-lead progress tracking."""
     try:
@@ -2741,7 +3056,7 @@ class Handler(BaseHTTPRequestHandler):
             body = {}
 
         if p == '/search':
-            # Free-text natural language search
+            # Free-text natural language search → background discovery job
             try:
                 query = body.get('query', '')
                 if not query:
@@ -2749,22 +3064,21 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 filter_mode = body.get('filter_mode', 'no_website')  # no_website | with_website | all
                 density = body.get('density', 'standard')  # low | standard | high
+                find_more = bool(body.get('find_more', False))
                 parsed = parse_search_query(query)
                 if not parsed:
                     self.send_json(500, {'error': 'failed to parse query'})
                     return
-                leads, status = discover_leads_smart(
-                    parsed['niche'], parsed['city'], parsed.get('country', ''), query,
-                    filter_mode=filter_mode, density=density
-                )
-                self.send_json(200, {
-                    'status': status, 'parsed': parsed,
-                    'filter_mode': filter_mode, 'density': density,
-                    'total_new_leads': len(leads), 'leads': leads,
-                    'message': f'Found {len(leads)} businesses for "{query}"' if status == 'success'
-                              else 'Cached (no new search needed)' if status == 'cache_hit'
-                              else 'Could not find that location'
-                })
+                job_id = f'job_{int(time.time() * 1000)}'
+                JOBS[job_id] = {'status': 'running', 'progress': 0,
+                                'log': [f'Parsing "{query}" → {parsed.get("niche")} in {parsed.get("city")}'],
+                                'step': 'Discover'}
+                t = threading.Thread(target=run_discover_bg, args=(
+                    job_id, parsed['niche'], parsed['city'], parsed.get('country', ''),
+                    filter_mode, density, find_more, query))
+                t.daemon = True; t.start()
+                self.send_json(200, {'job_id': job_id, 'status': 'started',
+                                     'parsed': parsed, 'find_more': find_more})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
@@ -2804,9 +3118,14 @@ class Handler(BaseHTTPRequestHandler):
                 country = body.get('country', '')
                 filter_mode = body.get('filter_mode', 'no_website')
                 density = body.get('density', 'standard')
-                leads, status = discover_leads_smart(niche, city, country, '', filter_mode, density)
-                self.send_json(200, {'status': status, 'total_new_leads': len(leads), 'leads': leads,
-                                    'filter_mode': filter_mode, 'density': density})
+                find_more = bool(body.get('find_more', False))
+                job_id = f'job_{int(time.time() * 1000)}'
+                JOBS[job_id] = {'status': 'running', 'progress': 0,
+                                'log': [f'Discovering "{niche}" in {city}…'], 'step': 'Discover'}
+                t = threading.Thread(target=run_discover_bg, args=(
+                    job_id, niche, city, country, filter_mode, density, find_more, ''))
+                t.daemon = True; t.start()
+                self.send_json(200, {'job_id': job_id, 'status': 'started'})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
