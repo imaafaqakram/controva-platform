@@ -34,6 +34,7 @@ IMAGINE_ART_KEY= os.environ.get('IMAGINE_ART_KEY', '')  # Set this when user pro
 OXYLABS_KEY    = 'iPz3YfTsAOsRt1ZE49T2wGdkOz0lPcInRQOEEgOW'
 CRAWL4AI_URL   = 'http://localhost:11235'
 CRAWL4AI_TOKEN = 'crawl4ai_secret_token_2024'
+HERE_API_KEY   = os.environ.get('HERE_API_KEY', '')  # Free 250k/mo: developer.here.com
 
 # Configuration toggles (can be changed via /config endpoint)
 CONFIG = {
@@ -52,7 +53,7 @@ CONFIG_FILE = '/opt/leadgen/config.json'
 
 def load_config():
     """Load config from disk, fall back to defaults."""
-    global GOOGLE_API_KEY, SERPER_KEY, GEMINI_KEY, CLAUDE_KEY, REPLICATE_TOKEN, IMAGINE_ART_KEY, OXYLABS_KEY, RESEND_KEY, FROM_EMAIL, FROM_NAME
+    global GOOGLE_API_KEY, SERPER_KEY, GEMINI_KEY, CLAUDE_KEY, REPLICATE_TOKEN, IMAGINE_ART_KEY, OXYLABS_KEY, RESEND_KEY, FROM_EMAIL, FROM_NAME, HERE_API_KEY
     try:
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, 'r') as f:
@@ -69,6 +70,7 @@ def load_config():
                 'resend_key': 'RESEND_KEY',
                 'from_email': 'FROM_EMAIL',
                 'from_name': 'FROM_NAME',
+                'here_api_key': 'HERE_API_KEY',
             }
             for key, var_name in keys_map.items():
                 if key in saved and saved[key]:
@@ -95,6 +97,7 @@ def save_config():
             'resend_key': RESEND_KEY,
             'from_email': FROM_EMAIL,
             'from_name': FROM_NAME,
+            'here_api_key': HERE_API_KEY,
             'config': CONFIG,
         }
         with open(CONFIG_FILE, 'w') as f:
@@ -106,11 +109,11 @@ def save_config():
 
 def update_api_key(name, value):
     """Update an API key and save."""
-    global GOOGLE_API_KEY, SERPER_KEY, GEMINI_KEY, CLAUDE_KEY, REPLICATE_TOKEN, IMAGINE_ART_KEY, OXYLABS_KEY, RESEND_KEY, FROM_EMAIL, FROM_NAME
+    global GOOGLE_API_KEY, SERPER_KEY, GEMINI_KEY, CLAUDE_KEY, REPLICATE_TOKEN, IMAGINE_ART_KEY, OXYLABS_KEY, RESEND_KEY, FROM_EMAIL, FROM_NAME, HERE_API_KEY
     name_lower = name.lower()
     valid_keys = ['google_api_key', 'serper_key', 'gemini_key', 'claude_key',
                   'replicate_token', 'imagine_art_key', 'oxylabs_key', 'resend_key',
-                  'from_email', 'from_name']
+                  'from_email', 'from_name', 'here_api_key']
     if name_lower not in valid_keys: return False
     # Update the actual global variable
     var_name = name_lower.upper()
@@ -136,6 +139,7 @@ def get_api_keys_masked():
         'resend_key':      mask(RESEND_KEY),
         'from_email':      {'set': bool(FROM_EMAIL), 'preview': FROM_EMAIL},
         'from_name':       {'set': bool(FROM_NAME), 'preview': FROM_NAME},
+        'here_api_key':    mask(HERE_API_KEY),
     }
 
 # Load saved config at startup
@@ -685,6 +689,53 @@ def overpass_search(osm_tags, lat, lng, radius_m=8000, timeout=50):
     return []
 
 
+def here_search(text_query, lat, lng, radius_m=8000, limit=100):
+    """HERE Maps Geocoding & Search API — Discover endpoint.
+    Returns up to 100 POI results per call.  Free 250k transactions/month.
+    Skipped silently when HERE_API_KEY is not set.
+    Sign up: developer.here.com (no credit card for free tier)."""
+    if not HERE_API_KEY:
+        return []
+    params = urllib.parse.urlencode({
+        'q': text_query,
+        'at': f'{lat},{lng}',
+        'in': f'circle:{lat},{lng};r={int(min(radius_m, 100000))}',
+        'limit': min(int(limit), 100),
+        'apiKey': HERE_API_KEY,
+    })
+    url = f'https://discover.search.hereapi.com/v1/discover?{params}'
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'controva-leadgen/1.0'})
+        resp = urllib.request.urlopen(req, timeout=20)
+        data = json.loads(resp.read().decode())
+        out = []
+        for item in data.get('items', []):
+            pos = item.get('position', {})
+            addr = item.get('address', {})
+            contacts = (item.get('contacts') or [{}])[0]
+            phone = ''
+            phones = contacts.get('phone') or []
+            if phones:
+                phone = phones[0].get('value', '')
+            www = contacts.get('www') or []
+            website = www[0].get('value', '') if www else None
+            here_id = item.get('id', '')
+            out.append({
+                'source': 'here',
+                'source_id': f'here_{here_id}',
+                'name': item.get('title', ''),
+                'phone': phone,
+                'website': website or None,
+                'address': addr.get('label', ''),
+                'lat': pos.get('lat'), 'lng': pos.get('lng'),
+                'rating': None, 'review_count': 0,
+            })
+        return out
+    except Exception as e:
+        print(f'HERE search error: {e}')
+        return []
+
+
 def norm_phone(phone):
     """Loose cross-source phone key = last 10 digits."""
     if not phone:
@@ -824,16 +875,20 @@ def discover_leads_smart(niche, city, country='', original_query='',
     MAX_SEARCHES = 36
     if len(tiles) * len(round_terms) > MAX_SEARCHES:
         tiles = tiles[:max(1, MAX_SEARCHES // len(round_terms))]
-    use_osm = eff_round >= 1 and bool(exp['osm_tags'])
+    use_osm  = eff_round >= 1 and bool(exp['osm_tags'])
+    use_here = bool(HERE_API_KEY)  # runs per-term on primary tile; 100 results/call
 
-    _log(f'Round {rnd} · {len(round_terms)} search terms · {len(tiles)} map tiles · '
-         f'sources: Google Places{" + OpenStreetMap" if use_osm else ""}')
+    sources_str = 'Google Places'
+    if use_osm:  sources_str += ' + OpenStreetMap'
+    if use_here: sources_str += ' + HERE Maps'
+    _log(f'Round {rnd} · {len(round_terms)} search terms · {len(tiles)} map tiles · sources: {sources_str}')
     if len(round_terms) > 1:
         _log(f'Terms: {", ".join(round_terms)}')
 
     # ── harvest (collect raw, dedup in-memory by source_id) ──
     raw = {}
-    total_units = len(tiles) * len(round_terms) + (len(tiles) if use_osm else 0)
+    here_units = len(round_terms) if use_here else 0
+    total_units = len(tiles) * len(round_terms) + (len(tiles) if use_osm else 0) + here_units
     done_units = 0
     for (tlat, tlng, trad) in tiles:
         for term in round_terms:
@@ -847,7 +902,7 @@ def discover_leads_smart(niche, city, country='', original_query='',
             done_units += 1
             if done_units % 2 == 0 or done_units >= total_units:
                 _log(f'Searched {done_units}/{total_units} · {len(raw)} candidates so far',
-                     pct=min(85, done_units / max(1, total_units) * 85))
+                     pct=min(80, done_units / max(1, total_units) * 80))
         if use_osm:
             try:
                 for o in overpass_search(exp['osm_tags'], tlat, tlng, int(trad * 1.2)):
@@ -856,6 +911,20 @@ def discover_leads_smart(niche, city, country='', original_query='',
             except Exception as e:
                 print(f'overpass error: {e}')
             done_units += 1
+
+    # HERE Maps: one call per term on the primary tile (100 results each)
+    if use_here:
+        _log('Searching HERE Maps…')
+        for term in round_terms:
+            try:
+                for h in here_search(term, lat, lng, int(base_rad)):
+                    if h['source_id'] not in raw:
+                        raw[h['source_id']] = h
+            except Exception as e:
+                print(f'HERE error for "{term}": {e}')
+            done_units += 1
+            _log(f'Searched {done_units}/{total_units} · {len(raw)} candidates so far',
+                 pct=min(85, done_units / max(1, total_units) * 85))
 
     _log(f'Collected {len(raw)} unique candidates. De-duplicating against your database…', pct=88)
 
