@@ -377,7 +377,7 @@ const SearchPage = ({ setPage }) => {
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
-  const [filterMode, setFilterMode] = useState('no_website');  // no_website | with_website | all
+  const [filterMode, setFilterMode] = useState('all');  // all | no_website | with_website
   const [density, setDensity] = useState('standard');  // low | standard | high
   const [history, setHistory] = useState(() => {
     try { return JSON.parse(localStorage.getItem('search_history') || '[]'); } catch (e) { return []; }

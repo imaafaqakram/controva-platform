@@ -974,13 +974,17 @@ def discover_leads_smart(niche, city, country='', original_query='',
 
     # ── dedup against DB (place_id / phone / domain) + insert NEW ──
     new_leads = []
+    filtered_by_website = 0
+    already_in_db = 0
     conn = db_conn(); cur = conn.cursor()
     for cand in raw.values():
         website = cand.get('website')
         has_website = bool(website)
         if filter_mode == 'no_website' and has_website:
+            filtered_by_website += 1
             continue
         if filter_mode == 'with_website' and not has_website:
+            filtered_by_website += 1
             continue
         pid = cand.get('source_id')
         if not pid:
@@ -995,6 +999,7 @@ def discover_leads_smart(niche, city, country='', original_query='',
                            LIMIT 1""",
                         (pid, pn, pn, dom, dom))
             if cur.fetchone():
+                already_in_db += 1
                 continue
             cur.execute("""INSERT INTO leads(place_id,business_name,niche,city,country,address,phone,
                           website,latitude,longitude,google_rating,review_count,status,source,phone_norm,domain)
@@ -1030,7 +1035,22 @@ def discover_leads_smart(niche, city, country='', original_query='',
     except Exception as e:
         print(f'discovery_state update error: {e}')
 
-    _log(f'Done — {len(new_leads)} NEW leads added (round {rnd}).', pct=100)
+    total_found = len(raw)
+    if len(new_leads) == 0 and total_found > 0:
+        if filtered_by_website > 0 and already_in_db == 0:
+            why = 'have websites' if filter_mode == 'no_website' else 'have no website'
+            _log(f'Found {total_found} businesses but all were filtered out '
+                 f'({filtered_by_website} {why}). Switch the Website Filter to "All" to capture them.', pct=100)
+        elif already_in_db > 0 and filtered_by_website == 0:
+            _log(f'Found {total_found} businesses — all {already_in_db} already in your database. '
+                 f'Click "Find More Leads" to search a wider area.', pct=100)
+        else:
+            _log(f'Found {total_found} businesses: {filtered_by_website} filtered by website, '
+                 f'{already_in_db} already in database. Try "All" filter or "Find More Leads".', pct=100)
+    else:
+        _log(f'Done — {len(new_leads)} new leads added'
+             + (f' ({already_in_db} already in DB, {filtered_by_website} filtered)' if already_in_db or filtered_by_website else '')
+             + f' · round {rnd}.', pct=100)
     return new_leads, ('exhausted' if exhausted else 'success')
 
 
