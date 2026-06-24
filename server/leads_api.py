@@ -265,7 +265,7 @@ Examples:
                 parsed = json.loads(m.group())
                 # Validate country is a real ISO code
                 if parsed.get('country') and len(parsed.get('country', '')) == 2:
-                    return parsed
+                    return _fix_state_as_city(parsed)
         except Exception as e:
             print(f'Gemini parse error: {e}')
 
@@ -433,12 +433,48 @@ Examples:
     if city_lower in country_to_capital:
         city, country = country_to_capital[city_lower]
 
-    return {'niche': niche, 'city': city, 'country': country, 'modifiers': []}
+    return _fix_state_as_city({'niche': niche, 'city': city, 'country': country, 'modifiers': []})
 
 
-# ──────────────────────────────────────────────────────────────
-#  GEOCODING (Google Geocoding API, free with billing enabled)
-# ──────────────────────────────────────────────────────────────
+# US state names/abbreviations → largest city (fixes "gyms in Texas" / "lawyers in Florida")
+US_STATE_CITIES = {
+    'alabama':'Birmingham','alaska':'Anchorage','arizona':'Phoenix','arkansas':'Little Rock',
+    'california':'Los Angeles','colorado':'Denver','connecticut':'Hartford','delaware':'Wilmington',
+    'florida':'Miami','georgia':'Atlanta','hawaii':'Honolulu','idaho':'Boise','illinois':'Chicago',
+    'indiana':'Indianapolis','iowa':'Des Moines','kansas':'Wichita','kentucky':'Louisville',
+    'louisiana':'New Orleans','maine':'Portland','maryland':'Baltimore','massachusetts':'Boston',
+    'michigan':'Detroit','minnesota':'Minneapolis','mississippi':'Jackson','missouri':'Kansas City',
+    'montana':'Billings','nebraska':'Omaha','nevada':'Las Vegas','new hampshire':'Manchester',
+    'new jersey':'Newark','new mexico':'Albuquerque','new york':'New York City',
+    'north carolina':'Charlotte','north dakota':'Fargo','ohio':'Columbus',
+    'oklahoma':'Oklahoma City','oregon':'Portland','pennsylvania':'Philadelphia',
+    'rhode island':'Providence','south carolina':'Columbia','south dakota':'Sioux Falls',
+    'tennessee':'Nashville','texas':'Houston','utah':'Salt Lake City','vermont':'Burlington',
+    'virginia':'Virginia Beach','washington':'Seattle','west virginia':'Charleston',
+    'wisconsin':'Milwaukee','wyoming':'Cheyenne',
+}
+
+
+def _fix_state_as_city(parsed):
+    """If city is a US state name (or 'State City' compound), redirect to largest city."""
+    city = (parsed.get('city') or '').strip()
+    country = (parsed.get('country') or '').upper()
+    if not city:
+        return parsed
+    city_lower = city.lower()
+    # Handle "Florida Miami" → first word is a state, rest is the actual city
+    parts = city_lower.split()
+    if len(parts) >= 2 and parts[0] in US_STATE_CITIES:
+        parsed['city'] = ' '.join(p.capitalize() for p in parts[1:])
+        if not parsed.get('country'):
+            parsed['country'] = 'US'
+        return parsed
+    # Whole city field is a state name — only when country is US or unset
+    if city_lower in US_STATE_CITIES and country in ('US', 'USA', ''):
+        parsed['_state_search'] = city  # keep original for logging
+        parsed['city'] = US_STATE_CITIES[city_lower]
+        parsed['country'] = 'US'
+    return parsed
 GEOCODE_CACHE = {}  # in-memory cache for same session
 
 def geocode_city(city, country=''):
@@ -890,8 +926,16 @@ def discover_leads_smart(niche, city, country='', original_query='',
     here_units = len(round_terms) if use_here else 0
     total_units = len(tiles) * len(round_terms) + (len(tiles) if use_osm else 0) + here_units
     done_units = 0
+    def _cancelled():
+        return job_id and JOBS.get(job_id, {}).get('cancelled')
+
     for (tlat, tlng, trad) in tiles:
+        if _cancelled():
+            _log('Search stopped by user.', pct=100)
+            break
         for term in round_terms:
+            if _cancelled():
+                break
             try:
                 for p in text_search_places(term, tlat, tlng, trad):
                     pid = p.get('id')
@@ -903,7 +947,7 @@ def discover_leads_smart(niche, city, country='', original_query='',
             if done_units % 2 == 0 or done_units >= total_units:
                 _log(f'Searched {done_units}/{total_units} · {len(raw)} candidates so far',
                      pct=min(80, done_units / max(1, total_units) * 80))
-        if use_osm:
+        if use_osm and not _cancelled():
             try:
                 for o in overpass_search(exp['osm_tags'], tlat, tlng, int(trad * 1.2)):
                     if o['source_id'] not in raw:
@@ -913,7 +957,7 @@ def discover_leads_smart(niche, city, country='', original_query='',
             done_units += 1
 
     # HERE Maps: one call per term on the primary tile (100 results each)
-    if use_here:
+    if use_here and not _cancelled():
         _log('Searching HERE Maps…')
         for term in round_terms:
             try:
@@ -3179,6 +3223,15 @@ class Handler(BaseHTTPRequestHandler):
                 })
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
+
+        elif p.startswith('/job/') and p.endswith('/cancel'):
+            job_id = p[5:-7]
+            if job_id in JOBS:
+                JOBS[job_id]['cancelled'] = True
+                JOBS[job_id]['status'] = 'cancelled'
+                self.send_json(200, {'ok': True})
+            else:
+                self.send_json(404, {'error': 'job not found'})
 
         elif p == '/discover':
             try:
