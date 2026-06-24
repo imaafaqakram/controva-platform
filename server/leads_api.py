@@ -589,7 +589,8 @@ _PLACES_LAST_ERROR  = None   # set by _places_text_post on non-retryable failure
 
 def _places_text_post(body, tries=3):
     """POST to Places Text Search (New) with retry/backoff.
-    Returns ({}, error_str) on failure so callers can log the real reason."""
+    Captures both HTTP errors and JSON-embedded errors (Google returns some
+    errors as 200 OK with {error:{code,message}} in the body)."""
     global _PLACES_LAST_ERROR
     headers = {
         'Content-Type': 'application/json',
@@ -602,8 +603,15 @@ def _places_text_post(body, tries=3):
             req = urllib.request.Request(PLACES_TEXT_URL, data=json.dumps(body).encode(),
                                          method='POST', headers=headers)
             resp = urllib.request.urlopen(req, timeout=20)
+            data = json.loads(resp.read().decode())
+            # Google sometimes returns 200 OK with an error body
+            if 'error' in data:
+                err = data['error']
+                _PLACES_LAST_ERROR = f"API {err.get('code','?')}: {err.get('message','')[:200]}"
+                print(f'TextSearch (New) JSON error: {_PLACES_LAST_ERROR}')
+                return {}
             _PLACES_LAST_ERROR = None
-            return json.loads(resp.read().decode())
+            return data
         except Exception as e:
             code = getattr(e, 'code', None)
             if code in (400, 429) and attempt < tries - 1:
@@ -686,8 +694,8 @@ def text_search_places(text_query, lat=None, lng=None, radius_m=None, rank='RELE
         if not token:
             break
         time.sleep(2.0)
-    # If new API returned nothing and we have an auth error, fall back to classic
-    if not results and _PLACES_LAST_ERROR and ('403' in str(_PLACES_LAST_ERROR) or '401' in str(_PLACES_LAST_ERROR) or 'not authorized' in str(_PLACES_LAST_ERROR).lower()):
+    # Fall back to classic API on any error (billing, key issue, quota, etc.)
+    if not results and _PLACES_LAST_ERROR:
         classic = _classic_text_search(text_query, lat, lng, radius_m, max_pages)
         if classic:
             _PLACES_LAST_ERROR = None
