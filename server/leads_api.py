@@ -38,12 +38,21 @@ HERE_API_KEY   = os.environ.get('HERE_API_KEY', '')  # Free 250k/mo: developer.h
 
 # Configuration toggles (can be changed via /config endpoint)
 CONFIG = {
-    'enrichment_primary': 'serper',       # serper | oxylabs | both
-    'enrichment_fallback': 'oxylabs',     # oxylabs | none
+    'enrichment_strategy': 'serper_then_oxylabs',  # serper_only | oxylabs_only | serper_then_oxylabs | free_only
+    'enrichment_primary': 'serper',       # kept for backwards-compat; enrichment_strategy takes precedence
+    'enrichment_fallback': 'oxylabs',     # kept for backwards-compat
     'image_provider': 'none',             # none | replicate | imagine_art
     'auto_score': True,                   # Run Gemini scoring during pipeline
     'auto_email_copy': False,             # Claude email writing OFF by default (saves credits)
     'auto_image': False,                  # Image generation OFF by default
+}
+
+# Map enrichment_strategy → providers list for enrich_lead()
+_STRATEGY_PROVIDERS = {
+    'serper_only':        ['serper'],
+    'oxylabs_only':       ['oxylabs'],
+    'serper_then_oxylabs':['serper', 'oxylabs'],
+    'free_only':          ['serper'],
 }
 
 # ──────────────────────────────────────────────────────────────
@@ -1104,9 +1113,8 @@ def enrich_lead(lead_id, business_name, city, phone, niche, providers=None):
       - 'permutator' (free Hunter alternative)
     """
     if providers is None:
-        providers = [CONFIG['enrichment_primary']]
-        if CONFIG['enrichment_fallback'] != 'none':
-            providers.append(CONFIG['enrichment_fallback'])
+        strategy = CONFIG.get('enrichment_strategy', 'serper_then_oxylabs')
+        providers = _STRATEGY_PROVIDERS.get(strategy, ['serper', 'oxylabs'])
 
     result = {'lead_id': lead_id, 'email': None, 'linkedin_url': None,
               'facebook_url': None, 'instagram_url': None,

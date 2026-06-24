@@ -1500,7 +1500,7 @@ const PipelinePage = () => {
       <Card>
         <h3 className="font-semibold mb-4">Individual Steps</h3>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-          <Button onClick={() => runStep('/enrich', 'Enrich')} variant="secondary" icon="UserPlus">Enrich All</Button>
+          <Button onClick={() => runStep('/enrich', 'Enrich', { provider })} variant="secondary" icon="UserPlus">Enrich All</Button>
           <Button onClick={() => runStep('/reenrich-missing-emails', 'Find emails')} variant="secondary" icon="Mail">Find Missing Emails</Button>
           <Button onClick={() => runStep('/score', 'Score')} variant="secondary" icon="Star">AI Score</Button>
           <Button onClick={() => runStep('/generate-assets', 'Assets')} variant="secondary" icon="Sparkles">Generate Copy</Button>
@@ -2224,24 +2224,30 @@ const SettingsPage = () => {
         <p className="text-sm text-slate-500 mt-1">Configure providers and behavior</p>
       </div>
       <Card>
-        <h3 className="font-semibold mb-3 flex items-center gap-2"><Icon name="Database" /> Enrichment</h3>
-        <div className="space-y-3">
-          <div>
-            <label className="text-sm font-medium block mb-2">Primary Provider</label>
-            <select value={config.enrichment_primary} onChange={e => update('enrichment_primary', e.target.value)}
-              className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-2 text-sm">
-              <option value="serper">Serper.dev (Default)</option>
-              <option value="oxylabs">Oxylabs AI Studio</option>
-            </select>
-          </div>
-          <div>
-            <label className="text-sm font-medium block mb-2">Fallback</label>
-            <select value={config.enrichment_fallback} onChange={e => update('enrichment_fallback', e.target.value)}
-              className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-2 text-sm">
-              <option value="oxylabs">Oxylabs (if no email)</option>
-              <option value="none">None</option>
-            </select>
-          </div>
+        <h3 className="font-semibold mb-3 flex items-center gap-2"><Icon name="Database" /> Enrichment Strategy</h3>
+        <p className="text-xs text-slate-500 mb-3">Controls which data providers are used when finding emails and contact info for leads.</p>
+        <div className="space-y-2">
+          {[
+            { id: 'serper_only',         label: 'Serper Only',               desc: 'Fast Google-based search. Cheapest option.', icon: 'Zap' },
+            { id: 'oxylabs_only',        label: 'Oxylabs Only',              desc: 'Deep scrape via Oxylabs AI Studio. More thorough.', icon: 'Shield' },
+            { id: 'serper_then_oxylabs', label: 'Smart — Serper → Oxylabs', desc: 'Serper first; Oxylabs fills in any missing emails. Best results.', icon: 'Sparkles' },
+            { id: 'free_only',           label: '100% Free',                 desc: 'Serper + email permutator. No paid API credits.', icon: 'Gift' },
+          ].map(opt => (
+            <label key={opt.id} className={'flex items-start gap-3 p-3 rounded-lg border-2 cursor-pointer transition-colors ' + (
+              (config.enrichment_strategy || 'serper_then_oxylabs') === opt.id
+                ? 'border-accent-500 bg-accent-50 dark:bg-accent-900/20'
+                : 'border-slate-200 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700'
+            )}>
+              <input type="radio"
+                checked={(config.enrichment_strategy || 'serper_then_oxylabs') === opt.id}
+                onChange={() => update('enrichment_strategy', opt.id)}
+                className="mt-0.5" />
+              <div className="flex-1 min-w-0">
+                <div className="font-medium text-sm flex items-center gap-2"><Icon name={opt.icon} className="w-4 h-4" /> {opt.label}</div>
+                <p className="text-xs text-slate-500 mt-0.5">{opt.desc}</p>
+              </div>
+            </label>
+          ))}
         </div>
       </Card>
       <Card>
