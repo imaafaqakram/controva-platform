@@ -809,8 +809,10 @@ def ensure_discovery_tables():
             )""")
         cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS phone_norm VARCHAR(20)")
         cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS domain VARCHAR(255)")
+        cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS website_verified BOOLEAN DEFAULT NULL")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_leads_phone_norm ON leads(phone_norm)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_leads_domain ON leads(domain)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_leads_website_verified ON leads(website_verified)")
         conn.commit(); cur.close(); conn.close()
     except Exception as e:
         print(f'ensure_discovery_tables error: {e}')
@@ -2512,7 +2514,9 @@ def get_leads():
                COALESCE((SELECT content FROM assets WHERE lead_id=l.id AND asset_type='email_body' LIMIT 1),'') as email_body,
                to_char(l.created_at,'YYYY-MM-DD HH24:MI') as date_found,
                to_char(l.updated_at,'YYYY-MM-DD HH24:MI') as date_updated,
-               CASE WHEN l.has_website THEN 'Has Website' ELSE 'NO WEBSITE - HOT LEAD' END as lead_type
+               CASE WHEN l.has_website THEN 'Has Website' ELSE 'NO WEBSITE - HOT LEAD' END as lead_type,
+               l.has_website,
+               l.website_verified
         FROM leads l LEFT JOIN contacts c ON c.lead_id=l.id
         ORDER BY l.ai_score DESC NULLS LAST, l.created_at DESC""")
     cols = [d[0] for d in cur.description]
@@ -2631,6 +2635,93 @@ def run_enrich_bg(job_id, provider_strategy='serper_then_oxylabs'):
         JOBS[job_id]['status'] = 'failed'
         JOBS[job_id]['error'] = str(e)
         JOBS[job_id]['log'].append(f'Error: {e}')
+
+def run_verify_websites_bg(job_id, lead_ids=None):
+    """Check whether each lead has a live website.
+    - Leads with a URL stored: HTTP HEAD to verify it's live
+    - Leads without a URL: Serper search to find if they have one
+    Updates has_website + website columns in the DB."""
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        if lead_ids:
+            cur.execute("SELECT id, business_name, city, niche, website FROM leads WHERE id = ANY(%s::int[])",
+                        (lead_ids,))
+        else:
+            cur.execute("""SELECT id, business_name, city, niche, website FROM leads
+                           WHERE website_verified IS NULL OR website_verified = FALSE
+                           ORDER BY created_at DESC LIMIT 500""")
+        rows = cur.fetchall(); cur.close(); conn.close()
+        total = len(rows)
+        JOBS[job_id]['log'].append(f'Checking {total} leads for website presence…')
+
+        has_w, no_w, errors = 0, 0, 0
+        for i, (lid, name, city, niche, stored_url) in enumerate(rows):
+            if JOBS[job_id].get('cancelled'):
+                break
+            website, alive = stored_url, False
+            # Step 1: if we have a URL, ping it
+            if stored_url:
+                try:
+                    req = urllib.request.Request(stored_url, method='HEAD',
+                                                 headers={'User-Agent': 'Mozilla/5.0'})
+                    r = urllib.request.urlopen(req, timeout=6)
+                    alive = r.status < 400
+                except Exception:
+                    # Retry with GET in case HEAD is blocked
+                    try:
+                        req2 = urllib.request.Request(stored_url,
+                                                      headers={'User-Agent': 'Mozilla/5.0'})
+                        r2 = urllib.request.urlopen(req2, timeout=6)
+                        alive = r2.status < 400
+                    except Exception:
+                        alive = False
+            # Step 2: no URL or dead URL → Serper search
+            if not alive:
+                try:
+                    q = f'"{name}" {city} official website'
+                    data = serper_search(q, 5)
+                    for item in data.get('organic', []):
+                        link = item.get('link', '')
+                        # Skip social/directory sites
+                        skip = ('facebook.com','instagram.com','yelp.com','tripadvisor',
+                                'yellowpages','foursquare','linkedin.com','google.com',
+                                'maps.google','apple.com','trustpilot','bbb.org')
+                        if link and not any(s in link for s in skip):
+                            website = link.split('?')[0]
+                            alive = True
+                            break
+                except Exception:
+                    errors += 1
+
+            # Update DB
+            try:
+                conn2 = db_conn(); cur2 = conn2.cursor()
+                cur2.execute("""UPDATE leads SET has_website=%s, website=%s,
+                                website_verified=TRUE, updated_at=NOW() WHERE id=%s""",
+                             (alive, website if alive else None, lid))
+                conn2.commit(); cur2.close(); conn2.close()
+            except Exception as e:
+                print(f'website verify update error: {e}')
+
+            if alive: has_w += 1
+            else: no_w += 1
+
+            pct = int((i + 1) / max(total, 1) * 100)
+            if (i + 1) % 10 == 0 or i + 1 == total:
+                JOBS[job_id]['log'].append(
+                    f'Checked {i+1}/{total} — {has_w} have websites, {no_w} do not')
+                JOBS[job_id]['progress'] = pct
+
+        JOBS[job_id]['status'] = 'completed'
+        JOBS[job_id]['progress'] = 100
+        JOBS[job_id]['results'] = {'has_website': has_w, 'no_website': no_w,
+                                   'total': total, 'errors': errors}
+        JOBS[job_id]['log'].append(
+            f'Done — {no_w} leads confirmed NO website (hot leads), {has_w} have websites.')
+    except Exception as e:
+        JOBS[job_id]['status'] = 'failed'
+        JOBS[job_id]['log'].append(f'Error: {e}')
+
 
 def run_pipeline_bg(job_id, provider_strategy='serper_then_oxylabs', generate_images=False):
     try:
@@ -3204,6 +3295,18 @@ class Handler(BaseHTTPRequestHandler):
                 job_id = f'job_{int(time.time())}'
                 JOBS[job_id] = {'status': 'running', 'progress': 0, 'log': ['Checking which leads need enriching...'], 'step': 'Enrich'}
                 t = threading.Thread(target=run_enrich_bg, args=(job_id, strategy))
+                t.daemon = True; t.start()
+                self.send_json(200, {'job_id': job_id, 'status': 'started'})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p == '/verify-websites':
+            try:
+                lead_ids = body.get('lead_ids') or []  # empty = all unverified
+                job_id = f'job_{int(time.time())}'
+                JOBS[job_id] = {'status': 'running', 'progress': 0,
+                                'log': ['Starting website verification…'], 'step': 'Verify Websites'}
+                t = threading.Thread(target=run_verify_websites_bg, args=(job_id, lead_ids))
                 t.daemon = True; t.start()
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
             except Exception as e:

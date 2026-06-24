@@ -659,7 +659,48 @@ const LeadsPage = () => {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [pageNum, setPageNum] = useState(1);
   const [pageSize, setPageSize] = useState(50);
+  const [verifyJobId, setVerifyJobId] = useState(null);
+  const [verifyJob, setVerifyJob] = useState(null);
   const { showToast } = useToast();
+
+  // Poll website verification job
+  useEffect(() => {
+    if (!verifyJobId) return;
+    const poll = setInterval(async () => {
+      try {
+        const j = await api.get('/job/' + verifyJobId);
+        setVerifyJob(j);
+        if (j.status === 'completed') {
+          clearInterval(poll); setVerifyJobId(null);
+          const res = j.results || {};
+          showToast(`Verified! ${res.no_website || 0} leads confirmed NO website (hot leads), ${res.has_website || 0} have websites.`, 'success');
+          refresh();
+        } else if (j.status === 'failed') {
+          clearInterval(poll); setVerifyJobId(null);
+          showToast('Verification failed: ' + (j.error || 'unknown error'), 'error');
+        } else if (j.status === 'cancelled') {
+          clearInterval(poll); setVerifyJobId(null);
+          showToast('Verification cancelled', 'info');
+          refresh();
+        }
+      } catch (e) { /* transient */ }
+    }, 2000);
+    return () => clearInterval(poll);
+  }, [verifyJobId]);
+
+  const startVerify = async (selectedOnly = false) => {
+    try {
+      const lead_ids = selectedOnly ? [...selected] : [];
+      const r = await api.post('/verify-websites', { lead_ids });
+      if (r.job_id) {
+        setVerifyJob({ status: 'running', progress: 0, log: ['Starting website verification…'], step: 'Verify Websites' });
+        setVerifyJobId(r.job_id);
+        showToast('Website verification started' + (lead_ids.length ? ` for ${lead_ids.length} leads` : ' for all unverified leads'), 'success');
+      } else {
+        showToast(r.error || 'Could not start verification', 'error');
+      }
+    } catch (e) { showToast('Failed to start verification: ' + e.message, 'error'); }
+  };
 
   // Reset to page 1 whenever the filtered set changes
   useEffect(() => { setPageNum(1); }, [filter, search, advancedFilters, pageSize]);
@@ -690,6 +731,7 @@ const LeadsPage = () => {
   const filtered = useMemo(() => {
     let r = leads;
     if (filter === 'hot') r = r.filter(l => (l.lead_type || '').indexOf('HOT') !== -1);
+    else if (filter === 'no_website_verified') r = r.filter(l => l.website_verified === true && l.has_website === false);
     else if (filter === 'enriched') r = r.filter(l => !['discovered', 'rejected'].includes(l.status));
     else if (filter === 'with_email') r = r.filter(l => l.owner_email);
     else if (filter === 'with_linkedin') r = r.filter(l => l.linkedin_url);
@@ -795,9 +837,41 @@ const LeadsPage = () => {
             </>
           )}
           <Button variant="secondary" onClick={refresh} icon="RefreshCw">Refresh</Button>
+          {selected.size > 0
+            ? <Button variant="secondary" onClick={() => startVerify(true)} icon="Globe" disabled={!!verifyJobId}>Verify Selected</Button>
+            : <Button variant="secondary" onClick={() => startVerify(false)} icon="Globe" disabled={!!verifyJobId}>Verify Websites</Button>
+          }
           <Button variant="secondary" onClick={downloadAllCSV} icon="Download">All CSV</Button>
         </div>
       </div>
+
+      {/* Website verification progress panel */}
+      {verifyJob && verifyJob.status === 'running' && (
+        <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-xl p-4 fade-in">
+          <div className="flex items-center justify-between mb-2">
+            <span className="font-semibold text-amber-900 dark:text-amber-100 text-sm flex items-center gap-2">
+              <span className="inline-block w-3 h-3 rounded-full bg-amber-500 spin" />
+              Analyzing websites… {verifyJob.progress || 0}%
+            </span>
+            <button onClick={async () => {
+              if (!verifyJobId) return;
+              try { await api.post('/job/' + verifyJobId + '/cancel', {}); } catch (e) {}
+              setVerifyJob(j => ({ ...j, status: 'cancelled' }));
+              setVerifyJobId(null);
+            }} className="px-3 py-1 rounded-lg bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 text-xs font-medium hover:bg-red-200 transition-colors">
+              ✕ Stop
+            </button>
+          </div>
+          <div className="w-full bg-amber-200 dark:bg-amber-800 rounded-full h-1.5 mb-2">
+            <div className="bg-amber-500 h-1.5 rounded-full transition-all" style={{ width: (verifyJob.progress || 0) + '%' }} />
+          </div>
+          {verifyJob.log && verifyJob.log.length > 0 && (
+            <p className="text-xs text-amber-800 dark:text-amber-200 font-mono">
+              {verifyJob.log[verifyJob.log.length - 1]}
+            </p>
+          )}
+        </div>
+      )}
 
       {/* Quick filter chips */}
       <Card>
@@ -843,13 +917,14 @@ const LeadsPage = () => {
           <div className="flex items-center justify-between gap-2 flex-wrap">
             <div className="flex gap-2 flex-wrap">
               {[
-                { id: 'all',           label: 'All',                count: leads.length },
-                { id: 'hot',           label: 'Hot (no website)',   count: leads.filter(l => (l.lead_type || '').indexOf('HOT') !== -1).length },
-                { id: 'enriched',      label: 'Enriched',           count: leads.filter(l => !['discovered', 'rejected'].includes(l.status)).length },
-                { id: 'with_email',    label: 'Has Email',          count: leads.filter(l => l.owner_email).length },
-                { id: 'with_linkedin', label: 'Has LinkedIn',       count: leads.filter(l => l.linkedin_url).length },
-                { id: 'with_contact',  label: 'Has Email or LinkedIn', count: leads.filter(l => l.owner_email || l.linkedin_url).length },
-                { id: 'scored',        label: 'High Score (7+)',    count: leads.filter(l => parseInt(l.ai_score) >= 7).length },
+                { id: 'all',                 label: 'All',                  count: leads.length },
+                { id: 'hot',                 label: 'Hot (no website)',      count: leads.filter(l => (l.lead_type || '').indexOf('HOT') !== -1).length },
+                { id: 'no_website_verified', label: '✓ No Website (verified)', count: leads.filter(l => l.website_verified === true && l.has_website === false).length },
+                { id: 'enriched',            label: 'Enriched',             count: leads.filter(l => !['discovered', 'rejected'].includes(l.status)).length },
+                { id: 'with_email',          label: 'Has Email',            count: leads.filter(l => l.owner_email).length },
+                { id: 'with_linkedin',       label: 'Has LinkedIn',         count: leads.filter(l => l.linkedin_url).length },
+                { id: 'with_contact',        label: 'Has Email or LinkedIn', count: leads.filter(l => l.owner_email || l.linkedin_url).length },
+                { id: 'scored',              label: 'High Score (7+)',      count: leads.filter(l => parseInt(l.ai_score) >= 7).length },
               ].map(f => (
                 <button key={f.id} onClick={() => setFilter(f.id)}
                   className={'px-3 py-1.5 rounded-full text-xs font-medium transition-colors ' + (
@@ -938,7 +1013,18 @@ const LeadsPage = () => {
                         <div className="flex items-center gap-2 min-w-0">
                           <span className="truncate">{l.business_name}</span>
                           {l.mockup_url && <span className="text-purple-500 text-xs flex-shrink-0" title="Has mockup">🎨</span>}
-                          {l.website && <a href={l.website} target="_blank" onClick={e => e.stopPropagation()} title={l.website} className="text-green-600 text-xs hover:underline flex-shrink-0">🌐</a>}
+                          {l.website
+                            ? <a href={l.website} target="_blank" onClick={e => e.stopPropagation()} title={l.website} className="text-green-600 text-xs hover:underline flex-shrink-0">🌐</a>
+                            : null}
+                          {l.website_verified === true && l.has_website === false && (
+                            <span className="flex-shrink-0 text-xs font-bold text-red-500" title="Verified: No website — hot lead!">NO SITE</span>
+                          )}
+                          {l.website_verified === true && l.has_website === true && (
+                            <span className="flex-shrink-0 text-xs text-green-600" title="Verified: Has a live website">✓</span>
+                          )}
+                          {l.website_verified === null && (
+                            <span className="flex-shrink-0 text-xs text-slate-300 dark:text-slate-600" title="Website not yet verified">?</span>
+                          )}
                         </div>
                         {l.date_found && <div className="text-xs text-slate-400 mt-0.5">{l.date_found}</div>}
                       </td>
