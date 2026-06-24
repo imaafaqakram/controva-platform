@@ -574,7 +574,8 @@ def search_zone(place_type, lat, lng, radius):
 #  - Round-based widening so "Find More" keeps surfacing NEW businesses
 #  - Cross-source dedup on place_id / phone / domain
 # ──────────────────────────────────────────────────────────────
-PLACES_TEXT_URL = 'https://places.googleapis.com/v1/places:searchText'
+PLACES_TEXT_URL  = 'https://places.googleapis.com/v1/places:searchText'
+PLACES_CLASSIC_URL = 'https://maps.googleapis.com/maps/api/place/textsearch/json'
 TEXT_FIELD_MASK = ('places.id,places.displayName,places.formattedAddress,places.location,'
                    'places.websiteUri,places.nationalPhoneNumber,places.rating,'
                    'places.userRatingCount,nextPageToken')
@@ -583,12 +584,13 @@ OVERPASS_ENDPOINTS = [
     'https://overpass.kumi.systems/api/interpreter',
 ]
 NICHE_EXPANSION_CACHE = {}
+_PLACES_LAST_ERROR  = None   # set by _places_text_post on non-retryable failure
 
 
 def _places_text_post(body, tries=3):
-    """POST to Places Text Search with retry/backoff.
-    A 400 right after getting a nextPageToken usually means the token isn't
-    valid yet (propagation delay) → back off and retry. 429 = rate limited."""
+    """POST to Places Text Search (New) with retry/backoff.
+    Returns ({}, error_str) on failure so callers can log the real reason."""
+    global _PLACES_LAST_ERROR
     headers = {
         'Content-Type': 'application/json',
         'X-Goog-Api-Key': GOOGLE_API_KEY,
@@ -600,20 +602,68 @@ def _places_text_post(body, tries=3):
             req = urllib.request.Request(PLACES_TEXT_URL, data=json.dumps(body).encode(),
                                          method='POST', headers=headers)
             resp = urllib.request.urlopen(req, timeout=20)
+            _PLACES_LAST_ERROR = None
             return json.loads(resp.read().decode())
         except Exception as e:
             code = getattr(e, 'code', None)
             if code in (400, 429) and attempt < tries - 1:
                 time.sleep(delay); delay *= 2; continue
-            print(f'TextSearch error (code={code}): {e}')
+            err_body = ''
+            try: err_body = e.read().decode()[:300]
+            except: pass
+            _PLACES_LAST_ERROR = f'HTTP {code}: {err_body or str(e)}'
+            print(f'TextSearch (New) error: {_PLACES_LAST_ERROR}')
             return {}
     return {}
 
 
+def _classic_text_search(text_query, lat, lng, radius_m, max_pages=3):
+    """Classic Places Text Search (maps.googleapis.com) — works with any Maps key,
+    no billing tier needed beyond basic Maps. Falls back from the New API on 403."""
+    params = {'query': text_query, 'key': GOOGLE_API_KEY}
+    if lat is not None and lng is not None:
+        params['location'] = f'{lat},{lng}'
+    if radius_m:
+        params['radius'] = int(min(radius_m, 50000))
+    results = []
+    for _ in range(max_pages):
+        url = PLACES_CLASSIC_URL + '?' + urllib.parse.urlencode(params)
+        try:
+            resp = urllib.request.urlopen(url, timeout=20)
+            data = json.loads(resp.read().decode())
+            status = data.get('status', '')
+            if status not in ('OK', 'ZERO_RESULTS'):
+                print(f'Classic Places error: {status} — {data.get("error_message","")}')
+                break
+            for p in data.get('results', []):
+                loc = (p.get('geometry') or {}).get('location', {})
+                results.append({
+                    'source': 'google',
+                    'source_id': p.get('place_id', ''),
+                    'name': p.get('name', ''),
+                    'phone': '',
+                    'website': None,
+                    'address': p.get('formatted_address', ''),
+                    'lat': loc.get('lat'), 'lng': loc.get('lng'),
+                    'rating': p.get('rating'),
+                    'review_count': p.get('user_ratings_total', 0),
+                })
+            token = data.get('next_page_token')
+            if not token:
+                break
+            params = {'pagetoken': token, 'key': GOOGLE_API_KEY}
+            time.sleep(2.0)
+        except Exception as e:
+            print(f'Classic Places exception: {e}')
+            break
+    return results
+
+
 def text_search_places(text_query, lat=None, lng=None, radius_m=None, rank='RELEVANCE', max_pages=3):
-    """Google Places Text Search (New). Free-text → ANY niche works (no place-type
-    enum needed). Paginates via nextPageToken up to ~60 results. Optionally bounded
-    to a circular tile via locationRestriction."""
+    """Google Places Text Search. Tries the New API first (up to 60 results via
+    nextPageToken). If the New API returns a 403/auth error, falls back to the
+    classic textsearch endpoint which works with any Maps API key."""
+    global _PLACES_LAST_ERROR
     base = {'textQuery': text_query, 'pageSize': 20}
     if rank in ('DISTANCE', 'RELEVANCE'):
         base['rankPreference'] = rank
@@ -622,17 +672,28 @@ def text_search_places(text_query, lat=None, lng=None, radius_m=None, rank='RELE
             'center': {'latitude': float(lat), 'longitude': float(lng)},
             'radius': float(min(radius_m, 50000))}}
     results, token = [], None
+    used_new_api = False
     for _page in range(max_pages):
         body = dict(base)
         if token:
             body['pageToken'] = token
         data = _places_text_post(body)
-        results.extend(data.get('places', []))
+        places = data.get('places', [])
+        if places:
+            used_new_api = True
+        results.extend(places)
         token = data.get('nextPageToken')
         if not token:
             break
-        time.sleep(2.0)  # nextPageToken needs a moment to become valid
-    return results
+        time.sleep(2.0)
+    # If new API returned nothing and we have an auth error, fall back to classic
+    if not results and _PLACES_LAST_ERROR and ('403' in str(_PLACES_LAST_ERROR) or '401' in str(_PLACES_LAST_ERROR) or 'not authorized' in str(_PLACES_LAST_ERROR).lower()):
+        classic = _classic_text_search(text_query, lat, lng, radius_m, max_pages)
+        if classic:
+            _PLACES_LAST_ERROR = None
+        return classic  # already normalized by _classic_text_search
+    # New API results need normalization
+    return [_norm_google_place(p) for p in results]
 
 
 def gemini_expand_niche(niche, city, country=''):
@@ -938,9 +999,9 @@ def discover_leads_smart(niche, city, country='', original_query='',
                 break
             try:
                 for p in text_search_places(term, tlat, tlng, trad):
-                    pid = p.get('id')
+                    pid = p.get('source_id') or p.get('id')
                     if pid and pid not in raw:
-                        raw[pid] = _norm_google_place(p)
+                        raw[pid] = p  # already normalized by text_search_places
             except Exception as e:
                 print(f'text_search error: {e}')
             done_units += 1
@@ -970,6 +1031,9 @@ def discover_leads_smart(niche, city, country='', original_query='',
             _log(f'Searched {done_units}/{total_units} · {len(raw)} candidates so far',
                  pct=min(85, done_units / max(1, total_units) * 85))
 
+    if len(raw) == 0 and _PLACES_LAST_ERROR:
+        _log(f'Google Places API error: {_PLACES_LAST_ERROR}. '
+             f'Check your Google API key has Places API enabled in Google Cloud Console.', pct=88)
     _log(f'Collected {len(raw)} unique candidates. De-duplicating against your database…', pct=88)
 
     # ── dedup against DB (place_id / phone / domain) + insert NEW ──
