@@ -416,6 +416,7 @@ const SearchPage = ({ setPage }) => {
             filter_mode: res.filter_mode, density: res.density,
             total_new_leads: res.total_new_leads ?? 0,
             leads: res.leads || [],
+            message: res.message || null,
           };
           setResult(r);
           const sq = lastQuery;
@@ -614,9 +615,11 @@ const SearchPage = ({ setPage }) => {
 
           {result.total_new_leads === 0 && (
             <p className="text-sm text-slate-500 mt-3 p-3 bg-yellow-50 dark:bg-yellow-900/20 rounded-lg">
-              {result.status === 'exhausted'
-                ? '🏁 This area looks fully explored — few new businesses left. Try a different city or niche.'
-                : '💡 No brand-new businesses this round. Click "Find More Leads" to widen the radius, add AI-generated synonyms, and pull from OpenStreetMap.'}
+              {result.message
+                ? '💡 ' + result.message
+                : result.status === 'exhausted'
+                  ? '🏁 This area looks fully explored — few new businesses left. Try a different city or niche.'
+                  : '💡 No new businesses found this round. Click "Find More Leads" to widen the radius and pull from more sources.'}
             </p>
           )}
 

@@ -2618,11 +2618,13 @@ def run_discover_bg(job_id, niche, city, country, filter_mode, density, find_mor
             JOBS[job_id]['log'].append('Could not find that location — try adding the country.')
         elif status == 'exhausted':
             JOBS[job_id]['log'].append('This area looks fully explored — few new businesses left.')
+        last_log = (JOBS[job_id].get('log') or [''])[-1]
         JOBS[job_id]['results'] = {
             'total': len(leads), 'total_new_leads': len(leads),
             'leads': leads[:200], 'discover_status': status,
             'niche': niche, 'city': city, 'country': country,
             'filter_mode': filter_mode, 'density': density, 'find_more': find_more,
+            'message': last_log,
         }
     except Exception as e:
         JOBS[job_id] = JOBS.get(job_id, {'log': []})
