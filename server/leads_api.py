@@ -227,23 +227,41 @@ def mark_query_cached(query_type, payload):
 # ──────────────────────────────────────────────────────────────
 #  GEMINI - Natural Language Query Parser
 # ──────────────────────────────────────────────────────────────
+_GEMINI_MODELS = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-flash-latest']
+
 def gemini_call(prompt, max_tokens=300):
-    try:
-        body = json.dumps({
-            'contents': [{'parts': [{'text': prompt}]}],
-            'generationConfig': {'temperature': 0.2, 'maxOutputTokens': max_tokens}
-        }).encode()
-        req = urllib.request.Request(
-            f'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}',
-            data=body, method='POST',
-            headers={'Content-Type': 'application/json'}
-        )
-        resp = urllib.request.urlopen(req, timeout=20)
-        data = json.loads(resp.read().decode())
-        return data['candidates'][0]['content']['parts'][0]['text']
-    except Exception as e:
-        print(f'Gemini error: {e}')
+    """Call Gemini, trying a few model names so a deprecated/renamed model
+    doesn't silently break query parsing."""
+    if not GEMINI_KEY:
+        print('Gemini error: no API key set')
         return None
+    body = json.dumps({
+        'contents': [{'parts': [{'text': prompt}]}],
+        'generationConfig': {'temperature': 0.2, 'maxOutputTokens': max_tokens}
+    }).encode()
+    last_err = None
+    for model in _GEMINI_MODELS:
+        try:
+            req = urllib.request.Request(
+                f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_KEY}',
+                data=body, method='POST',
+                headers={'Content-Type': 'application/json'}
+            )
+            resp = urllib.request.urlopen(req, timeout=20)
+            data = json.loads(resp.read().decode())
+            return data['candidates'][0]['content']['parts'][0]['text']
+        except urllib.error.HTTPError as e:
+            # 404 = model gone → try next; other errors (401/429) → stop, same for all models
+            last_err = f'{e.code} {e.reason}'
+            if e.code == 404:
+                continue
+            print(f'Gemini error ({model}): {last_err}')
+            return None
+        except Exception as e:
+            last_err = str(e)
+            continue
+    print(f'Gemini error: all models failed — {last_err}')
+    return None
 
 def parse_search_query(text):
     """Convert natural language to structured query.
@@ -257,12 +275,18 @@ Query: "{text}"
 Return ONLY valid JSON in this format:
 {{"niche":"<business type>","city":"<city name>","country":"<2-letter ISO>","modifiers":[]}}
 
+Rules:
+- "niche" = the business type EXACTLY as the user described it (keep the full phrase, e.g. "pest control and exterminators", "personal injury lawyer"). Do NOT substitute a different category.
+- "city" = a real CITY. If the user gives a US STATE (e.g. "new jersey", "texas", "florida"), use that state's LARGEST city.
+- "country" = 2-letter ISO code.
+
 Country codes: US, GB, AE, IN, PK, BD, SA, AU, CA, SG, MY, EG, NG, ZA, BR, MX, AR, TR, ID, PH, TH, VN, JP, KR, CN, DE, FR, ES, IT, NL, BE, CH, SE, NO, DK, FI, PL, RU, UA, IR, IQ, JO, KW, BH, OM, QA, LB, MA, KE
 
 Examples:
 - "barber shops in Manchester UK" -> {{"niche":"barber","city":"Manchester","country":"GB","modifiers":[]}}
 - "restaurants in Lahore Pakistan" -> {{"niche":"restaurant","city":"Lahore","country":"PK","modifiers":[]}}
-- "dental clinics in Mumbai India" -> {{"niche":"dentist","city":"Mumbai","country":"IN","modifiers":[]}}
+- "Pest Control and Exterminators in new jersey USA" -> {{"niche":"pest control and exterminators","city":"Newark","country":"US","modifiers":[]}}
+- "personal injury lawyers in texas" -> {{"niche":"personal injury lawyer","city":"Houston","country":"US","modifiers":[]}}
 - "salons in Karachi" -> {{"niche":"salon","city":"Karachi","country":"PK","modifiers":[]}}
 - "restaurants in Pakistan" -> {{"niche":"restaurant","city":"Islamabad","country":"PK","modifiers":[]}}"""
 
@@ -388,61 +412,83 @@ Examples:
         'lagos': 'NG', 'nairobi': 'KE', 'johannesburg': 'ZA', 'cape town': 'ZA',
     }
 
-    # Detect country (explicit country name in text)
+    # Detect country (explicit country name in text). Longest names first so
+    # "united states" wins over a stray "us", "saudi arabia" over "saudi".
     country = None
-    for cname, code in country_to_iso.items():
+    country_match_str = None
+    for cname, code in sorted(country_to_iso.items(), key=lambda kv: len(kv[0]), reverse=True):
         if re.search(r'\b' + re.escape(cname) + r'\b', text_lower):
             country = code
+            country_match_str = cname
             break
 
-    # Niche detection
-    niche_words = ['restaurant', 'cafe', 'coffee', 'salon', 'hair', 'beauty', 'nail',
-                   'barber', 'barbershop', 'hotel', 'bar', 'pub', 'gym', 'fitness',
-                   'clinic', 'pharmacy', 'bakery', 'shop', 'retail', 'spa', 'dentist',
-                   'laundry', 'supermarket', 'grocery', 'mechanic', 'school']
-    niche = 'restaurant'
-    for word in niche_words:
-        if word in text_lower:
-            niche = word
-            break
+    # ── Split "<niche> in/at/near <location>" ──────────────────
+    # Everything before the location preposition is the niche; everything
+    # after is the location. This works for ANY niche, not just a fixed list.
+    loc_split = re.split(r'\s+\b(?:in|at|near|around|located in|based in|serving)\b\s+',
+                         text.strip(), maxsplit=1, flags=re.IGNORECASE)
+    niche_part = loc_split[0].strip()
+    location_part = loc_split[1].strip() if len(loc_split) > 1 else ''
 
-    # City detection
-    # Look for known cities first (most reliable)
+    # ── Niche: use the actual words the user typed (no "restaurant" default) ──
+    niche = re.sub(r'\b(business(?:es)?|companies|company|services|service|'
+                   r'near me|leads?|find|list of|all|the)\b', '', niche_part,
+                   flags=re.IGNORECASE)
+    niche = re.sub(r'\s+', ' ', niche).strip(' ,.-')
+    if not niche:
+        # Last resort: a known niche keyword anywhere in the text
+        niche_words = ['restaurant', 'cafe', 'coffee', 'salon', 'hair', 'beauty', 'nail',
+                       'barber', 'hotel', 'bar', 'pub', 'gym', 'fitness', 'clinic',
+                       'pharmacy', 'bakery', 'spa', 'dentist', 'plumber', 'electrician',
+                       'roofer', 'lawyer', 'accountant', 'contractor', 'landscaper']
+        niche = next((w for w in niche_words if w in text_lower), text.strip())
+
+    # ── City detection (in priority order) ─────────────────────
     city = None
+    # 1) Known major city anywhere in the text (most reliable)
     for city_name in sorted(city_to_country.keys(), key=len, reverse=True):
         if re.search(r'\b' + re.escape(city_name) + r'\b', text_lower):
             city = city_name.title()
             if not country:
                 country = city_to_country[city_name]
             break
-
-    # If no known city, look for capitalized words after "in", "at", "near"
+    # 2) US state name → its largest city (handles "new jersey", "texas", …)
     if not city:
-        m = re.search(r'\b(?:in|at|near|around|of)\s+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){0,2})', text)
-        if m:
-            city = m.group(1).strip()
-            # Strip country words
-            for cwords in ['UK', 'USA', 'UAE', 'India', 'Pakistan', 'Saudi', 'Canada',
-                          'Australia', 'GB', 'US', 'AE', 'IN', 'PK', 'SA', 'CA', 'AU']:
-                city = re.sub(r'\s*' + cwords + r'\s*$', '', city, flags=re.IGNORECASE).strip()
+        for state_name in sorted(US_STATE_CITIES.keys(), key=len, reverse=True):
+            if re.search(r'\b' + re.escape(state_name) + r'\b', text_lower):
+                city = US_STATE_CITIES[state_name]
+                country = country or 'US'
+                break
+    # 3) Whatever the user wrote after "in/at/near", minus the country words
+    if not city and location_part:
+        loc = location_part
+        strip_words = [country_match_str or '', 'usa', 'u.s.a', 'u.s.', 'u.s',
+                       'united states', 'america', 'uk', 'united kingdom',
+                       'uae', 'united arab emirates']
+        for w in strip_words:
+            if w:
+                loc = re.sub(r'\b' + re.escape(w) + r'\b', '', loc, flags=re.IGNORECASE)
+        loc = re.sub(r'[,\.]', ' ', loc)
+        loc = re.sub(r'\s+', ' ', loc).strip()
+        if loc:
+            city = loc.title()
 
-    # Final fallback
+    # No reliable location → tell the caller instead of silently searching Dubai
     if not city:
-        city = 'Dubai'
-    if not country:
-        country = 'AE'
+        return {'niche': niche, 'city': '', 'country': country or '',
+                'modifiers': [], '_parse_failed': True}
 
-    # Sanity check: if city name IS a country name, use capital as city
+    # Sanity check: if the "city" is actually a country name, use its capital
     country_to_capital = {
         'pakistan': ('Islamabad', 'PK'), 'india': ('Mumbai', 'IN'),
         'bangladesh': ('Dhaka', 'BD'), 'uae': ('Dubai', 'AE'),
         'saudi arabia': ('Riyadh', 'SA'), 'singapore': ('Singapore', 'SG'),
     }
-    city_lower = city.lower()
-    if city_lower in country_to_capital:
-        city, country = country_to_capital[city_lower]
+    if city.lower() in country_to_capital:
+        city, country = country_to_capital[city.lower()]
 
-    return _fix_state_as_city({'niche': niche, 'city': city, 'country': country, 'modifiers': []})
+    return _fix_state_as_city({'niche': niche, 'city': city,
+                               'country': country or '', 'modifiers': []})
 
 
 # US state names/abbreviations → largest city (fixes "gyms in Texas" / "lawyers in Florida")
@@ -3374,6 +3420,13 @@ class Handler(BaseHTTPRequestHandler):
                 parsed = parse_search_query(query)
                 if not parsed:
                     self.send_json(500, {'error': 'failed to parse query'})
+                    return
+                if parsed.get('_parse_failed') or not parsed.get('city'):
+                    self.send_json(200, {
+                        'error': 'Could not work out the location from your search. '
+                                 'Try the format "<business type> in <city>", '
+                                 'e.g. "pest control in Newark USA".',
+                        'parsed': parsed})
                     return
                 job_id = f'job_{int(time.time() * 1000)}'
                 JOBS[job_id] = {'status': 'running', 'progress': 0,
