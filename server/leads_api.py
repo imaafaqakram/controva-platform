@@ -58,7 +58,17 @@ _STRATEGY_PROVIDERS = {
 # ──────────────────────────────────────────────────────────────
 #  PERSISTENT CONFIG (saved to /opt/leadgen/config.json)
 # ──────────────────────────────────────────────────────────────
-CONFIG_FILE = '/opt/leadgen/config.json'
+# LEADGEN_HOME env var lets you run locally without /opt/leadgen.
+# Set it to any writable directory, e.g.:
+#   Windows: set LEADGEN_HOME=C:\leadgen
+#   Linux/Mac: export LEADGEN_HOME=$HOME/leadgen
+LEADGEN_HOME = os.environ.get('LEADGEN_HOME', '/opt/leadgen')
+# Also check alongside the script itself (useful for local dev without env var)
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+_local_config = os.path.join(_script_dir, 'config.json')
+if not os.path.isdir(LEADGEN_HOME) and os.path.exists(_local_config):
+    LEADGEN_HOME = _script_dir
+CONFIG_FILE = os.path.join(LEADGEN_HOME, 'config.json')
 
 def load_config():
     """Load config from disk, fall back to defaults."""
@@ -1846,8 +1856,8 @@ def generate_mockup_imagine_art(business_name, niche, city, custom_prompt=None):
             random_id = hashlib.md5(str(timestamp).encode() + business_name.encode()).hexdigest()[:12]
             ext = 'jpg' if 'jpeg' in content_type or 'jpg' in content_type else 'png'
             filename = f'mockup_{timestamp}_{random_id}.{ext}'
-            filepath = f'/opt/leadgen/mockups/{filename}'
-            os.makedirs('/opt/leadgen/mockups', exist_ok=True)
+            filepath = os.path.join(LEADGEN_HOME, 'mockups', filename)
+            os.makedirs(os.path.join(LEADGEN_HOME, 'mockups'), exist_ok=True)
             with open(filepath, 'wb') as f:
                 f.write(image_bytes)
             # Return URL that the API can serve
@@ -3557,7 +3567,7 @@ class Handler(BaseHTTPRequestHandler):
         p = self.path.split('?')[0]
         if p == '/' or p == '/dashboard':
             try:
-                with open('/opt/leadgen/dashboard.html', 'r', encoding='utf-8') as f:
+                with open(os.path.join(LEADGEN_HOME, 'dashboard.html'), 'r', encoding='utf-8') as f:
                     html = f.read()
                 self.send_html(html)
             except Exception as e:
@@ -3607,7 +3617,7 @@ class Handler(BaseHTTPRequestHandler):
                 if '..' in filename or '/' in filename:
                     self.send_json(404, {'error': 'not found'})
                     return
-                filepath = '/opt/leadgen/mockups/' + filename
+                filepath = os.path.join(LEADGEN_HOME, 'mockups', filename)
                 if not os.path.exists(filepath):
                     self.send_json(404, {'error': 'not found'})
                     return
