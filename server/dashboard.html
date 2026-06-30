@@ -437,6 +437,7 @@ const SearchPage = ({ setPage }) => {
             total_new_leads: res.total_new_leads ?? 0,
             leads: res.leads || [],
             message: res.message || null,
+            batch_id: jobId || null,
           };
           setResult(r);
           const sq = lastQuery;
@@ -683,6 +684,16 @@ const SearchPage = ({ setPage }) => {
             )}
             <Button onClick={() => setPage('leads')} variant="secondary" icon="ExternalLink">View All Leads</Button>
             <Button onClick={() => setPage('pipeline')} variant="secondary" icon="Workflow">Run Enrichment</Button>
+            {result.batch_id && (
+              <Button variant="danger" icon="Trash2" onClick={async () => {
+                if (!confirm(`Delete all ${result.total_new_leads || result.leads?.length || 0} leads from this search batch?`)) return;
+                try {
+                  const r = await api.post('/batch/' + result.batch_id + '/delete', {});
+                  showToast(`Deleted ${r.deleted} leads from this batch`, 'success');
+                  setResult(null);
+                } catch (e) { showToast('Delete failed: ' + e.message, 'error'); }
+              }}>Delete This Batch</Button>
+            )}
           </div>
         </Card>
       )}
@@ -1093,13 +1104,13 @@ const LeadsPage = () => {
                           {l.website
                             ? <a href={l.website} target="_blank" onClick={e => e.stopPropagation()} title={l.website} className="text-green-600 text-xs hover:underline flex-shrink-0">🌐</a>
                             : null}
-                          {l.website_verified === true && l.has_website === false && (
+                          {l.website_verified === true && !l.has_website && (
                             <span className="flex-shrink-0 text-xs font-bold text-red-500" title="Verified: No website — hot lead!">NO SITE</span>
                           )}
-                          {l.website_verified === true && l.has_website === true && (
+                          {l.website_verified === true && l.has_website && (
                             <span className="flex-shrink-0 text-xs text-green-600" title="Verified: Has a live website">✓</span>
                           )}
-                          {l.website_verified === null && (
+                          {!l.website_verified && (
                             <span className="flex-shrink-0 text-xs text-slate-300 dark:text-slate-600" title="Website not yet verified">?</span>
                           )}
                         </div>
@@ -2379,6 +2390,9 @@ const LeadDetailModal = ({ leadId, onClose, onUpdate }) => {
   const [editingEmail, setEditingEmail] = useState(false);
   const [editedSubject, setEditedSubject] = useState('');
   const [editedBody, setEditedBody] = useState('');
+  const [generatingMockup, setGeneratingMockup] = useState(false);
+  const [mockupPrompt, setMockupPrompt] = useState('');
+  const [mockupUrl, setMockupUrl] = useState(null);
   const { showToast } = useToast();
 
   useEffect(() => {
@@ -2406,6 +2420,22 @@ const LeadDetailModal = ({ leadId, onClose, onUpdate }) => {
       }
     } catch (e) { showToast('Failed: ' + e.message, 'error'); }
     setSending(false);
+  };
+
+  const generateMockup = async () => {
+    setGeneratingMockup(true);
+    try {
+      const r = await api.post('/lead/' + leadId + '/generate-mockup', { custom_prompt: mockupPrompt || null });
+      if (r.success) {
+        setMockupUrl(r.mockup_url);
+        setLead(l => ({ ...l, mockup_url: r.mockup_url }));
+        showToast('Mockup generated!', 'success');
+        if (onUpdate) onUpdate();
+      } else {
+        showToast(r.error || 'Mockup generation failed', 'error');
+      }
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+    setGeneratingMockup(false);
   };
 
   const approve = async () => {
@@ -2506,12 +2536,28 @@ const LeadDetailModal = ({ leadId, onClose, onUpdate }) => {
               </div>
 
               {/* Mockup */}
-              {lead.mockup_url && (
-                <div>
-                  <p className="text-xs text-slate-500 mb-2 uppercase font-medium">Website Mockup</p>
-                  <img src={lead.mockup_url} alt="Mockup" className="w-full rounded-lg border border-slate-200 dark:border-slate-800" />
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <p className="text-xs text-slate-500 uppercase font-medium">Website Mockup</p>
                 </div>
-              )}
+                {(mockupUrl || lead.mockup_url) && (
+                  <img src={mockupUrl || lead.mockup_url} alt="Mockup" className="w-full rounded-lg border border-slate-200 dark:border-slate-800 mb-3" />
+                )}
+                <div className="space-y-2 bg-slate-50 dark:bg-slate-800 rounded-lg p-3">
+                  <p className="text-xs text-slate-500 font-medium">Custom prompt (optional)</p>
+                  <textarea
+                    value={mockupPrompt}
+                    onChange={e => setMockupPrompt(e.target.value)}
+                    placeholder={`e.g. "Dark modern theme with ${lead.niche} imagery, blue accent colors, hero section with a call-to-action button"`}
+                    rows={2}
+                    className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg p-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-accent-500"
+                  />
+                  <Button size="sm" variant="primary" icon={generatingMockup ? null : 'Image'} onClick={generateMockup} disabled={generatingMockup}>
+                    {generatingMockup ? <><Spinner /><span className="ml-2">Generating…</span></> : (mockupUrl || lead.mockup_url) ? 'Regenerate Mockup' : 'Generate Mockup'}
+                  </Button>
+                  <p className="text-xs text-slate-400">Uses Replicate or imagine.art — configure image provider in Settings</p>
+                </div>
+              </div>
 
               {/* Email preview / editor */}
               <div>

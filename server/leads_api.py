@@ -1130,9 +1130,11 @@ def ensure_discovery_tables():
         cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS phone_norm VARCHAR(20)")
         cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS domain VARCHAR(255)")
         cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS website_verified BOOLEAN DEFAULT NULL")
+        cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS search_batch_id VARCHAR(50)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_leads_phone_norm ON leads(phone_norm)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_leads_domain ON leads(domain)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_leads_website_verified ON leads(website_verified)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_leads_search_batch_id ON leads(search_batch_id)")
         conn.commit(); cur.close(); conn.close()
     except Exception as e:
         print(f'ensure_discovery_tables error: {e}')
@@ -1313,14 +1315,14 @@ def discover_leads_smart(niche, city, country='', original_query='',
                 already_in_db += 1
                 continue
             cur.execute("""INSERT INTO leads(place_id,business_name,niche,city,country,address,phone,
-                          website,latitude,longitude,google_rating,review_count,status,source,phone_norm,domain)
-                VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'discovered',%s,%s,%s)
+                          website,latitude,longitude,google_rating,review_count,status,source,phone_norm,domain,search_batch_id)
+                VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'discovered',%s,%s,%s,%s)
                 ON CONFLICT (place_id) DO NOTHING RETURNING id""",
                 (pid, (cand.get('name') or 'Unknown')[:480], niche.lower(), city, country,
                  cand.get('address', ''), cand.get('phone', ''), website,
                  cand.get('lat'), cand.get('lng'), cand.get('rating'),
                  cand.get('review_count', 0), cand.get('source', 'google'),
-                 pn or None, dom or None))
+                 pn or None, dom or None, job_id))
             if cur.fetchone():
                 new_leads.append({
                     'place_id': pid, 'business_name': cand.get('name', 'Unknown'),
@@ -1787,9 +1789,9 @@ def ecommerce_research(product_or_niche, platform='amazon'):
 # ──────────────────────────────────────────────────────────────
 #  IMAGE GENERATION (Optional + Toggleable)
 # ──────────────────────────────────────────────────────────────
-def generate_mockup_replicate(business_name, niche, city):
+def generate_mockup_replicate(business_name, niche, city, custom_prompt=None):
     """Use Replicate FLUX (existing)."""
-    prompt = f"Professional modern website homepage screenshot mockup for '{business_name}', a {niche} business in {city}. Clean hero section, white navigation bar, green CTA button, photorealistic UI mockup, desktop browser viewport"
+    prompt = custom_prompt or f"Professional modern website homepage screenshot mockup for '{business_name}', a {niche} business in {city}. Clean hero section, white navigation bar, green CTA button, photorealistic UI mockup, desktop browser viewport"
     try:
         body = json.dumps({
             'input': {'prompt': prompt, 'num_outputs': 1, 'aspect_ratio': '16:9',
@@ -1809,11 +1811,11 @@ def generate_mockup_replicate(business_name, niche, city):
         print(f'Replicate error: {e}')
     return None
 
-def generate_mockup_imagine_art(business_name, niche, city):
+def generate_mockup_imagine_art(business_name, niche, city, custom_prompt=None):
     """Use imagine.art API. Returns URL of generated image."""
     if not IMAGINE_ART_KEY:
         return None
-    prompt = f"Professional modern website homepage mockup for {business_name}, a {niche} business in {city}. Clean hero section, elegant typography, modern UI design, photorealistic browser screenshot, premium feel"
+    prompt = custom_prompt or f"Professional modern website homepage mockup for {business_name}, a {niche} business in {city}. Clean hero section, elegant typography, modern UI design, photorealistic browser screenshot, premium feel"
     try:
         # imagine.art API uses multipart/form-data
         boundary = '----LeadGenBoundary' + hashlib.md5(str(time.time()).encode()).hexdigest()[:16]
@@ -1863,14 +1865,62 @@ def generate_mockup_imagine_art(business_name, niche, city):
         print(f'imagine.art error: {e}')
     return None
 
-def generate_image(business_name, niche, city, provider=None):
+def generate_image(business_name, niche, city, provider=None, custom_prompt=None):
     """Generate mockup using configured provider (or specified one)."""
     provider = provider or CONFIG['image_provider']
     if provider == 'replicate':
-        return generate_mockup_replicate(business_name, niche, city)
+        return generate_mockup_replicate(business_name, niche, city, custom_prompt=custom_prompt)
     elif provider == 'imagine_art':
-        return generate_mockup_imagine_art(business_name, niche, city)
+        return generate_mockup_imagine_art(business_name, niche, city, custom_prompt=custom_prompt)
     return None
+
+def generate_mockup_for_lead(lead_id, custom_prompt=None):
+    """Generate and save a mockup image for a single lead."""
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("SELECT business_name, niche, city, country FROM leads WHERE id=%s", (lead_id,))
+    row = cur.fetchone(); cur.close(); conn.close()
+    if not row:
+        return {'error': 'Lead not found'}
+    bname, niche, city, country = row
+    provider = CONFIG.get('image_provider', 'none')
+    if provider == 'none':
+        return {'error': 'No image provider configured — set one in Settings (Replicate or imagine.art)'}
+    mockup_url = generate_image(bname, niche or '', city or '', custom_prompt=custom_prompt)
+    if not mockup_url:
+        return {'error': 'Image generation failed — check your API key and provider settings'}
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("DELETE FROM assets WHERE lead_id=%s AND asset_type='mockup_image'", (lead_id,))
+    cur.execute("INSERT INTO assets(lead_id,asset_type,content,model_used) VALUES(%s,'mockup_image',%s,%s)",
+               (lead_id, mockup_url, provider))
+    conn.commit(); cur.close(); conn.close()
+    return {'success': True, 'mockup_url': mockup_url}
+
+def get_search_batches():
+    """Return a summary of each search batch (job) that created leads."""
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("""
+        SELECT search_batch_id,
+               MIN(niche) as niche, MIN(city) as city, MIN(country) as country,
+               COUNT(*) as count,
+               to_char(MIN(created_at), 'YYYY-MM-DD HH24:MI') as batch_date
+        FROM leads
+        WHERE search_batch_id IS NOT NULL AND search_batch_id != ''
+        GROUP BY search_batch_id
+        ORDER BY MIN(created_at) DESC
+        LIMIT 100
+    """)
+    rows = [{'batch_id': r[0], 'niche': r[1], 'city': r[2], 'country': r[3],
+             'count': r[4], 'date': r[5]} for r in cur.fetchall()]
+    cur.close(); conn.close()
+    return rows
+
+def delete_search_batch(batch_id):
+    """Delete all leads that were first found in a specific search batch."""
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("DELETE FROM leads WHERE search_batch_id=%s RETURNING id", (batch_id,))
+    deleted = cur.rowcount
+    conn.commit(); cur.close(); conn.close()
+    return deleted
 
 # ──────────────────────────────────────────────────────────────
 #  CLAUDE EMAIL COPYWRITING
@@ -2888,7 +2938,8 @@ def get_leads():
                to_char(l.updated_at,'YYYY-MM-DD HH24:MI') as date_updated,
                CASE WHEN l.has_website THEN 'Has Website' ELSE 'NO WEBSITE - HOT LEAD' END as lead_type,
                l.has_website,
-               l.website_verified
+               l.website_verified,
+               COALESCE(l.search_batch_id,'') as search_batch_id
         FROM leads l LEFT JOIN contacts c ON c.lead_id=l.id
         ORDER BY l.ai_score DESC NULLS LAST, l.created_at DESC""")
     cols = [d[0] for d in cur.description]
@@ -3022,7 +3073,7 @@ def run_verify_websites_bg(job_id, lead_ids=None):
     try:
         conn = db_conn(); cur = conn.cursor()
         if lead_ids:
-            cur.execute("SELECT id, business_name, city, niche, website FROM leads WHERE id = ANY(%s::int[])",
+            cur.execute("SELECT id, business_name, city, niche, website FROM leads WHERE id = ANY(%s::uuid[])",
                         (lead_ids,))
         else:
             cur.execute("""SELECT id, business_name, city, niche, website FROM leads
@@ -3074,9 +3125,9 @@ def run_verify_websites_bg(job_id, lead_ids=None):
             # Update DB
             try:
                 conn2 = db_conn(); cur2 = conn2.cursor()
-                cur2.execute("""UPDATE leads SET has_website=%s, website=%s,
+                cur2.execute("""UPDATE leads SET website=%s,
                                 website_verified=TRUE, updated_at=NOW() WHERE id=%s""",
-                             (alive, website if alive else None, lid))
+                             (website if alive else None, lid))
                 conn2.commit(); cur2.close(); conn2.close()
             except Exception as e:
                 print(f'website verify update error: {e}')
@@ -3559,6 +3610,12 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
+        elif p == '/batches':
+            try:
+                self.send_json(200, {'batches': get_search_batches()})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
         elif p.startswith('/lead/'):
             try:
                 lead_id = p.split('/')[2]
@@ -4008,6 +4065,22 @@ class Handler(BaseHTTPRequestHandler):
                 lead_id = p.split('/')[2]
                 extras = body.get('instructions', '')
                 self.send_json(200, regenerate_email_for_lead(lead_id, extras))
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p.startswith('/lead/') and p.endswith('/generate-mockup'):
+            try:
+                lead_id = p.split('/')[2]
+                custom_prompt = body.get('custom_prompt', '') or None
+                self.send_json(200, generate_mockup_for_lead(lead_id, custom_prompt=custom_prompt))
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p.startswith('/batch/') and p.endswith('/delete'):
+            try:
+                batch_id = p.split('/')[2]
+                deleted = delete_search_batch(batch_id)
+                self.send_json(200, {'success': True, 'deleted': deleted, 'batch_id': batch_id})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
