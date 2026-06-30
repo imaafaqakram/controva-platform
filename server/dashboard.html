@@ -374,18 +374,38 @@ const DashboardPage = ({ setPage }) => {
 };
 
 const SearchPage = ({ setPage }) => {
+  // Persist the active search across tab navigation (component unmounts on nav)
+  const savedJob = (() => { try { return localStorage.getItem('search_active_job') || null; } catch (e) { return null; } })();
   const [query, setQuery] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState(null);
+  const [loading, setLoading] = useState(!!savedJob);
+  const [result, setResult] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('search_last_result') || 'null'); } catch (e) { return null; }
+  });
   const [filterMode, setFilterMode] = useState('all');  // all | no_website | with_website
   const [density, setDensity] = useState('standard');  // low | standard | high
   const [history, setHistory] = useState(() => {
     try { return JSON.parse(localStorage.getItem('search_history') || '[]'); } catch (e) { return []; }
   });
   const { showToast } = useToast();
-  const [job, setJob] = useState(null);
-  const [jobId, setJobId] = useState(null);
-  const [lastQuery, setLastQuery] = useState('');
+  const [job, setJob] = useState(savedJob ? { status: 'running', progress: 0, log: ['Resuming search…'], step: 'Discover' } : null);
+  const [jobId, setJobId] = useState(savedJob);
+  const [lastQuery, setLastQuery] = useState(() => {
+    try { return localStorage.getItem('search_last_query') || ''; } catch (e) { return ''; }
+  });
+
+  // Keep the last completed result + active job persisted so they survive
+  // navigating to another tab and coming back.
+  useEffect(() => {
+    try {
+      if (result) localStorage.setItem('search_last_result', JSON.stringify(result));
+    } catch (e) {}
+  }, [result]);
+  useEffect(() => {
+    try {
+      if (jobId) localStorage.setItem('search_active_job', jobId);
+      else localStorage.removeItem('search_active_job');
+    } catch (e) {}
+  }, [jobId]);
 
   const examples = [
     { q: 'barber shops in Manchester UK', emoji: '💇' },
@@ -441,6 +461,10 @@ const SearchPage = ({ setPage }) => {
     if (!sq) return;
     setLoading(true); setResult(null); setJob(null); setLastQuery(sq);
     try {
+      localStorage.setItem('search_last_query', sq);
+      localStorage.removeItem('search_last_result');
+    } catch (e) {}
+    try {
       const r = await api.post('/search', { query: sq, filter_mode: filterMode, density: density, find_more: findMore });
       if (r.job_id) {
         setJob({ status: 'running', progress: 0, log: [findMore ? 'Widening the search…' : 'Starting search…'], step: 'Discover' });
@@ -458,6 +482,31 @@ const SearchPage = ({ setPage }) => {
   const clearHistory = () => {
     setHistory([]);
     try { localStorage.removeItem('search_history'); } catch (e) {}
+  };
+
+  // Download just THIS search's results as a separate CSV
+  const downloadResultCSV = (res) => {
+    const r = res || result;
+    const leads = (r && r.leads) || [];
+    if (!leads.length) { showToast('No leads in this search to download', 'error'); return; }
+    const fields = ['business_name', 'niche', 'city', 'country', 'phone', 'website', 'has_website', 'address', 'source'];
+    const country = (r.parsed && r.parsed.country) || '';
+    const esc = (v) => {
+      const s = (v === null || v === undefined ? '' : v).toString().replace(/"/g, '""');
+      return /[",\n]/.test(s) ? '"' + s + '"' : s;
+    };
+    const rows = leads.map(l => fields.map(f => esc(f === 'country' ? (l.country || country) : l[f])).join(','));
+    const csv = [fields.join(','), ...rows].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const label = ((r.parsed && r.parsed.niche || 'leads') + '_' + (r.parsed && r.parsed.city || ''))
+      .replace(/[^a-z0-9]+/gi, '_').toLowerCase().replace(/^_+|_+$/g, '');
+    a.href = url; a.download = 'search_' + label + '_' + Date.now() + '.csv'; a.click();
+    URL.revokeObjectURL(url);
+    const more = (r.total_new_leads || leads.length) > leads.length
+      ? ' (first ' + leads.length + ' of ' + r.total_new_leads + ')' : '';
+    showToast('Downloaded ' + leads.length + ' leads' + more, 'success');
   };
 
   return (
@@ -627,6 +676,11 @@ const SearchPage = ({ setPage }) => {
             <Button onClick={findMore} disabled={loading} variant="primary" icon={loading ? null : 'Sparkles'}>
               {loading ? <Spinner /> : 'Find More Leads'}
             </Button>
+            {result.leads?.length > 0 && (
+              <Button onClick={() => downloadResultCSV(result)} variant="success" icon="Download">
+                Download CSV ({result.leads.length})
+              </Button>
+            )}
             <Button onClick={() => setPage('leads')} variant="secondary" icon="ExternalLink">View All Leads</Button>
             <Button onClick={() => setPage('pipeline')} variant="secondary" icon="Workflow">Run Enrichment</Button>
           </div>
@@ -641,16 +695,22 @@ const SearchPage = ({ setPage }) => {
           </div>
           <div className="space-y-2">
             {history.map((h, i) => (
-              <button key={i} onClick={() => { setQuery(h.query); runSearch(h.query); }}
-                className="w-full text-left flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg transition-colors">
-                <div>
-                  <p className="text-sm font-medium">{h.query}</p>
+              <div key={i}
+                className="flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg transition-colors">
+                <button onClick={() => { setQuery(h.query); runSearch(h.query); }} className="text-left flex-1 min-w-0">
+                  <p className="text-sm font-medium truncate">{h.query}</p>
                   <p className="text-xs text-slate-500">{new Date(h.time).toLocaleString()}</p>
-                </div>
-                <div className="text-right">
+                </button>
+                <div className="flex items-center gap-2 shrink-0 ml-2">
                   <Badge variant="info">{h.result?.total_new_leads || 0} new</Badge>
+                  {h.result?.leads?.length > 0 && (
+                    <button onClick={() => downloadResultCSV(h.result)} title="Download this search as CSV"
+                      className="p-1.5 rounded-lg text-slate-500 hover:text-green-600 hover:bg-green-50 dark:hover:bg-green-900/20 transition-colors">
+                      <Icon name="Download" className="w-4 h-4" />
+                    </button>
+                  )}
                 </div>
-              </button>
+              </div>
             ))}
           </div>
         </Card>
