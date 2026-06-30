@@ -1,10 +1,11 @@
 # API Reference — Controva Intelligence Platform
 
-Complete documentation of all 30+ endpoints.
+Complete documentation of all 35+ endpoints.
 
 **Base URL:** `http://YOUR_SERVER_IP:8080`
 **Authentication:** Most endpoints are open. For production, add a reverse proxy with HTTP basic auth, or use the `/auth/login` token.
 **Content-Type:** `application/json` for all POST requests.
+**Version:** 7.0
 
 ---
 
@@ -38,32 +39,45 @@ curl -X POST http://localhost:8080/auth/check \
 ## Lead Discovery
 
 ### POST /search
-Natural-language search. Best entry point.
+Natural-language search. Best entry point. Starts a background job and returns a `job_id` — poll `/job/{job_id}` for progress.
 
 ```bash
 curl -X POST http://localhost:8080/search \
   -H "Content-Type: application/json" \
   -d '{
-    "query": "barber shops in Manchester UK",
-    "filter_mode": "no_website",
-    "density": "standard"
+    "query": "pest control and exterminators in new jersey USA",
+    "filter_mode": "all",
+    "density": "standard",
+    "find_more": false
   }'
 ```
 
 **Parameters:**
-- `query` (required) — Free-text search
-- `filter_mode` — `no_website` (default) / `with_website` / `all`
-- `density` — `low` (5 zones) / `standard` (9 zones) / `high` (25 zones)
+- `query` (required) — Free-text search. The AI parser understands any business type and any city worldwide. US state names ("new jersey", "texas") are automatically mapped to the state's largest city.
+- `filter_mode` — `all` (recommended) / `no_website` / `with_website`
+- `density` — `low` (5 tiles) / `standard` (9 tiles) / `high` (25 tiles)
+- `find_more` — `true` to advance to the next round (wider radius, more synonyms)
 
 Response:
 ```json
 {
-  "status": "success",
-  "parsed": {"niche":"barber","city":"Manchester","country":"GB"},
-  "filter_mode": "no_website",
-  "density": "standard",
-  "total_new_leads": 23,
-  "leads": [...]
+  "job_id": "job_1719700000000",
+  "status": "started",
+  "parsed": {"niche":"pest control and exterminators","city":"Newark","country":"US"}
+}
+```
+
+Poll `/job/{job_id}` until `status === "completed"`, then read `results`:
+```json
+{
+  "total_new_leads": 47,
+  "leads": [...],
+  "discover_status": "success",
+  "niche": "pest control and exterminators",
+  "city": "Newark",
+  "country": "US",
+  "filter_mode": "all",
+  "message": "Found 47 new businesses"
 }
 ```
 
@@ -169,7 +183,74 @@ Run enrich + score + generate in sequence (async background job).
 Returns `job_id`. Poll `/job/{job_id}` for progress.
 
 ### GET /job/{job_id}
-Get pipeline job status, progress, and log.
+Get background job status, progress, log, and results.
+
+```bash
+curl http://localhost:8080/job/job_1719700000000
+```
+
+Response:
+```json
+{
+  "status": "running",       // running | completed | failed | cancelled
+  "progress": 42,            // 0–100
+  "log": ["Searching...", "Found 23 businesses..."],
+  "step": "Discover",
+  "results": { ... }         // only when status = completed
+}
+```
+
+### POST /job/{job_id}/cancel
+Cancel a running background job (discovery, verification, enrichment).
+
+```bash
+curl -X POST http://localhost:8080/job/job_1719700000000/cancel \
+  -H "Content-Type: application/json" -d '{}'
+```
+
+Response:
+```json
+{"status": "cancelled"}
+```
+
+---
+
+## Website Verification
+
+### POST /verify-websites
+Verify whether leads have live websites. Runs as a background job — poll `/job/{job_id}` for progress.
+
+For leads **with** a stored URL: HTTP HEAD then GET to confirm site is alive.  
+For leads **without** a URL: Serper search `"[name]" [city] official website` — picks first non-social link.
+
+```bash
+curl -X POST http://localhost:8080/verify-websites \
+  -H "Content-Type: application/json" \
+  -d '{"lead_ids": []}'
+```
+
+**Parameters:**
+- `lead_ids` — array of lead IDs to verify. Empty array = verify all unverified leads (up to 500).
+
+Response:
+```json
+{"job_id": "job_1719700001000", "status": "started"}
+```
+
+Completed job results:
+```json
+{
+  "has_website": 120,
+  "no_website": 52,
+  "total": 172,
+  "errors": 3
+}
+```
+
+After verification, each lead has:
+- `website_verified: true`
+- `has_website: true / false`
+- `website: "https://..."` (if found)
 
 ---
 
@@ -317,30 +398,40 @@ Product/niche research.
 Get current settings (enrichment provider, image provider, automation toggles).
 
 ### POST /config
-Update settings.
+Update settings. All values are persisted to disk at `/opt/leadgen/config.json`.
 
 ```json
 {
-  "enrichment_primary": "serper",
-  "enrichment_fallback": "oxylabs",
-  "image_provider": "imagine_art",
+  "enrichment_strategy": "serper_then_oxylabs",
+  "image_provider": "none",
   "auto_score": true,
-  "auto_email_copy": true,
+  "auto_email_copy": false,
   "auto_image": false
 }
 ```
+
+**`enrichment_strategy` values:**
+- `serper_only` — fast, Serper only
+- `oxylabs_only` — deep scrape, Oxylabs only
+- `serper_then_oxylabs` — Serper first, Oxylabs fills missing (recommended)
+- `free_only` — Serper + email permutator, no paid scraping
+
+**`image_provider` values:**
+- `none` — no image generation (default)
+- `replicate` — Replicate FLUX
+- `imagine_art` — imagine.art
 
 ### GET /api-keys
 Get API key status (masked, shows last 4 chars only).
 
 ### POST /api-keys/update
-Update an API key (persists to disk).
+Update an API key (persists to disk and memory).
 
 ```json
-{"key": "imagine_art_key", "value": "vk-new-key-here"}
+{"key": "here_api_key", "value": "your-here-key-here"}
 ```
 
-Valid keys: `google_api_key`, `serper_key`, `gemini_key`, `claude_key`, `replicate_token`, `imagine_art_key`, `oxylabs_key`, `resend_key`, `from_email`, `from_name`.
+**Valid keys:** `google_api_key`, `serper_key`, `gemini_key`, `claude_key`, `replicate_token`, `imagine_art_key`, `oxylabs_key`, `resend_key`, `from_email`, `from_name`, `here_api_key`.
 
 ---
 
@@ -451,12 +542,14 @@ Be mindful of these — they affect what the platform can do:
 
 | API | Free Limit | Used By |
 |---|---|---|
-| Google Places | $300 credit | /search, /discover |
-| Serper | 2,500 searches | /enrich, /keywords, /serp, /trends, /find-people, etc. |
-| Gemini | High | /score, /search (parsing), /keywords (expansion) |
+| Google Places (New + Classic) | $300 credit | /search, /discover |
+| OpenStreetMap Overpass | Unlimited (fair use) | /search (always runs alongside Google) |
+| HERE Maps Discover | 250,000 tx/month | /search (when here_api_key set) |
+| Serper | 2,500 searches/month | /enrich, /verify-websites, /keywords, /serp, /trends, /find-people |
+| Gemini | High free tier | /score, /search (query parsing), /keywords |
 | Claude | Pay-per-token | /generate-assets, /regenerate-email |
-| Replicate | $0.003/image | /generate-assets (when image_provider=replicate) |
-| Resend | 3,000 emails/mo | /send-email, /lead/{id}/send |
+| Replicate | $0.003/image | /generate-assets (image_provider=replicate) |
+| Resend | 3,000 emails/month | /send-email, /lead/{id}/send |
 
 When you hit a limit, the API returns an error in the response body explaining what failed.
 
@@ -464,7 +557,7 @@ When you hit a limit, the API returns an error in the response body explaining w
 
 ## Versioning
 
-Current API version: **5.0**
+Current API version: **7.0**
 
 Check `/health` for the version your server is running.
 

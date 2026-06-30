@@ -24,12 +24,16 @@ leads_api.py  ←── Python backend, port 8080, handles all logic
      ├──► Crawl4AI    ←── scrapes websites to find emails
      │
      └──► External APIs:
-           ├── Google Places API  — finds businesses by location
-           ├── Gemini (Google AI) — parses search queries, scores leads
-           ├── Claude (Anthropic) — writes outreach emails
-           ├── Serper             — finds owner emails via web search
-           ├── Oxylabs            — premium web scraping fallback
-           └── Resend             — sends outreach emails
+           ├── Google Places (New + Classic) — primary business discovery
+           ├── OpenStreetMap Overpass        — free secondary source
+           ├── HERE Maps Discover            — free third source (optional)
+           ├── Google Geocoding              — city → lat/lng
+           ├── Gemini (Google AI)            — query parsing + scoring
+           ├── Claude (Anthropic)            — email copy generation
+           ├── Serper                        — email/LinkedIn enrichment + website verify
+           ├── Oxylabs                       — deep scraping fallback
+           ├── Replicate / imagine.art       — mockup image generation
+           └── Resend                        — outreach email delivery
 ```
 
 ---
@@ -92,12 +96,13 @@ All keys are stored in `/opt/leadgen/config.json` on the server.
 | Key | Service | Used For |
 |---|---|---|
 | `google_api_key` | Google Places API | **Core** — finds businesses by niche + city. Without this, search doesn't work. |
-| `gemini_key` | Google Gemini AI | Parses your natural language search ("laundry shops in Dubai") into structured queries. Also scores leads 1-10. |
+| `gemini_key` | Google Gemini AI | Parses your natural language search into structured queries. Also scores leads 1–10. |
+| `serper_key` | Serper.dev | Finds owner email addresses + verifies websites (Serper search). |
 | `claude_key` | Anthropic Claude | Writes personalised outreach email copy for each lead. |
-| `serper_key` | Serper.dev | Searches the web to find owner email addresses (primary method). |
 | `oxylabs_key` | Oxylabs | Premium web scraper for finding emails (fallback if Serper fails). |
-| `replicate_token` | Replicate | Generates website mockup images to include in outreach emails. (Optional, off by default) |
-| `imagine_art_key` | Imagine.art | Alternative image generator for mockups. (Optional) |
+| `here_api_key` | HERE Maps | Third lead discovery source — 250k free transactions/month. Set in Settings. |
+| `replicate_token` | Replicate | Generates website mockup images (optional, off by default). |
+| `imagine_art_key` | Imagine.art | Alternative image generator for mockups (optional). |
 | `resend_key` | Resend | Sends the outreach emails from your domain. |
 | `from_email` | — | The email address outreach is sent from. |
 | `from_name` | — | The sender name on outreach emails. |
@@ -116,17 +121,17 @@ systemctl restart leadgen-api
 | Page | What it does |
 |---|---|
 | **Dashboard** | Overview stats — total leads, pipeline stages, reply rates. |
-| **Search** | Type a query like "gyms in Miami" → finds businesses using Google Places. |
-| **Leads** | Table of all discovered businesses. Filter by status, email, score. |
-| **Pipeline** | Enrichment workflow — runs Crawl4AI + Serper to find owner emails, scores with Gemini, writes email with Claude. |
-| **Outreach** | Review and approve emails before sending. Then send via Resend. |
-| **Analytics** | Charts on your lead gen performance. |
-| **SEO** | Keyword research tool. |
-| **Competitors** | Analyse a competitor's website/domain. |
-| **People** | Find specific people (decision makers) by company. |
-| **Social** | Social media scout. |
-| **E-commerce** | E-commerce research module. |
-| **Settings** | Update API keys from the UI. Change email sender. Toggle features. |
+| **Search** | Natural-language search with live progress, density selector, website filter, Stop button. |
+| **Leads** | Table of all discovered businesses. Sort by date/score/name/city/niche. Filter tabs including "✓ No Website (verified)". Verify Websites button with live progress. Multi-select + CSV download. |
+| **Pipeline** | Enrichment workflow — choose Serper / Oxylabs / Smart / Free strategy. Runs Crawl4AI + Serper to find emails, scores with Gemini, writes email with Claude. |
+| **Outreach** | Review and approve emails before sending. Edit / Regenerate / Reject. Send via Resend. |
+| **Analytics** | Charts: leads per day, status breakdown, niche/city breakdown, score distribution. |
+| **SEO** | Keyword research, SERP analysis, Google Trends. |
+| **Competitors** | Tech stack, social profiles, backlinks, Wayback Machine snapshots. |
+| **People** | Decision-maker finder (free Apollo.io alternative). |
+| **Social** | Social media scout across Instagram, TikTok, YouTube. |
+| **E-commerce** | Amazon/eBay product and niche research. |
+| **Settings** | API keys (including HERE Maps), enrichment strategy selector, image provider, automation toggles. |
 
 ---
 
@@ -187,12 +192,19 @@ discovered → enriched → scored → ready → approved → sent → replied �
 
 | Table | Stores |
 |---|---|
-| `leads` | Every business found — name, location, phone, website, score, status |
+| `leads` | Every business found — name, location, phone, website, has_website, website_verified, ai_score, status |
 | `contacts` | Owner details per lead — name, email, LinkedIn, job title |
 | `assets` | Generated content — mockup images, email subject, email body |
 | `outreach_log` | Every email sent — to whom, when, opened/replied timestamps |
 | `processed_cache` | Hashes of past searches — prevents running the same search twice |
+| `discovery_state` | Round counter per (niche, city, country) — tracks search depth for "Find More" |
 | `workflow_runs` | Log of background jobs |
+
+**Key columns on `leads`:**
+- `has_website` (boolean) — whether a website was listed in the Places API response
+- `website_verified` (boolean/null) — `TRUE` after HTTP verification, `NULL` if not yet checked
+- `phone_norm` (varchar) — last 10 digits of phone number used for deduplication
+- `domain` (varchar) — stripped domain used for deduplication across sources
 
 ---
 
