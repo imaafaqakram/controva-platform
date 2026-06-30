@@ -377,7 +377,7 @@ const SearchPage = ({ setPage }) => {
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
-  const [filterMode, setFilterMode] = useState('no_website');  // no_website | with_website | all
+  const [filterMode, setFilterMode] = useState('all');  // all | no_website | with_website
   const [density, setDensity] = useState('standard');  // low | standard | high
   const [history, setHistory] = useState(() => {
     try { return JSON.parse(localStorage.getItem('search_history') || '[]'); } catch (e) { return []; }
@@ -416,6 +416,7 @@ const SearchPage = ({ setPage }) => {
             filter_mode: res.filter_mode, density: res.density,
             total_new_leads: res.total_new_leads ?? 0,
             leads: res.leads || [],
+            message: res.message || null,
           };
           setResult(r);
           const sq = lastQuery;
@@ -534,9 +535,19 @@ const SearchPage = ({ setPage }) => {
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2">
               <Spinner />
-              <span className="font-semibold text-sm">Searching Google Places + OpenStreetMap for leads…</span>
+              <span className="font-semibold text-sm">Searching leads across all sources…</span>
             </div>
-            <span className="text-sm font-mono text-amber-700 dark:text-amber-400">{job.progress || 0}%</span>
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-mono text-amber-700 dark:text-amber-400">{job.progress || 0}%</span>
+              <button onClick={async () => {
+                if (!jobId) return;
+                try { await api.post('/job/' + jobId + '/cancel', {}); } catch(e) {}
+                setJob(j => ({ ...j, status: 'cancelled' }));
+                setJobId(null);
+              }} className="px-3 py-1 bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 rounded-lg text-xs font-semibold hover:bg-red-200 dark:hover:bg-red-900/60 transition-colors border border-red-200 dark:border-red-800">
+                ✕ Stop
+              </button>
+            </div>
           </div>
           <div className="w-full bg-amber-100 dark:bg-amber-900/30 rounded-full h-2 overflow-hidden mb-3">
             <div className="bg-amber-500 h-2 rounded-full transition-all duration-500 animate-pulse" style={{ width: (job.progress || 0) + '%' }}></div>
@@ -604,9 +615,11 @@ const SearchPage = ({ setPage }) => {
 
           {result.total_new_leads === 0 && (
             <p className="text-sm text-slate-500 mt-3 p-3 bg-yellow-50 dark:bg-yellow-900/20 rounded-lg">
-              {result.status === 'exhausted'
-                ? '🏁 This area looks fully explored — few new businesses left. Try a different city or niche.'
-                : '💡 No brand-new businesses this round. Click "Find More Leads" to widen the radius, add AI-generated synonyms, and pull from OpenStreetMap.'}
+              {result.message
+                ? '💡 ' + result.message
+                : result.status === 'exhausted'
+                  ? '🏁 This area looks fully explored — few new businesses left. Try a different city or niche.'
+                  : '💡 No new businesses found this round. Click "Find More Leads" to widen the radius and pull from more sources.'}
             </p>
           )}
 

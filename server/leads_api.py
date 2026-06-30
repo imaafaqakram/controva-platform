@@ -274,7 +274,7 @@ Examples:
                 parsed = json.loads(m.group())
                 # Validate country is a real ISO code
                 if parsed.get('country') and len(parsed.get('country', '')) == 2:
-                    return parsed
+                    return _fix_state_as_city(parsed)
         except Exception as e:
             print(f'Gemini parse error: {e}')
 
@@ -442,12 +442,48 @@ Examples:
     if city_lower in country_to_capital:
         city, country = country_to_capital[city_lower]
 
-    return {'niche': niche, 'city': city, 'country': country, 'modifiers': []}
+    return _fix_state_as_city({'niche': niche, 'city': city, 'country': country, 'modifiers': []})
 
 
-# ──────────────────────────────────────────────────────────────
-#  GEOCODING (Google Geocoding API, free with billing enabled)
-# ──────────────────────────────────────────────────────────────
+# US state names/abbreviations → largest city (fixes "gyms in Texas" / "lawyers in Florida")
+US_STATE_CITIES = {
+    'alabama':'Birmingham','alaska':'Anchorage','arizona':'Phoenix','arkansas':'Little Rock',
+    'california':'Los Angeles','colorado':'Denver','connecticut':'Hartford','delaware':'Wilmington',
+    'florida':'Miami','georgia':'Atlanta','hawaii':'Honolulu','idaho':'Boise','illinois':'Chicago',
+    'indiana':'Indianapolis','iowa':'Des Moines','kansas':'Wichita','kentucky':'Louisville',
+    'louisiana':'New Orleans','maine':'Portland','maryland':'Baltimore','massachusetts':'Boston',
+    'michigan':'Detroit','minnesota':'Minneapolis','mississippi':'Jackson','missouri':'Kansas City',
+    'montana':'Billings','nebraska':'Omaha','nevada':'Las Vegas','new hampshire':'Manchester',
+    'new jersey':'Newark','new mexico':'Albuquerque','new york':'New York City',
+    'north carolina':'Charlotte','north dakota':'Fargo','ohio':'Columbus',
+    'oklahoma':'Oklahoma City','oregon':'Portland','pennsylvania':'Philadelphia',
+    'rhode island':'Providence','south carolina':'Columbia','south dakota':'Sioux Falls',
+    'tennessee':'Nashville','texas':'Houston','utah':'Salt Lake City','vermont':'Burlington',
+    'virginia':'Virginia Beach','washington':'Seattle','west virginia':'Charleston',
+    'wisconsin':'Milwaukee','wyoming':'Cheyenne',
+}
+
+
+def _fix_state_as_city(parsed):
+    """If city is a US state name (or 'State City' compound), redirect to largest city."""
+    city = (parsed.get('city') or '').strip()
+    country = (parsed.get('country') or '').upper()
+    if not city:
+        return parsed
+    city_lower = city.lower()
+    # Handle "Florida Miami" → first word is a state, rest is the actual city
+    parts = city_lower.split()
+    if len(parts) >= 2 and parts[0] in US_STATE_CITIES:
+        parsed['city'] = ' '.join(p.capitalize() for p in parts[1:])
+        if not parsed.get('country'):
+            parsed['country'] = 'US'
+        return parsed
+    # Whole city field is a state name — only when country is US or unset
+    if city_lower in US_STATE_CITIES and country in ('US', 'USA', ''):
+        parsed['_state_search'] = city  # keep original for logging
+        parsed['city'] = US_STATE_CITIES[city_lower]
+        parsed['country'] = 'US'
+    return parsed
 GEOCODE_CACHE = {}  # in-memory cache for same session
 
 def geocode_city(city, country=''):
@@ -547,7 +583,8 @@ def search_zone(place_type, lat, lng, radius):
 #  - Round-based widening so "Find More" keeps surfacing NEW businesses
 #  - Cross-source dedup on place_id / phone / domain
 # ──────────────────────────────────────────────────────────────
-PLACES_TEXT_URL = 'https://places.googleapis.com/v1/places:searchText'
+PLACES_TEXT_URL  = 'https://places.googleapis.com/v1/places:searchText'
+PLACES_CLASSIC_URL = 'https://maps.googleapis.com/maps/api/place/textsearch/json'
 TEXT_FIELD_MASK = ('places.id,places.displayName,places.formattedAddress,places.location,'
                    'places.websiteUri,places.nationalPhoneNumber,places.rating,'
                    'places.userRatingCount,nextPageToken')
@@ -556,12 +593,14 @@ OVERPASS_ENDPOINTS = [
     'https://overpass.kumi.systems/api/interpreter',
 ]
 NICHE_EXPANSION_CACHE = {}
+_PLACES_LAST_ERROR  = None   # set by _places_text_post on non-retryable failure
 
 
 def _places_text_post(body, tries=3):
-    """POST to Places Text Search with retry/backoff.
-    A 400 right after getting a nextPageToken usually means the token isn't
-    valid yet (propagation delay) → back off and retry. 429 = rate limited."""
+    """POST to Places Text Search (New) with retry/backoff.
+    Captures both HTTP errors and JSON-embedded errors (Google returns some
+    errors as 200 OK with {error:{code,message}} in the body)."""
+    global _PLACES_LAST_ERROR
     headers = {
         'Content-Type': 'application/json',
         'X-Goog-Api-Key': GOOGLE_API_KEY,
@@ -573,20 +612,75 @@ def _places_text_post(body, tries=3):
             req = urllib.request.Request(PLACES_TEXT_URL, data=json.dumps(body).encode(),
                                          method='POST', headers=headers)
             resp = urllib.request.urlopen(req, timeout=20)
-            return json.loads(resp.read().decode())
+            data = json.loads(resp.read().decode())
+            # Google sometimes returns 200 OK with an error body
+            if 'error' in data:
+                err = data['error']
+                _PLACES_LAST_ERROR = f"API {err.get('code','?')}: {err.get('message','')[:200]}"
+                print(f'TextSearch (New) JSON error: {_PLACES_LAST_ERROR}')
+                return {}
+            _PLACES_LAST_ERROR = None
+            return data
         except Exception as e:
             code = getattr(e, 'code', None)
             if code in (400, 429) and attempt < tries - 1:
                 time.sleep(delay); delay *= 2; continue
-            print(f'TextSearch error (code={code}): {e}')
+            err_body = ''
+            try: err_body = e.read().decode()[:300]
+            except: pass
+            _PLACES_LAST_ERROR = f'HTTP {code}: {err_body or str(e)}'
+            print(f'TextSearch (New) error: {_PLACES_LAST_ERROR}')
             return {}
     return {}
 
 
+def _classic_text_search(text_query, lat, lng, radius_m, max_pages=3):
+    """Classic Places Text Search (maps.googleapis.com) — works with any Maps key,
+    no billing tier needed beyond basic Maps. Falls back from the New API on 403."""
+    params = {'query': text_query, 'key': GOOGLE_API_KEY}
+    if lat is not None and lng is not None:
+        params['location'] = f'{lat},{lng}'
+    if radius_m:
+        params['radius'] = int(min(radius_m, 50000))
+    results = []
+    for _ in range(max_pages):
+        url = PLACES_CLASSIC_URL + '?' + urllib.parse.urlencode(params)
+        try:
+            resp = urllib.request.urlopen(url, timeout=20)
+            data = json.loads(resp.read().decode())
+            status = data.get('status', '')
+            if status not in ('OK', 'ZERO_RESULTS'):
+                print(f'Classic Places error: {status} — {data.get("error_message","")}')
+                break
+            for p in data.get('results', []):
+                loc = (p.get('geometry') or {}).get('location', {})
+                results.append({
+                    'source': 'google',
+                    'source_id': p.get('place_id', ''),
+                    'name': p.get('name', ''),
+                    'phone': '',
+                    'website': None,
+                    'address': p.get('formatted_address', ''),
+                    'lat': loc.get('lat'), 'lng': loc.get('lng'),
+                    'rating': p.get('rating'),
+                    'review_count': p.get('user_ratings_total', 0),
+                })
+            token = data.get('next_page_token')
+            if not token:
+                break
+            params = {'pagetoken': token, 'key': GOOGLE_API_KEY}
+            time.sleep(2.0)
+        except Exception as e:
+            print(f'Classic Places exception: {e}')
+            break
+    return results
+
+
 def text_search_places(text_query, lat=None, lng=None, radius_m=None, rank='RELEVANCE', max_pages=3):
-    """Google Places Text Search (New). Free-text → ANY niche works (no place-type
-    enum needed). Paginates via nextPageToken up to ~60 results. Optionally bounded
-    to a circular tile via locationRestriction."""
+    """Google Places Text Search. Tries the New API first (up to 60 results via
+    nextPageToken). If the New API returns a 403/auth error, falls back to the
+    classic textsearch endpoint which works with any Maps API key."""
+    global _PLACES_LAST_ERROR
     base = {'textQuery': text_query, 'pageSize': 20}
     if rank in ('DISTANCE', 'RELEVANCE'):
         base['rankPreference'] = rank
@@ -595,17 +689,28 @@ def text_search_places(text_query, lat=None, lng=None, radius_m=None, rank='RELE
             'center': {'latitude': float(lat), 'longitude': float(lng)},
             'radius': float(min(radius_m, 50000))}}
     results, token = [], None
+    used_new_api = False
     for _page in range(max_pages):
         body = dict(base)
         if token:
             body['pageToken'] = token
         data = _places_text_post(body)
-        results.extend(data.get('places', []))
+        places = data.get('places', [])
+        if places:
+            used_new_api = True
+        results.extend(places)
         token = data.get('nextPageToken')
         if not token:
             break
-        time.sleep(2.0)  # nextPageToken needs a moment to become valid
-    return results
+        time.sleep(2.0)
+    # Fall back to classic API on any error (billing, key issue, quota, etc.)
+    if not results and _PLACES_LAST_ERROR:
+        classic = _classic_text_search(text_query, lat, lng, radius_m, max_pages)
+        if classic:
+            _PLACES_LAST_ERROR = None
+        return classic  # already normalized by _classic_text_search
+    # New API results need normalization
+    return [_norm_google_place(p) for p in results]
 
 
 def gemini_expand_niche(niche, city, country=''):
@@ -901,20 +1006,28 @@ def discover_leads_smart(niche, city, country='', original_query='',
     here_units = len(round_terms) if use_here else 0
     total_units = len(tiles) * len(round_terms) + (len(tiles) if use_osm else 0) + here_units
     done_units = 0
+    def _cancelled():
+        return job_id and JOBS.get(job_id, {}).get('cancelled')
+
     for (tlat, tlng, trad) in tiles:
+        if _cancelled():
+            _log('Search stopped by user.', pct=100)
+            break
         for term in round_terms:
+            if _cancelled():
+                break
             try:
                 for p in text_search_places(term, tlat, tlng, trad):
-                    pid = p.get('id')
+                    pid = p.get('source_id') or p.get('id')
                     if pid and pid not in raw:
-                        raw[pid] = _norm_google_place(p)
+                        raw[pid] = p  # already normalized by text_search_places
             except Exception as e:
                 print(f'text_search error: {e}')
             done_units += 1
             if done_units % 2 == 0 or done_units >= total_units:
                 _log(f'Searched {done_units}/{total_units} · {len(raw)} candidates so far',
                      pct=min(80, done_units / max(1, total_units) * 80))
-        if use_osm:
+        if use_osm and not _cancelled():
             try:
                 for o in overpass_search(exp['osm_tags'], tlat, tlng, int(trad * 1.2)):
                     if o['source_id'] not in raw:
@@ -924,7 +1037,7 @@ def discover_leads_smart(niche, city, country='', original_query='',
             done_units += 1
 
     # HERE Maps: one call per term on the primary tile (100 results each)
-    if use_here:
+    if use_here and not _cancelled():
         _log('Searching HERE Maps…')
         for term in round_terms:
             try:
@@ -937,17 +1050,24 @@ def discover_leads_smart(niche, city, country='', original_query='',
             _log(f'Searched {done_units}/{total_units} · {len(raw)} candidates so far',
                  pct=min(85, done_units / max(1, total_units) * 85))
 
+    if len(raw) == 0 and _PLACES_LAST_ERROR:
+        _log(f'Google Places API error: {_PLACES_LAST_ERROR}. '
+             f'Check your Google API key has Places API enabled in Google Cloud Console.', pct=88)
     _log(f'Collected {len(raw)} unique candidates. De-duplicating against your database…', pct=88)
 
     # ── dedup against DB (place_id / phone / domain) + insert NEW ──
     new_leads = []
+    filtered_by_website = 0
+    already_in_db = 0
     conn = db_conn(); cur = conn.cursor()
     for cand in raw.values():
         website = cand.get('website')
         has_website = bool(website)
         if filter_mode == 'no_website' and has_website:
+            filtered_by_website += 1
             continue
         if filter_mode == 'with_website' and not has_website:
+            filtered_by_website += 1
             continue
         pid = cand.get('source_id')
         if not pid:
@@ -962,6 +1082,7 @@ def discover_leads_smart(niche, city, country='', original_query='',
                            LIMIT 1""",
                         (pid, pn, pn, dom, dom))
             if cur.fetchone():
+                already_in_db += 1
                 continue
             cur.execute("""INSERT INTO leads(place_id,business_name,niche,city,country,address,phone,
                           website,latitude,longitude,google_rating,review_count,status,source,phone_norm,domain)
@@ -997,7 +1118,22 @@ def discover_leads_smart(niche, city, country='', original_query='',
     except Exception as e:
         print(f'discovery_state update error: {e}')
 
-    _log(f'Done — {len(new_leads)} NEW leads added (round {rnd}).', pct=100)
+    total_found = len(raw)
+    if len(new_leads) == 0 and total_found > 0:
+        if filtered_by_website > 0 and already_in_db == 0:
+            why = 'have websites' if filter_mode == 'no_website' else 'have no website'
+            _log(f'Found {total_found} businesses but all were filtered out '
+                 f'({filtered_by_website} {why}). Switch the Website Filter to "All" to capture them.', pct=100)
+        elif already_in_db > 0 and filtered_by_website == 0:
+            _log(f'Found {total_found} businesses — all {already_in_db} already in your database. '
+                 f'Click "Find More Leads" to search a wider area.', pct=100)
+        else:
+            _log(f'Found {total_found} businesses: {filtered_by_website} filtered by website, '
+                 f'{already_in_db} already in database. Try "All" filter or "Find More Leads".', pct=100)
+    else:
+        _log(f'Done — {len(new_leads)} new leads added'
+             + (f' ({already_in_db} already in DB, {filtered_by_website} filtered)' if already_in_db or filtered_by_website else '')
+             + f' · round {rnd}.', pct=100)
     return new_leads, ('exhausted' if exhausted else 'success')
 
 
@@ -2566,11 +2702,13 @@ def run_discover_bg(job_id, niche, city, country, filter_mode, density, find_mor
             JOBS[job_id]['log'].append('Could not find that location — try adding the country.')
         elif status == 'exhausted':
             JOBS[job_id]['log'].append('This area looks fully explored — few new businesses left.')
+        last_log = (JOBS[job_id].get('log') or [''])[-1]
         JOBS[job_id]['results'] = {
             'total': len(leads), 'total_new_leads': len(leads),
             'leads': leads[:200], 'discover_status': status,
             'niche': niche, 'city': city, 'country': country,
             'filter_mode': filter_mode, 'density': density, 'find_more': find_more,
+            'message': last_log,
         }
     except Exception as e:
         JOBS[job_id] = JOBS.get(job_id, {'log': []})
@@ -3278,6 +3416,15 @@ class Handler(BaseHTTPRequestHandler):
                 })
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
+
+        elif p.startswith('/job/') and p.endswith('/cancel'):
+            job_id = p[5:-7]
+            if job_id in JOBS:
+                JOBS[job_id]['cancelled'] = True
+                JOBS[job_id]['status'] = 'cancelled'
+                self.send_json(200, {'ok': True})
+            else:
+                self.send_json(404, {'error': 'job not found'})
 
         elif p == '/discover':
             try:
