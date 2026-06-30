@@ -4170,6 +4170,13 @@ class ThreadingServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
 if __name__ == '__main__':
+    # Run schema migrations at startup so columns added in new releases
+    # exist before any endpoint is called (avoids "column does not exist" crashes).
+    try:
+        ensure_discovery_tables()
+        print('Schema migration: OK')
+    except Exception as e:
+        print(f'Schema migration warning (non-fatal): {e}')
     server = ThreadingServer(('0.0.0.0', 8080), Handler)
     print('LeadGen v5 - Multi-Module Intelligence Platform')
     print('Modules: discover, enrich, score, assets, seo, competitor, ecommerce')
