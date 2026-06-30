@@ -3077,7 +3077,7 @@ def run_reenrich_bg(job_id, provider_strategy='oxylabs_only'):
             SELECT l.id, l.business_name, l.city, l.phone, l.niche
             FROM leads l
             LEFT JOIN contacts c ON c.lead_id = l.id
-            WHERE l.status NOT IN ('rejected')
+            WHERE l.status NOT IN ('discovered', 'rejected')
               AND (c.id IS NULL OR (COALESCE(c.email,'') = '' AND COALESCE(c.linkedin_url,'') = ''))
             ORDER BY l.created_at DESC
             LIMIT 500
