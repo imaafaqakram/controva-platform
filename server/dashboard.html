@@ -1401,6 +1401,7 @@ const SEOPage = () => {
 
 const PipelinePage = () => {
   const [provider, setProvider] = useState('serper_then_oxylabs');
+  const [reenrichProvider, setReenrichProvider] = useState('oxylabs_only');
   const [includeImages, setIncludeImages] = useState(false);
   const [jobId, setJobId] = useState(null);
   const [job, setJob] = useState(null);
@@ -1466,30 +1467,33 @@ const PipelinePage = () => {
 
       {/* Pipeline status overview */}
       {pStats && (
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
           {[
             { label: 'Total Leads', value: pStats.total, color: 'slate' },
             { label: 'Need Enriching', value: pStats.discovered, color: 'amber', hint: 'Click Enrich All →' },
             { label: 'Enriched', value: pStats.enriched, color: 'blue' },
+            { label: 'No Contact Found', value: pStats.enriched_no_contact, color: 'orange', hint: 'Re-Enrich below ↓' },
             { label: 'Scored', value: pStats.scored, color: 'purple' },
             { label: 'Ready to Send', value: pStats.ready, color: 'green' },
           ].map(s => (
             <div key={s.label} className={`p-3 rounded-xl border-2 text-center ${
-              s.color === 'amber' && s.value > 0 ? 'border-amber-400 bg-amber-50 dark:bg-amber-900/20' :
-              s.color === 'green' ? 'border-green-200 bg-green-50 dark:bg-green-900/10' :
-              s.color === 'blue'  ? 'border-blue-200 bg-blue-50 dark:bg-blue-900/10' :
-              s.color === 'purple'? 'border-purple-200 bg-purple-50 dark:bg-purple-900/10' :
+              s.color === 'amber'  && s.value > 0 ? 'border-amber-400 bg-amber-50 dark:bg-amber-900/20' :
+              s.color === 'orange' && s.value > 0 ? 'border-orange-400 bg-orange-50 dark:bg-orange-900/20' :
+              s.color === 'green'  ? 'border-green-200 bg-green-50 dark:bg-green-900/10' :
+              s.color === 'blue'   ? 'border-blue-200 bg-blue-50 dark:bg-blue-900/10' :
+              s.color === 'purple' ? 'border-purple-200 bg-purple-50 dark:bg-purple-900/10' :
               'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800'
             }`}>
               <div className={`text-2xl font-bold ${
-                s.color === 'amber' && s.value > 0 ? 'text-amber-600' :
+                s.color === 'amber'  && s.value > 0 ? 'text-amber-600' :
+                s.color === 'orange' && s.value > 0 ? 'text-orange-600' :
                 s.color === 'green'  ? 'text-green-600' :
                 s.color === 'blue'   ? 'text-blue-600' :
                 s.color === 'purple' ? 'text-purple-600' :
                 'text-slate-700 dark:text-slate-200'
               }`}>{s.value ?? '—'}</div>
               <div className="text-xs text-slate-500 mt-0.5">{s.label}</div>
-              {s.hint && s.value > 0 && <div className="text-xs text-amber-500 mt-0.5">{s.hint}</div>}
+              {s.hint && s.value > 0 && <div className="text-xs text-orange-500 mt-0.5">{s.hint}</div>}
             </div>
           ))}
         </div>
@@ -1552,14 +1556,59 @@ const PipelinePage = () => {
         </div>
       )}
 
+      {/* Re-Enrich section — shown when enriched leads have no contact info */}
+      {pStats && pStats.enriched_no_contact > 0 && (
+        <Card className="border-2 border-orange-300 dark:border-orange-700 bg-orange-50 dark:bg-orange-900/10">
+          <div className="flex items-start gap-3 mb-4">
+            <div className="w-10 h-10 rounded-full bg-orange-100 dark:bg-orange-900/40 flex items-center justify-center flex-shrink-0">
+              <Icon name="AlertTriangle" className="w-5 h-5 text-orange-600" />
+            </div>
+            <div>
+              <h3 className="font-semibold text-orange-700 dark:text-orange-400">
+                {pStats.enriched_no_contact} leads enriched — no contact info found
+              </h3>
+              <p className="text-xs text-slate-600 dark:text-slate-400 mt-1">
+                Serper searched these leads but couldn't find an email or LinkedIn profile.
+                Run Oxylabs deep scrape or a different strategy to try harder.
+              </p>
+            </div>
+          </div>
+          <div className="space-y-2 mb-4">
+            {[
+              { id: 'oxylabs_only', label: 'Oxylabs Only', desc: 'Deep web scrape — best for finding hidden contact info', icon: 'Shield' },
+              { id: 'serper_then_oxylabs', label: 'Smart (Serper → Oxylabs)', desc: 'Try Serper again first, then Oxylabs for remaining', icon: 'Sparkles' },
+              { id: 'free_only', label: '100% Free (Serper + Permutator)', desc: 'Use email pattern guessing — no extra API costs', icon: 'Gift' },
+            ].map(opt => (
+              <label key={opt.id} className={'flex items-start gap-3 p-3 rounded-lg border-2 cursor-pointer bg-white dark:bg-slate-900 ' + (
+                reenrichProvider === opt.id ? 'border-orange-500' : 'border-slate-200 dark:border-slate-800'
+              )}>
+                <input type="radio" checked={reenrichProvider === opt.id} onChange={() => setReenrichProvider(opt.id)} className="mt-1" />
+                <div className="flex-1">
+                  <div className="font-medium text-sm flex items-center gap-2"><Icon name={opt.icon} /> {opt.label}</div>
+                  <p className="text-xs text-slate-500 mt-0.5">{opt.desc}</p>
+                </div>
+              </label>
+            ))}
+          </div>
+          <Button variant="primary" icon="RefreshCw" size="lg" className="w-full"
+            onClick={() => runStep('/reenrich-missing-emails', 'Re-Enrich (no contact)', { provider_strategy: reenrichProvider })}>
+            Re-Enrich {pStats.enriched_no_contact} Leads with {
+              reenrichProvider === 'oxylabs_only' ? 'Oxylabs' :
+              reenrichProvider === 'serper_then_oxylabs' ? 'Smart Strategy' : 'Free Strategy'
+            }
+          </Button>
+        </Card>
+      )}
+
       <Card>
-        <h3 className="font-semibold mb-4">Enrichment Strategy</h3>
+        <h3 className="font-semibold mb-4">Enrich New Leads</h3>
+        <p className="text-xs text-slate-500 mb-3">Targets {pStats ? pStats.discovered : '…'} newly discovered leads that haven't been enriched yet.</p>
         <div className="space-y-3">
           {[
-            { id: 'serper_only', label: 'Serper Only', desc: 'Fastest', icon: 'Zap' },
-            { id: 'oxylabs_only', label: 'Oxylabs Only', desc: 'Deep scrape', icon: 'Shield' },
-            { id: 'serper_then_oxylabs', label: 'Smart (Recommended)', desc: 'Serper first, Oxylabs for missing', icon: 'Sparkles' },
-            { id: 'free_only', label: '100% Free', desc: 'Serper + permutator', icon: 'Gift' },
+            { id: 'serper_only', label: 'Serper Only', desc: 'Fast, uses Serper search — no Oxylabs cost', icon: 'Zap' },
+            { id: 'oxylabs_only', label: 'Oxylabs Only', desc: 'Deep scrape only', icon: 'Shield' },
+            { id: 'serper_then_oxylabs', label: 'Smart (Recommended)', desc: 'Serper first, Oxylabs fills gaps', icon: 'Sparkles' },
+            { id: 'free_only', label: '100% Free', desc: 'Serper + email pattern guesser', icon: 'Gift' },
           ].map(opt => (
             <label key={opt.id} className={'flex items-start gap-3 p-3 rounded-lg border-2 cursor-pointer ' + (
               provider === opt.id ? 'border-accent-500 bg-accent-50 dark:bg-accent-900/20' : 'border-slate-200 dark:border-slate-800'
@@ -1588,8 +1637,7 @@ const PipelinePage = () => {
       <Card>
         <h3 className="font-semibold mb-4">Individual Steps</h3>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-          <Button onClick={() => runStep('/enrich', 'Enrich', { provider })} variant="secondary" icon="UserPlus">Enrich All</Button>
-          <Button onClick={() => runStep('/reenrich-missing-emails', 'Find emails')} variant="secondary" icon="Mail">Find Missing Emails</Button>
+          <Button onClick={() => runStep('/enrich', 'Enrich', { provider })} variant="secondary" icon="UserPlus">Enrich New Leads</Button>
           <Button onClick={() => runStep('/score', 'Score')} variant="secondary" icon="Star">AI Score</Button>
           <Button onClick={() => runStep('/generate-assets', 'Assets')} variant="secondary" icon="Sparkles">Generate Copy</Button>
         </div>

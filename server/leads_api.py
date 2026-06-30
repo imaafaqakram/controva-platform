@@ -3065,6 +3065,77 @@ def run_enrich_bg(job_id, provider_strategy='serper_then_oxylabs'):
         JOBS[job_id]['error'] = str(e)
         JOBS[job_id]['log'].append(f'Error: {e}')
 
+def run_reenrich_bg(job_id, provider_strategy='oxylabs_only'):
+    """Re-enrich leads that have no email/contact yet, with per-lead progress.
+    Targets all statuses except discovered/rejected — any lead whose enrichment
+    attempt produced no contact info."""
+    try:
+        JOBS[job_id] = {'status': 'running', 'progress': 0,
+                        'log': ['Finding leads with no contact info…'], 'step': 'Re-Enrich'}
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("""
+            SELECT l.id, l.business_name, l.city, l.phone, l.niche
+            FROM leads l
+            LEFT JOIN contacts c ON c.lead_id = l.id
+            WHERE l.status NOT IN ('rejected')
+              AND (c.id IS NULL OR (COALESCE(c.email,'') = '' AND COALESCE(c.linkedin_url,'') = ''))
+            ORDER BY l.created_at DESC
+            LIMIT 500
+        """)
+        leads = cur.fetchall(); cur.close(); conn.close()
+        total = len(leads)
+
+        if total == 0:
+            JOBS[job_id]['status'] = 'completed'
+            JOBS[job_id]['progress'] = 100
+            JOBS[job_id]['log'].append('All leads already have contact info — nothing to do.')
+            JOBS[job_id]['results'] = {'processed': 0, 'emails_found': 0, 'linkedin_found': 0}
+            return
+
+        if provider_strategy == 'serper_only':
+            providers = ['serper']
+        elif provider_strategy == 'oxylabs_only':
+            providers = ['oxylabs']
+        elif provider_strategy == 'serper_then_oxylabs':
+            providers = ['serper', 'oxylabs']
+        elif provider_strategy == 'free_only':
+            providers = ['serper', 'permutator']
+        else:
+            providers = ['oxylabs']
+
+        JOBS[job_id]['log'].append(f'Found {total} leads with no contact info. Using: {"+".join(providers)}')
+        done = 0; found_email = 0; found_linkedin = 0
+        for ld in leads:
+            if JOBS[job_id].get('cancelled'):
+                break
+            lead_id, bname, city, phone, niche = ld
+            try:
+                r = enrich_lead(str(lead_id), bname, city, phone, niche, providers)
+                save_enrichment(r)
+                done += 1
+                got_email = bool(r.get('email'))
+                got_li = bool(r.get('linkedin_url'))
+                if got_email: found_email += 1
+                if got_li: found_linkedin += 1
+                tags = ' '.join(filter(None, ['✓ email' if got_email else '', '✓ linkedin' if got_li else '']))
+                JOBS[job_id]['log'].append(f'[{done}/{total}] {bname}: {tags or "still no contact"}')
+                JOBS[job_id]['progress'] = int(done / total * 100)
+                time.sleep(0.3)
+            except Exception as e:
+                done += 1
+                JOBS[job_id]['log'].append(f'[{done}/{total}] Error on {bname}: {str(e)[:60]}')
+                JOBS[job_id]['progress'] = int(done / total * 100)
+
+        JOBS[job_id]['status'] = 'completed'
+        JOBS[job_id]['progress'] = 100
+        JOBS[job_id]['log'].append(
+            f'Done — {done} attempted · {found_email} emails found · {found_linkedin} LinkedIn found.')
+        JOBS[job_id]['results'] = {'processed': done, 'emails_found': found_email, 'linkedin_found': found_linkedin}
+    except Exception as e:
+        JOBS[job_id]['status'] = 'failed'
+        JOBS[job_id]['error'] = str(e)
+        JOBS[job_id]['log'].append(f'Error: {e}')
+
 def run_verify_websites_bg(job_id, lead_ids=None):
     """Check whether each lead has a live website.
     - Leads with a URL stored: HTTP HEAD to verify it's live
@@ -3582,12 +3653,21 @@ class Handler(BaseHTTPRequestHandler):
                 with_email = cur.fetchone()[0]
                 cur.execute("SELECT COUNT(DISTINCT city) FROM leads")
                 cities = cur.fetchone()[0]
+                # Leads that went through enrichment but still have no email or LinkedIn
+                cur.execute("""
+                    SELECT COUNT(l.id) FROM leads l
+                    LEFT JOIN contacts c ON c.lead_id = l.id
+                    WHERE l.status NOT IN ('discovered', 'rejected')
+                      AND (c.id IS NULL OR (COALESCE(c.email,'') = '' AND COALESCE(c.linkedin_url,'') = ''))
+                """)
+                enriched_no_contact = cur.fetchone()[0]
                 cur.close(); conn.close()
                 self.send_json(200, {
                     'hot_leads': row[0], 'total': row[1], 'discovered': row[2],
                     'enriched': row[3], 'scored': row[4], 'ready': row[5],
                     'sent': row[6], 'high_score': row[7],
-                    'with_email': with_email, 'cities': cities
+                    'with_email': with_email, 'cities': cities,
+                    'enriched_no_contact': enriched_no_contact
                 })
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
@@ -3774,10 +3854,9 @@ class Handler(BaseHTTPRequestHandler):
 
         elif p == '/reenrich-missing-emails':
             try:
-                use_oxy = body.get('use_oxylabs', True)
-                job_id = f'job_{int(time.time())}'
-                JOBS[job_id] = {'status': 'running', 'progress': 0, 'log': ['Starting: Find missing emails...'], 'step': 'Find missing emails'}
-                t = threading.Thread(target=run_step_bg, args=(job_id, reenrich_missing_emails, 'Find missing emails', use_oxy))
+                strategy = body.get('provider_strategy', 'oxylabs_only')
+                job_id = f'job_{int(time.time() * 1000)}'
+                t = threading.Thread(target=run_reenrich_bg, args=(job_id, strategy))
                 t.daemon = True; t.start()
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
             except Exception as e:
