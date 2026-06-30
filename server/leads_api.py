@@ -277,7 +277,7 @@ Return ONLY valid JSON in this format:
 
 Rules:
 - "niche" = the business type EXACTLY as the user described it (keep the full phrase, e.g. "pest control and exterminators", "personal injury lawyer"). Do NOT substitute a different category.
-- "city" = a real CITY. If the user gives a US STATE (e.g. "new jersey", "texas", "florida"), use that state's LARGEST city.
+- "city" = the real CITY the user named. If they give BOTH a city and a state (e.g. "edison new jersey"), use the CITY (Edison) — never replace it with another city. ONLY when the user gives a state with NO city (e.g. "in texas") do you use that state's largest city.
 - "country" = 2-letter ISO code.
 
 Country codes: US, GB, AE, IN, PK, BD, SA, AU, CA, SG, MY, EG, NG, ZA, BR, MX, AR, TR, ID, PH, TH, VN, JP, KR, CN, DE, FR, ES, IT, NL, BE, CH, SE, NO, DK, FI, PL, RU, UA, IR, IQ, JO, KW, BH, OM, QA, LB, MA, KE
@@ -285,7 +285,8 @@ Country codes: US, GB, AE, IN, PK, BD, SA, AU, CA, SG, MY, EG, NG, ZA, BR, MX, A
 Examples:
 - "barber shops in Manchester UK" -> {{"niche":"barber","city":"Manchester","country":"GB","modifiers":[]}}
 - "restaurants in Lahore Pakistan" -> {{"niche":"restaurant","city":"Lahore","country":"PK","modifiers":[]}}
-- "Pest Control and Exterminators in new jersey USA" -> {{"niche":"pest control and exterminators","city":"Newark","country":"US","modifiers":[]}}
+- "Pest Control and Exterminators in edison new jersey USA" -> {{"niche":"pest control and exterminators","city":"Edison","country":"US","modifiers":[]}}
+- "pest control in new jersey" -> {{"niche":"pest control","city":"Newark","country":"US","modifiers":[]}}
 - "personal injury lawyers in texas" -> {{"niche":"personal injury lawyer","city":"Houston","country":"US","modifiers":[]}}
 - "salons in Karachi" -> {{"niche":"salon","city":"Karachi","country":"PK","modifiers":[]}}
 - "restaurants in Pakistan" -> {{"niche":"restaurant","city":"Islamabad","country":"PK","modifiers":[]}}"""
@@ -443,53 +444,113 @@ Examples:
                        'roofer', 'lawyer', 'accountant', 'contractor', 'landscaper']
         niche = next((w for w in niche_words if w in text_lower), text.strip())
 
-    # ── City detection (in priority order) ─────────────────────
+    # ── City detection ─────────────────────────────────────────
+    # Priority: the explicit "<niche> in LOCATION" text the user typed wins.
+    # We only fall back to "state's largest city" when the user gave a BARE
+    # state with no city (e.g. "plumbers in Texas").
     city = None
-    # 1) Known major city anywhere in the text (most reliable)
-    for city_name in sorted(city_to_country.keys(), key=len, reverse=True):
-        if re.search(r'\b' + re.escape(city_name) + r'\b', text_lower):
-            city = city_name.title()
-            if not country:
-                country = city_to_country[city_name]
-            break
-    # 2) US state name → its largest city (handles "new jersey", "texas", …)
+    state_full = None   # set when the location is just a US state → triggers sweep
+
+    def _strip_country_words(s):
+        out = s
+        for w in [country_match_str or '', 'usa', 'u.s.a', 'u.s.', 'u.s',
+                  'united states', 'america', 'uk', 'u.k.', 'united kingdom',
+                  'uae', 'united arab emirates', 'ksa']:
+            if w:
+                out = re.sub(r'\b' + re.escape(w) + r'\b', '', out, flags=re.IGNORECASE)
+        out = re.sub(r'[,\.]', ' ', out)
+        return re.sub(r'\s+', ' ', out).strip(' ,.-')
+
+    # 1) Trust the location the user wrote after "in/at/near"
+    if location_part:
+        loc_clean = re.sub(r'[,\.]', ' ', location_part)
+        loc_clean = re.sub(r'\s+', ' ', loc_clean).strip(' ,.-')
+        if loc_clean.lower() in COUNTRY_PRIMARY_CITY:
+            # ONLY a country given ("restaurants in Pakistan") → its primary city
+            city, country = COUNTRY_PRIMARY_CITY[loc_clean.lower()]
+        else:
+            loc = _strip_country_words(location_part)
+            loc_lower = loc.lower()
+            if loc_lower in US_STATE_CITIES:
+                # ONLY a state given → sweep its top cities for maximum coverage
+                state_full = loc_lower
+                city = US_STATE_CITIES[loc_lower]
+                country = country or 'US'
+            elif loc:
+                # A real place (city, "city state", neighborhood) → keep it whole
+                # so the geocoder resolves it precisely (e.g. "Edison New Jersey").
+                city = loc.title()
+                if any(re.search(r'\b' + re.escape(s) + r'\b', loc_lower) for s in US_STATE_CITIES):
+                    country = country or 'US'
+                elif not country:
+                    # Infer country from a known city mentioned in the location
+                    for cn, cc in city_to_country.items():
+                        if re.search(r'\b' + re.escape(cn) + r'\b', loc_lower):
+                            country = cc
+                            break
+
+    # 2) No "in" clause → known major city mentioned anywhere
+    if not city:
+        for city_name in sorted(city_to_country.keys(), key=len, reverse=True):
+            if re.search(r'\b' + re.escape(city_name) + r'\b', text_lower):
+                city = city_name.title()
+                country = country or city_to_country[city_name]
+                break
+
+    # 3) Still nothing → a bare US state mentioned anywhere in the text
     if not city:
         for state_name in sorted(US_STATE_CITIES.keys(), key=len, reverse=True):
             if re.search(r'\b' + re.escape(state_name) + r'\b', text_lower):
+                state_full = state_name
                 city = US_STATE_CITIES[state_name]
                 country = country or 'US'
                 break
-    # 3) Whatever the user wrote after "in/at/near", minus the country words
-    if not city and location_part:
-        loc = location_part
-        strip_words = [country_match_str or '', 'usa', 'u.s.a', 'u.s.', 'u.s',
-                       'united states', 'america', 'uk', 'united kingdom',
-                       'uae', 'united arab emirates']
-        for w in strip_words:
-            if w:
-                loc = re.sub(r'\b' + re.escape(w) + r'\b', '', loc, flags=re.IGNORECASE)
-        loc = re.sub(r'[,\.]', ' ', loc)
-        loc = re.sub(r'\s+', ' ', loc).strip()
-        if loc:
-            city = loc.title()
+
+    # 4) Still nothing → a bare country mentioned anywhere → its primary city
+    if not city:
+        for cname in sorted(COUNTRY_PRIMARY_CITY.keys(), key=len, reverse=True):
+            if re.search(r'\b' + re.escape(cname) + r'\b', text_lower):
+                city, country = COUNTRY_PRIMARY_CITY[cname]
+                break
 
     # No reliable location → tell the caller instead of silently searching Dubai
     if not city:
         return {'niche': niche, 'city': '', 'country': country or '',
                 'modifiers': [], '_parse_failed': True}
 
-    # Sanity check: if the "city" is actually a country name, use its capital
-    country_to_capital = {
-        'pakistan': ('Islamabad', 'PK'), 'india': ('Mumbai', 'IN'),
-        'bangladesh': ('Dhaka', 'BD'), 'uae': ('Dubai', 'AE'),
-        'saudi arabia': ('Riyadh', 'SA'), 'singapore': ('Singapore', 'SG'),
-    }
-    if city.lower() in country_to_capital:
-        city, country = country_to_capital[city.lower()]
+    # Sanity check: if the "city" is actually a country name, use its primary city
+    if city.lower() in COUNTRY_PRIMARY_CITY:
+        city, country = COUNTRY_PRIMARY_CITY[city.lower()]
 
-    return _fix_state_as_city({'niche': niche, 'city': city,
-                               'country': country or '', 'modifiers': []})
+    result = {'niche': niche, 'city': city, 'country': country or '', 'modifiers': []}
+    if state_full:
+        result['_state_cities'] = US_STATE_TOP_CITIES.get(state_full, [city])
+    return _fix_state_as_city(result)
 
+
+# Bare country name → its primary business city (for "restaurants in Pakistan")
+COUNTRY_PRIMARY_CITY = {
+    'pakistan': ('Islamabad','PK'), 'india': ('Mumbai','IN'), 'bangladesh': ('Dhaka','BD'),
+    'sri lanka': ('Colombo','LK'), 'nepal': ('Kathmandu','NP'),
+    'uae': ('Dubai','AE'), 'united arab emirates': ('Dubai','AE'), 'emirates': ('Dubai','AE'),
+    'saudi arabia': ('Riyadh','SA'), 'saudi': ('Riyadh','SA'), 'ksa': ('Riyadh','SA'),
+    'singapore': ('Singapore','SG'), 'qatar': ('Doha','QA'), 'bahrain': ('Manama','BH'),
+    'kuwait': ('Kuwait City','KW'), 'oman': ('Muscat','OM'), 'jordan': ('Amman','JO'),
+    'lebanon': ('Beirut','LB'), 'egypt': ('Cairo','EG'), 'morocco': ('Casablanca','MA'),
+    'usa': ('New York City','US'), 'united states': ('New York City','US'), 'america': ('New York City','US'),
+    'uk': ('London','GB'), 'united kingdom': ('London','GB'), 'britain': ('London','GB'), 'england': ('London','GB'),
+    'canada': ('Toronto','CA'), 'australia': ('Sydney','AU'), 'new zealand': ('Auckland','NZ'),
+    'south africa': ('Johannesburg','ZA'), 'nigeria': ('Lagos','NG'), 'kenya': ('Nairobi','KE'),
+    'malaysia': ('Kuala Lumpur','MY'), 'indonesia': ('Jakarta','ID'), 'philippines': ('Manila','PH'),
+    'thailand': ('Bangkok','TH'), 'vietnam': ('Ho Chi Minh City','VN'), 'japan': ('Tokyo','JP'),
+    'china': ('Shanghai','CN'), 'south korea': ('Seoul','KR'), 'korea': ('Seoul','KR'),
+    'germany': ('Berlin','DE'), 'france': ('Paris','FR'), 'spain': ('Madrid','ES'), 'italy': ('Rome','IT'),
+    'netherlands': ('Amsterdam','NL'), 'belgium': ('Brussels','BE'), 'switzerland': ('Zurich','CH'),
+    'sweden': ('Stockholm','SE'), 'norway': ('Oslo','NO'), 'denmark': ('Copenhagen','DK'),
+    'poland': ('Warsaw','PL'), 'turkey': ('Istanbul','TR'), 'brazil': ('Sao Paulo','BR'),
+    'mexico': ('Mexico City','MX'), 'argentina': ('Buenos Aires','AR'), 'russia': ('Moscow','RU'),
+    'ukraine': ('Kyiv','UA'),
+}
 
 # US state names/abbreviations → largest city (fixes "gyms in Texas" / "lawyers in Florida")
 US_STATE_CITIES = {
@@ -509,9 +570,65 @@ US_STATE_CITIES = {
     'wisconsin':'Milwaukee','wyoming':'Cheyenne',
 }
 
+# When someone searches a whole US state ("pest control in New Jersey") we sweep
+# the biggest cities so coverage isn't limited to one metro. ~5-8 cities each.
+US_STATE_TOP_CITIES = {
+    'alabama':['Birmingham','Montgomery','Mobile','Huntsville','Tuscaloosa'],
+    'alaska':['Anchorage','Fairbanks','Juneau'],
+    'arizona':['Phoenix','Tucson','Mesa','Chandler','Scottsdale','Tempe','Gilbert'],
+    'arkansas':['Little Rock','Fayetteville','Fort Smith','Springdale'],
+    'california':['Los Angeles','San Diego','San Jose','San Francisco','Fresno','Sacramento','Long Beach','Oakland'],
+    'colorado':['Denver','Colorado Springs','Aurora','Fort Collins','Boulder'],
+    'connecticut':['Bridgeport','New Haven','Hartford','Stamford','Waterbury'],
+    'delaware':['Wilmington','Dover','Newark'],
+    'florida':['Jacksonville','Miami','Tampa','Orlando','St. Petersburg','Fort Lauderdale','Tallahassee'],
+    'georgia':['Atlanta','Augusta','Columbus','Savannah','Athens','Macon'],
+    'hawaii':['Honolulu','Hilo','Kailua'],
+    'idaho':['Boise','Meridian','Nampa','Idaho Falls'],
+    'illinois':['Chicago','Aurora','Naperville','Joliet','Rockford','Springfield'],
+    'indiana':['Indianapolis','Fort Wayne','Evansville','South Bend','Carmel'],
+    'iowa':['Des Moines','Cedar Rapids','Davenport','Iowa City'],
+    'kansas':['Wichita','Overland Park','Kansas City','Topeka','Olathe'],
+    'kentucky':['Louisville','Lexington','Bowling Green','Owensboro'],
+    'louisiana':['New Orleans','Baton Rouge','Shreveport','Lafayette'],
+    'maine':['Portland','Lewiston','Bangor','Augusta'],
+    'maryland':['Baltimore','Columbia','Germantown','Silver Spring','Rockville'],
+    'massachusetts':['Boston','Worcester','Springfield','Cambridge','Lowell'],
+    'michigan':['Detroit','Grand Rapids','Warren','Ann Arbor','Lansing','Flint'],
+    'minnesota':['Minneapolis','Saint Paul','Rochester','Duluth','Bloomington'],
+    'mississippi':['Jackson','Gulfport','Southaven','Hattiesburg'],
+    'missouri':['Kansas City','Saint Louis','Springfield','Columbia','Independence'],
+    'montana':['Billings','Missoula','Great Falls','Bozeman'],
+    'nebraska':['Omaha','Lincoln','Bellevue','Grand Island'],
+    'nevada':['Las Vegas','Henderson','Reno','North Las Vegas','Sparks'],
+    'new hampshire':['Manchester','Nashua','Concord','Dover'],
+    'new jersey':['Newark','Jersey City','Paterson','Elizabeth','Edison','Trenton','Camden'],
+    'new mexico':['Albuquerque','Las Cruces','Santa Fe','Rio Rancho'],
+    'new york':['New York City','Buffalo','Rochester','Yonkers','Syracuse','Albany'],
+    'north carolina':['Charlotte','Raleigh','Greensboro','Durham','Winston-Salem','Fayetteville'],
+    'north dakota':['Fargo','Bismarck','Grand Forks','Minot'],
+    'ohio':['Columbus','Cleveland','Cincinnati','Toledo','Akron','Dayton'],
+    'oklahoma':['Oklahoma City','Tulsa','Norman','Broken Arrow'],
+    'oregon':['Portland','Salem','Eugene','Gresham','Hillsboro','Bend'],
+    'pennsylvania':['Philadelphia','Pittsburgh','Allentown','Erie','Reading','Scranton'],
+    'rhode island':['Providence','Warwick','Cranston','Pawtucket'],
+    'south carolina':['Charleston','Columbia','North Charleston','Greenville','Myrtle Beach'],
+    'south dakota':['Sioux Falls','Rapid City','Aberdeen'],
+    'tennessee':['Nashville','Memphis','Knoxville','Chattanooga','Clarksville'],
+    'texas':['Houston','San Antonio','Dallas','Austin','Fort Worth','El Paso','Arlington','Plano'],
+    'utah':['Salt Lake City','West Valley City','Provo','Ogden','Sandy'],
+    'vermont':['Burlington','Essex','Rutland'],
+    'virginia':['Virginia Beach','Norfolk','Richmond','Arlington','Alexandria','Chesapeake'],
+    'washington':['Seattle','Spokane','Tacoma','Vancouver','Bellevue','Everett'],
+    'west virginia':['Charleston','Huntington','Morgantown','Parkersburg'],
+    'wisconsin':['Milwaukee','Madison','Green Bay','Kenosha','Racine'],
+    'wyoming':['Cheyenne','Casper','Laramie'],
+}
+
 
 def _fix_state_as_city(parsed):
-    """If city is a US state name (or 'State City' compound), redirect to largest city."""
+    """If city is a US state name (or 'State City' compound), redirect to largest city.
+    Also attaches _state_cities so the discovery engine can sweep the whole state."""
     city = (parsed.get('city') or '').strip()
     country = (parsed.get('country') or '').upper()
     if not city:
@@ -529,6 +646,7 @@ def _fix_state_as_city(parsed):
         parsed['_state_search'] = city  # keep original for logging
         parsed['city'] = US_STATE_CITIES[city_lower]
         parsed['country'] = 'US'
+        parsed.setdefault('_state_cities', US_STATE_TOP_CITIES.get(city_lower, [parsed['city']]))
     return parsed
 GEOCODE_CACHE = {}  # in-memory cache for same session
 
@@ -578,18 +696,60 @@ def geocode_city(city, country=''):
                 'formatted': data['results'][0].get('formatted_address', '')
             }
             GEOCODE_CACHE[key] = result
-            # Cache in DB
-            try:
-                conn = db_conn(); cur = conn.cursor()
-                cur.execute("INSERT INTO assets(asset_type, content, model_used) VALUES('geocode', %s, 'google-geocode')",
-                           (json.dumps({**result, 'key': key}),))
-                conn.commit(); cur.close(); conn.close()
-            except Exception as e:
-                print(f'Cache geocode error: {e}')
+            _cache_geocode_db(key, result, 'google-geocode')
             return result
     except Exception as e:
-        print(f'Geocode error: {e}')
+        print(f'Geocode error (google): {e}')
+
+    # ── FREE FALLBACK: Nominatim / OpenStreetMap (no API key, no billing) ──
+    nomi = _geocode_nominatim(city, country)
+    if nomi:
+        GEOCODE_CACHE[key] = nomi
+        _cache_geocode_db(key, nomi, 'nominatim')
+        return nomi
     return None
+
+
+def _cache_geocode_db(key, result, model):
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("INSERT INTO assets(asset_type, content, model_used) VALUES('geocode', %s, %s)",
+                    (json.dumps({**result, 'key': key}), model))
+        conn.commit(); cur.close(); conn.close()
+    except Exception as e:
+        print(f'Cache geocode error: {e}')
+
+
+def _geocode_nominatim(city, country=''):
+    """Free geocoding via OpenStreetMap Nominatim. No key needed.
+    Respects their usage policy with a descriptive User-Agent + 1 req."""
+    try:
+        q = urllib.parse.quote(f'{city}, {country}' if country else city)
+        url = (f'https://nominatim.openstreetmap.org/search?q={q}'
+               f'&format=json&limit=1&addressdetails=0')
+        req = urllib.request.Request(url, headers={
+            'User-Agent': 'ControvaLeadGen/1.0 (lead discovery geocoder)'
+        })
+        resp = urllib.request.urlopen(req, timeout=10)
+        data = json.loads(resp.read().decode())
+        if not data:
+            return None
+        item = data[0]
+        lat, lng = float(item['lat']), float(item['lon'])
+        radius = 15000
+        bb = item.get('boundingbox')
+        if bb and len(bb) == 4:
+            south, north, west, east = (float(bb[0]), float(bb[1]),
+                                        float(bb[2]), float(bb[3]))
+            lat_d = abs(north - south) * 111000
+            lng_d = abs(east - west) * 111000 * 0.7
+            radius = int(max(lat_d, lng_d) / 2)
+            radius = max(5000, min(50000, radius))
+        return {'lat': lat, 'lng': lng, 'radius': radius,
+                'formatted': item.get('display_name', f'{city}, {country}')}
+    except Exception as e:
+        print(f'Geocode error (nominatim): {e}')
+        return None
 
 # ──────────────────────────────────────────────────────────────
 #  DISCOVERY (works with any city worldwide now)
@@ -980,12 +1140,13 @@ def ensure_discovery_tables():
 
 def discover_leads_smart(niche, city, country='', original_query='',
                          filter_mode='no_website', density='standard',
-                         find_more=False, job_id=None):
+                         find_more=False, job_id=None, extra_cities=None):
     """Multi-source, round-based discovery.
 
-    filter_mode : 'no_website' | 'with_website' | 'all'
-    density     : 'low' | 'standard' | 'high' (how aggressive each round starts)
-    find_more   : advance to the next round → wider radius, more synonyms, +OSM
+    filter_mode  : 'no_website' | 'with_website' | 'all'
+    density      : 'low' | 'standard' | 'high' (how aggressive each round starts)
+    find_more    : advance to the next round → wider radius, more synonyms, +OSM
+    extra_cities : list of cities to sweep (used for whole-state searches)
     job_id      : if set, live progress is written to JOBS[job_id]
     """
     ensure_discovery_tables()
@@ -1032,7 +1193,24 @@ def discover_leads_smart(niche, city, country='', original_query='',
     term_count = min(len(terms), 3 + eff_round)
     round_terms = terms[:term_count] or [niche]
 
-    tiles = build_tiles(lat, lng, base_rad, eff_round)
+    # ── Build the search areas (tiles) ─────────────────────────
+    state_sweep = bool(extra_cities and len(extra_cities) > 1)
+    if state_sweep:
+        # Whole-state search: one search area per major city. Each round widens
+        # every city's radius so "Find More" keeps reaching new businesses.
+        widen = 1.0 + 0.35 * eff_round
+        tiles, swept = [], []
+        for cname in extra_cities:
+            g = geocode_city(cname, country)
+            if g:
+                tiles.append((g['lat'], g['lng'], min(int(g['radius'] * widen), 25000)))
+                swept.append(cname)
+        if not tiles:
+            tiles = build_tiles(lat, lng, base_rad, eff_round)  # fallback
+            state_sweep = False
+    else:
+        tiles = build_tiles(lat, lng, base_rad, eff_round)
+
     # cost guard: never exceed ~36 searches in a single run
     MAX_SEARCHES = 36
     if len(tiles) * len(round_terms) > MAX_SEARCHES:
@@ -1043,7 +1221,11 @@ def discover_leads_smart(niche, city, country='', original_query='',
     sources_str = 'Google Places'
     if use_osm:  sources_str += ' + OpenStreetMap'
     if use_here: sources_str += ' + HERE Maps'
-    _log(f'Round {rnd} · {len(round_terms)} search terms · {len(tiles)} map tiles · sources: {sources_str}')
+    if state_sweep:
+        _log(f'State-wide sweep: {len(tiles)} cities ({", ".join(swept[:len(tiles)])}) · '
+             f'{len(round_terms)} search terms · sources: {sources_str}')
+    else:
+        _log(f'Round {rnd} · {len(round_terms)} search terms · {len(tiles)} map tiles · sources: {sources_str}')
     if len(round_terms) > 1:
         _log(f'Terms: {", ".join(round_terms)}')
 
@@ -2732,7 +2914,8 @@ def run_step_bg(job_id, step_fn, step_name, *args):
         JOBS[job_id]['error'] = str(e)
         JOBS[job_id]['log'].append(f'Error: {e}')
 
-def run_discover_bg(job_id, niche, city, country, filter_mode, density, find_more, original_query=''):
+def run_discover_bg(job_id, niche, city, country, filter_mode, density, find_more,
+                    original_query='', extra_cities=None):
     """Discovery background job — runs the multi-source engine and reports live progress."""
     try:
         if job_id not in JOBS:
@@ -2741,7 +2924,7 @@ def run_discover_bg(job_id, niche, city, country, filter_mode, density, find_mor
         leads, status = discover_leads_smart(
             niche, city, country, original_query,
             filter_mode=filter_mode, density=density,
-            find_more=find_more, job_id=job_id)
+            find_more=find_more, job_id=job_id, extra_cities=extra_cities)
         JOBS[job_id]['status'] = 'completed'
         JOBS[job_id]['progress'] = 100
         if status == 'geocode_failed':
@@ -2749,10 +2932,13 @@ def run_discover_bg(job_id, niche, city, country, filter_mode, density, find_mor
         elif status == 'exhausted':
             JOBS[job_id]['log'].append('This area looks fully explored — few new businesses left.')
         last_log = (JOBS[job_id].get('log') or [''])[-1]
+        city_label = city
+        if extra_cities and len(extra_cities) > 1:
+            city_label = f'{city} +{len(extra_cities) - 1} nearby cities'
         JOBS[job_id]['results'] = {
             'total': len(leads), 'total_new_leads': len(leads),
             'leads': leads[:200], 'discover_status': status,
-            'niche': niche, 'city': city, 'country': country,
+            'niche': niche, 'city': city_label, 'country': country,
             'filter_mode': filter_mode, 'density': density, 'find_more': find_more,
             'message': last_log,
         }
@@ -3428,13 +3614,17 @@ class Handler(BaseHTTPRequestHandler):
                                  'e.g. "pest control in Newark USA".',
                         'parsed': parsed})
                     return
+                state_cities = parsed.get('_state_cities')
+                where = parsed.get('city')
+                if state_cities and len(state_cities) > 1:
+                    where = f'{len(state_cities)} cities across {parsed.get("_state_search") or parsed.get("city")}'
                 job_id = f'job_{int(time.time() * 1000)}'
                 JOBS[job_id] = {'status': 'running', 'progress': 0,
-                                'log': [f'Parsing "{query}" → {parsed.get("niche")} in {parsed.get("city")}'],
+                                'log': [f'Parsing "{query}" → {parsed.get("niche")} in {where}'],
                                 'step': 'Discover'}
                 t = threading.Thread(target=run_discover_bg, args=(
                     job_id, parsed['niche'], parsed['city'], parsed.get('country', ''),
-                    filter_mode, density, find_more, query))
+                    filter_mode, density, find_more, query, state_cities))
                 t.daemon = True; t.start()
                 self.send_json(200, {'job_id': job_id, 'status': 'started',
                                      'parsed': parsed, 'find_more': find_more})
@@ -3487,11 +3677,16 @@ class Handler(BaseHTTPRequestHandler):
                 filter_mode = body.get('filter_mode', 'no_website')
                 density = body.get('density', 'standard')
                 find_more = bool(body.get('find_more', False))
+                # If a US state was passed as the city, redirect + enable sweep
+                fixed = _fix_state_as_city({'city': city, 'country': country})
+                city = fixed.get('city', city)
+                country = fixed.get('country', country)
+                state_cities = fixed.get('_state_cities')
                 job_id = f'job_{int(time.time() * 1000)}'
                 JOBS[job_id] = {'status': 'running', 'progress': 0,
                                 'log': [f'Discovering "{niche}" in {city}…'], 'step': 'Discover'}
                 t = threading.Thread(target=run_discover_bg, args=(
-                    job_id, niche, city, country, filter_mode, density, find_more, ''))
+                    job_id, niche, city, country, filter_mode, density, find_more, '', state_cities))
                 t.daemon = True; t.start()
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
             except Exception as e:
