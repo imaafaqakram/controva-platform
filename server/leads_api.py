@@ -36,6 +36,12 @@ CRAWL4AI_URL   = 'http://localhost:11235'
 CRAWL4AI_TOKEN = 'crawl4ai_secret_token_2024'
 HERE_API_KEY   = os.environ.get('HERE_API_KEY', '')  # Free 250k/mo: developer.here.com
 
+# ── Scraping Alternatives (all have free monthly tiers) ──────────
+SCRAPINGBEE_KEY = os.environ.get('SCRAPINGBEE_KEY', '')   # 1,000 free req/mo — scrapingbee.com
+ZENROWS_KEY     = os.environ.get('ZENROWS_KEY', '')        # 1,000 free req/mo — zenrows.com
+SCRAPINGDOG_KEY = os.environ.get('SCRAPINGDOG_KEY', '')    # 1,000 free req/mo — scrapingdog.com
+FIRECRAWL_KEY   = os.environ.get('FIRECRAWL_KEY', '')      # 500  free req/mo  — firecrawl.dev
+
 # Configuration toggles (can be changed via /config endpoint)
 CONFIG = {
     'enrichment_strategy': 'serper_then_oxylabs',  # serper_only | oxylabs_only | serper_then_oxylabs | free_only
@@ -72,24 +78,28 @@ CONFIG_FILE = os.path.join(LEADGEN_HOME, 'config.json')
 
 def load_config():
     """Load config from disk, fall back to defaults."""
-    global GOOGLE_API_KEY, SERPER_KEY, GEMINI_KEY, CLAUDE_KEY, REPLICATE_TOKEN, IMAGINE_ART_KEY, OXYLABS_KEY, RESEND_KEY, FROM_EMAIL, FROM_NAME, HERE_API_KEY
+    global GOOGLE_API_KEY, SERPER_KEY, GEMINI_KEY, CLAUDE_KEY, REPLICATE_TOKEN, IMAGINE_ART_KEY, OXYLABS_KEY, RESEND_KEY, FROM_EMAIL, FROM_NAME, HERE_API_KEY, SCRAPINGBEE_KEY, ZENROWS_KEY, SCRAPINGDOG_KEY, FIRECRAWL_KEY
     try:
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, 'r') as f:
                 saved = json.load(f)
             # API keys
             keys_map = {
-                'google_api_key': 'GOOGLE_API_KEY',
-                'serper_key': 'SERPER_KEY',
-                'gemini_key': 'GEMINI_KEY',
-                'claude_key': 'CLAUDE_KEY',
-                'replicate_token': 'REPLICATE_TOKEN',
-                'imagine_art_key': 'IMAGINE_ART_KEY',
-                'oxylabs_key': 'OXYLABS_KEY',
-                'resend_key': 'RESEND_KEY',
-                'from_email': 'FROM_EMAIL',
-                'from_name': 'FROM_NAME',
-                'here_api_key': 'HERE_API_KEY',
+                'google_api_key':   'GOOGLE_API_KEY',
+                'serper_key':       'SERPER_KEY',
+                'gemini_key':       'GEMINI_KEY',
+                'claude_key':       'CLAUDE_KEY',
+                'replicate_token':  'REPLICATE_TOKEN',
+                'imagine_art_key':  'IMAGINE_ART_KEY',
+                'oxylabs_key':      'OXYLABS_KEY',
+                'resend_key':       'RESEND_KEY',
+                'from_email':       'FROM_EMAIL',
+                'from_name':        'FROM_NAME',
+                'here_api_key':     'HERE_API_KEY',
+                'scrapingbee_key':  'SCRAPINGBEE_KEY',
+                'zenrows_key':      'ZENROWS_KEY',
+                'scrapingdog_key':  'SCRAPINGDOG_KEY',
+                'firecrawl_key':    'FIRECRAWL_KEY',
             }
             for key, var_name in keys_map.items():
                 if key in saved and saved[key]:
@@ -106,18 +116,22 @@ def save_config():
     """Save current config to disk."""
     try:
         data = {
-            'google_api_key': GOOGLE_API_KEY,
-            'serper_key': SERPER_KEY,
-            'gemini_key': GEMINI_KEY,
-            'claude_key': CLAUDE_KEY,
+            'google_api_key':  GOOGLE_API_KEY,
+            'serper_key':      SERPER_KEY,
+            'gemini_key':      GEMINI_KEY,
+            'claude_key':      CLAUDE_KEY,
             'replicate_token': REPLICATE_TOKEN,
             'imagine_art_key': IMAGINE_ART_KEY,
-            'oxylabs_key': OXYLABS_KEY,
-            'resend_key': RESEND_KEY,
-            'from_email': FROM_EMAIL,
-            'from_name': FROM_NAME,
-            'here_api_key': HERE_API_KEY,
-            'config': CONFIG,
+            'oxylabs_key':     OXYLABS_KEY,
+            'resend_key':      RESEND_KEY,
+            'from_email':      FROM_EMAIL,
+            'from_name':       FROM_NAME,
+            'here_api_key':    HERE_API_KEY,
+            'scrapingbee_key': SCRAPINGBEE_KEY,
+            'zenrows_key':     ZENROWS_KEY,
+            'scrapingdog_key': SCRAPINGDOG_KEY,
+            'firecrawl_key':   FIRECRAWL_KEY,
+            'config':          CONFIG,
         }
         with open(CONFIG_FILE, 'w') as f:
             json.dump(data, f, indent=2)
@@ -128,13 +142,13 @@ def save_config():
 
 def update_api_key(name, value):
     """Update an API key and save."""
-    global GOOGLE_API_KEY, SERPER_KEY, GEMINI_KEY, CLAUDE_KEY, REPLICATE_TOKEN, IMAGINE_ART_KEY, OXYLABS_KEY, RESEND_KEY, FROM_EMAIL, FROM_NAME, HERE_API_KEY
+    global GOOGLE_API_KEY, SERPER_KEY, GEMINI_KEY, CLAUDE_KEY, REPLICATE_TOKEN, IMAGINE_ART_KEY, OXYLABS_KEY, RESEND_KEY, FROM_EMAIL, FROM_NAME, HERE_API_KEY, SCRAPINGBEE_KEY, ZENROWS_KEY, SCRAPINGDOG_KEY, FIRECRAWL_KEY
     name_lower = name.lower()
     valid_keys = ['google_api_key', 'serper_key', 'gemini_key', 'claude_key',
                   'replicate_token', 'imagine_art_key', 'oxylabs_key', 'resend_key',
-                  'from_email', 'from_name', 'here_api_key']
+                  'from_email', 'from_name', 'here_api_key',
+                  'scrapingbee_key', 'zenrows_key', 'scrapingdog_key', 'firecrawl_key']
     if name_lower not in valid_keys: return False
-    # Update the actual global variable
     var_name = name_lower.upper()
     globals()[var_name] = value
     save_config()
@@ -159,6 +173,10 @@ def get_api_keys_masked():
         'from_email':      {'set': bool(FROM_EMAIL), 'preview': FROM_EMAIL},
         'from_name':       {'set': bool(FROM_NAME), 'preview': FROM_NAME},
         'here_api_key':    mask(HERE_API_KEY),
+        'scrapingbee_key': mask(SCRAPINGBEE_KEY),
+        'zenrows_key':     mask(ZENROWS_KEY),
+        'scrapingdog_key': mask(SCRAPINGDOG_KEY),
+        'firecrawl_key':   mask(FIRECRAWL_KEY),
     }
 
 # Load saved config at startup
@@ -183,6 +201,20 @@ try:
 except Exception as e:
     print(f"Oxylabs init failed: {e}")
     OXYLABS = None
+
+# ──────────────────────────────────────────────────────────────
+#  MARKET / COUNTRY CONFIG  (for e-commerce research)
+# ──────────────────────────────────────────────────────────────
+MARKET_CONFIG = {
+    'us': {'gl': 'us', 'hl': 'en', 'ebay': 'www.ebay.com',    'amazon': 'www.amazon.com',    'currency': 'USD', 'symbol': '$',   'name': 'United States'},
+    'uk': {'gl': 'gb', 'hl': 'en', 'ebay': 'www.ebay.co.uk',  'amazon': 'www.amazon.co.uk',  'currency': 'GBP', 'symbol': '£',   'name': 'United Kingdom'},
+    'au': {'gl': 'au', 'hl': 'en', 'ebay': 'www.ebay.com.au', 'amazon': 'www.amazon.com.au', 'currency': 'AUD', 'symbol': 'A$',  'name': 'Australia'},
+    'ca': {'gl': 'ca', 'hl': 'en', 'ebay': 'www.ebay.ca',     'amazon': 'www.amazon.ca',     'currency': 'CAD', 'symbol': 'C$',  'name': 'Canada'},
+    'de': {'gl': 'de', 'hl': 'de', 'ebay': 'www.ebay.de',     'amazon': 'www.amazon.de',     'currency': 'EUR', 'symbol': '€',   'name': 'Germany'},
+    'fr': {'gl': 'fr', 'hl': 'fr', 'ebay': 'www.ebay.fr',     'amazon': 'www.amazon.fr',     'currency': 'EUR', 'symbol': '€',   'name': 'France'},
+    'it': {'gl': 'it', 'hl': 'it', 'ebay': 'www.ebay.it',     'amazon': 'www.amazon.it',     'currency': 'EUR', 'symbol': '€',   'name': 'Italy'},
+    'es': {'gl': 'es', 'hl': 'es', 'ebay': 'www.ebay.es',     'amazon': 'www.amazon.es',     'currency': 'EUR', 'symbol': '€',   'name': 'Spain'},
+}
 
 # ──────────────────────────────────────────────────────────────
 #  HELPERS
@@ -1404,6 +1436,142 @@ def oxylabs_scrape(url, output='markdown'):
         print(f'Oxylabs scrape error: {e}')
     return None
 
+def smart_scrape(url, timeout=20):
+    """
+    Multi-tier URL-to-markdown scraper. Falls through cheaper/free tiers first.
+    Tier 1: Jina Reader       (free, no key, unlimited)
+    Tier 2: Crawl4AI          (self-hosted Docker, free)
+    Tier 3: ScrapingBee       (free 1k req/mo — set SCRAPINGBEE_KEY)
+    Tier 4: ZenRows           (free 1k req/mo — set ZENROWS_KEY)
+    Tier 5: Scrapingdog       (free 1k req/mo — set SCRAPINGDOG_KEY)
+    Tier 6: Firecrawl         (free 500 req/mo — set FIRECRAWL_KEY)
+    Tier 7: Oxylabs           (paid, powerful residential proxies)
+    """
+    # ── Tier 1: Jina Reader ───────────────────────────────────────────────
+    try:
+        jina_url = 'https://r.jina.ai/' + url
+        req = urllib.request.Request(jina_url, headers={
+            'Accept': 'text/plain',
+            'X-Return-Format': 'markdown',
+            'User-Agent': 'Mozilla/5.0 LeadGen/1.0',
+        })
+        resp = urllib.request.urlopen(req, timeout=timeout)
+        text = resp.read().decode('utf-8', errors='replace')
+        if text and len(text.strip()) > 300:
+            print(f'smart_scrape[Jina]: OK  {url[:70]}')
+            return text
+    except Exception as e:
+        print(f'smart_scrape[Jina]: {e}')
+
+    # ── Tier 2: Crawl4AI ─────────────────────────────────────────────────
+    try:
+        body = json.dumps({
+            'url': url,
+            'priority': 10,
+            'word_count_threshold': 10,
+            'extraction_config': {'type': 'markdown'},
+        }).encode()
+        req = urllib.request.Request(
+            CRAWL4AI_URL + '/crawl', data=body, method='POST',
+            headers={'Content-Type': 'application/json',
+                     'Authorization': 'Bearer ' + CRAWL4AI_TOKEN}
+        )
+        resp = urllib.request.urlopen(req, timeout=15)
+        task_id = json.loads(resp.read().decode()).get('task_id')
+        if task_id:
+            for _ in range(12):
+                time.sleep(2)
+                sr = urllib.request.Request(
+                    CRAWL4AI_URL + '/task/' + task_id,
+                    headers={'Authorization': 'Bearer ' + CRAWL4AI_TOKEN}
+                )
+                sd = json.loads(urllib.request.urlopen(sr, timeout=10).read().decode())
+                if sd.get('status') == 'completed':
+                    md = sd.get('result', {}).get('markdown', '')
+                    if md and len(md.strip()) > 300:
+                        print(f'smart_scrape[Crawl4AI]: OK  {url[:70]}')
+                        return md
+                    break
+    except Exception as e:
+        print(f'smart_scrape[Crawl4AI]: {e}')
+
+    # ── Tier 3: ScrapingBee ───────────────────────────────────────────────
+    if SCRAPINGBEE_KEY:
+        try:
+            sb_url = ('https://app.scrapingbee.com/api/v1/?api_key=' + SCRAPINGBEE_KEY
+                      + '&url=' + urllib.parse.quote(url, safe='')
+                      + '&render_js=False&return_page_source=True')
+            resp = urllib.request.urlopen(sb_url, timeout=30)
+            html = resp.read().decode('utf-8', errors='replace')
+            if html and len(html) > 300:
+                text = re.sub(r'<[^>]+>', ' ', html)
+                text = re.sub(r'\s+', ' ', text).strip()
+                print(f'smart_scrape[ScrapingBee]: OK  {url[:70]}')
+                return text
+        except Exception as e:
+            print(f'smart_scrape[ScrapingBee]: {e}')
+
+    # ── Tier 4: ZenRows ──────────────────────────────────────────────────
+    if ZENROWS_KEY:
+        try:
+            zr_url = ('https://api.zenrows.com/v1/?apikey=' + ZENROWS_KEY
+                      + '&url=' + urllib.parse.quote(url, safe=''))
+            resp = urllib.request.urlopen(zr_url, timeout=30)
+            html = resp.read().decode('utf-8', errors='replace')
+            if html and len(html) > 300:
+                text = re.sub(r'<[^>]+>', ' ', html)
+                text = re.sub(r'\s+', ' ', text).strip()
+                print(f'smart_scrape[ZenRows]: OK  {url[:70]}')
+                return text
+        except Exception as e:
+            print(f'smart_scrape[ZenRows]: {e}')
+
+    # ── Tier 5: Scrapingdog ───────────────────────────────────────────────
+    if SCRAPINGDOG_KEY:
+        try:
+            sd_url = ('https://api.scrapingdog.com/scrape?api_key=' + SCRAPINGDOG_KEY
+                      + '&url=' + urllib.parse.quote(url, safe='') + '&dynamic=false')
+            resp = urllib.request.urlopen(sd_url, timeout=30)
+            html = resp.read().decode('utf-8', errors='replace')
+            if html and len(html) > 300:
+                text = re.sub(r'<[^>]+>', ' ', html)
+                text = re.sub(r'\s+', ' ', text).strip()
+                print(f'smart_scrape[Scrapingdog]: OK  {url[:70]}')
+                return text
+        except Exception as e:
+            print(f'smart_scrape[Scrapingdog]: {e}')
+
+    # ── Tier 6: Firecrawl ────────────────────────────────────────────────
+    if FIRECRAWL_KEY:
+        try:
+            fc_body = json.dumps({'url': url, 'formats': ['markdown']}).encode()
+            fc_req = urllib.request.Request(
+                'https://api.firecrawl.dev/v1/scrape', data=fc_body, method='POST',
+                headers={'Authorization': 'Bearer ' + FIRECRAWL_KEY,
+                         'Content-Type': 'application/json'}
+            )
+            fc_resp = urllib.request.urlopen(fc_req, timeout=30)
+            fc_data = json.loads(fc_resp.read().decode())
+            md = fc_data.get('data', {}).get('markdown', '')
+            if md and len(md.strip()) > 300:
+                print(f'smart_scrape[Firecrawl]: OK  {url[:70]}')
+                return md
+        except Exception as e:
+            print(f'smart_scrape[Firecrawl]: {e}')
+
+    # ── Tier 7: Oxylabs (paid) ────────────────────────────────────────────
+    if OXYLABS:
+        try:
+            text = oxylabs_scrape(url, 'markdown')
+            if text and len(text.strip()) > 300:
+                print(f'smart_scrape[Oxylabs]: OK  {url[:70]}')
+                return text
+        except Exception as e:
+            print(f'smart_scrape[Oxylabs]: {e}')
+
+    print(f'smart_scrape: ALL tiers failed for {url[:70]}')
+    return None
+
 def enrich_with_serper(business_name, city, niche):
     """Find LinkedIn + Facebook + email via Serper."""
     result = {'email': None, 'linkedin_url': None, 'facebook_url': None,
@@ -1756,44 +1924,284 @@ def competitor_intel(domain_or_company):
     return result
 
 # ──────────────────────────────────────────────────────────────
-#  E-COMMERCE RESEARCH
+#  E-COMMERCE RESEARCH  (Professional Intelligence Engine)
 # ──────────────────────────────────────────────────────────────
-def ecommerce_research(product_or_niche, platform='amazon'):
-    """Quick product/niche research on Amazon, eBay, etc."""
-    result = {
-        'query': product_or_niche,
-        'platform': platform,
-        'top_listings': [],
-        'price_range': {},
-        'trends': []
+
+def serper_shopping_search(query, country='us', num=20):
+    """Google Shopping via Serper — structured product data with prices + ratings."""
+    cfg = MARKET_CONFIG.get(country, MARKET_CONFIG['us'])
+    try:
+        body = json.dumps({'q': query, 'gl': cfg['gl'], 'hl': cfg['hl'], 'num': num}).encode()
+        req = urllib.request.Request(
+            'https://google.serper.dev/shopping', data=body, method='POST',
+            headers={'X-API-KEY': SERPER_KEY, 'Content-Type': 'application/json'}
+        )
+        resp = urllib.request.urlopen(req, timeout=15)
+        return json.loads(resp.read().decode())
+    except Exception as e:
+        print(f'Serper shopping error: {e}')
+        return {}
+
+def _parse_price(price_str):
+    """Extract float from price string like '$12.99', '£45', 'A$30.00', '€25,99'."""
+    if not price_str: return 0.0
+    cleaned = re.sub(r'[^\d.,]', '', price_str.replace(',', '.'))
+    # Handle cases like "12.99.00" — keep only first valid float
+    m = re.search(r'(\d+\.?\d{0,2})', cleaned)
+    try: return float(m.group(1)) if m else 0.0
+    except: return 0.0
+
+def _price_stats(prices):
+    """Comprehensive price statistics with outlier trimming."""
+    if not prices: return {}
+    prices = sorted(p for p in prices if p > 0.5)
+    if not prices: return {}
+    n = len(prices)
+    # Trim top/bottom 5% on large samples
+    if n >= 20:
+        cut = max(1, int(n * 0.05))
+        core = prices[cut:-cut]
+    else:
+        core = prices
+    if not core: core = prices
+    avg = sum(core) / len(core)
+    median = core[len(core) // 2]
+    # Most common price bucket (5 equal-width buckets)
+    lo, hi = core[0], core[-1]
+    if hi > lo:
+        bw = (hi - lo) / 5
+        buckets = {}
+        for p in core:
+            idx = min(4, int((p - lo) / bw))
+            key = '%s-%s' % (round(lo + idx * bw), round(lo + (idx + 1) * bw))
+            buckets[key] = buckets.get(key, 0) + 1
+        top_bucket = max(buckets, key=buckets.get)
+    else:
+        top_bucket = '~%s' % round(avg)
+    return {
+        'min': round(prices[0], 2),
+        'max': round(prices[-1], 2),
+        'avg': round(avg, 2),
+        'median': round(median, 2),
+        'sample_size': n,
+        'sweet_spot': top_bucket,
     }
 
-    if platform == 'amazon':
-        # Use Oxylabs to scrape Amazon search
-        url = f'https://www.amazon.com/s?k={urllib.parse.quote(product_or_niche)}'
-        if OXYLABS:
-            text = oxylabs_scrape(url, 'markdown')
-            if text:
-                # Extract prices
-                prices = re.findall(r'\$(\d+(?:\.\d+)?)', text)
-                if prices:
-                    prices_f = [float(p) for p in prices[:50]]
-                    result['price_range'] = {
-                        'min': min(prices_f),
-                        'max': max(prices_f),
-                        'avg': sum(prices_f) / len(prices_f),
-                        'sample_size': len(prices_f)
-                    }
+def _competition_label(count):
+    if count < 200: return 'Low'
+    if count < 2000: return 'Medium'
+    if count < 20000: return 'High'
+    return 'Very High'
 
-    # SERP for general trends
-    d = serper_search(f'{product_or_niche} buy review', 10)
-    if d:
-        for o in d.get('organic', [])[:5]:
-            result['top_listings'].append({
-                'title': o.get('title', ''),
-                'url': o.get('link', ''),
-                'snippet': o.get('snippet', '')[:200]
-            })
+def _parse_ebay_sold_page(text):
+    """
+    Extract prices and sold-count badges from Jina/Crawl4AI markdown of eBay sold page.
+    eBay sold search markdown typically contains:
+      - Prices like "$12.99", "£15.00", "€20,99", "A$30"
+      - "42 sold", "100+ sold" badges on popular items
+      - Item count in header like "2,345 results"
+    """
+    if not text: return {'prices': [], 'sold_mentions': [], 'total_sold': 0, 'items_visible': 0}
+
+    # Multi-currency price extraction
+    price_patterns = [
+        r'\$(\d[\d,]*\.?\d{0,2})',
+        r'£(\d[\d,]*\.?\d{0,2})',
+        r'€(\d[\d,]*[,.]?\d{0,2})',
+        r'A\$(\d[\d,]*\.?\d{0,2})',
+        r'C\$(\d[\d,]*\.?\d{0,2})',
+    ]
+    prices = []
+    for pat in price_patterns:
+        for m in re.findall(pat, text):
+            try:
+                v = float(m.replace(',', '').replace(' ', ''))
+                if 0.5 < v < 50000:
+                    prices.append(v)
+            except: pass
+
+    # Sold count badges: "42 sold", "1,234 sold", "100+ sold"
+    sold_raw = re.findall(r'(\d[\d,]*)\+?\s+sold', text, re.IGNORECASE)
+    sold_ints = []
+    for s in sold_raw:
+        try:
+            v = int(s.replace(',', ''))
+            if v < 1000000: sold_ints.append(v)
+        except: pass
+    total_sold = sum(sold_ints)
+
+    # Count distinct item blocks (each sold item = 1 block)
+    item_blocks = len(re.findall(r'\bSold\b', text, re.IGNORECASE))
+
+    return {
+        'prices': prices[:200],
+        'sold_mentions': sold_ints,
+        'total_sold': total_sold,
+        'items_visible': min(item_blocks, 240),
+    }
+
+def _get_ebay_sold(query, country):
+    """Fetch eBay sold items page and parse it."""
+    cfg = MARKET_CONFIG.get(country, MARKET_CONFIG['us'])
+    encoded = urllib.parse.quote_plus(query)
+    url = 'https://%s/sch/i.html?_nkw=%s&LH_Sold=1&LH_Complete=1&_sop=13' % (cfg['ebay'], encoded)
+    text = smart_scrape(url, timeout=25)
+    return _parse_ebay_sold_page(text)
+
+def _get_ebay_active_count(query, country):
+    """Estimate active eBay listing count via Serper site-search."""
+    cfg = MARKET_CONFIG.get(country, MARKET_CONFIG['us'])
+    data = serper_search('site:%s %s' % (cfg['ebay'], query), 1)
+    raw = data.get('searchInformation', {}).get('totalResults', '0')
+    try: return int(raw.replace(',', ''))
+    except: return 0
+
+def ecommerce_research(query, country='us'):
+    """
+    Professional e-commerce product intelligence.
+    Aggregates: Google Shopping, eBay Sold Items (real historical sales),
+    eBay active listings, Google Trends, keyword research, AI verdict.
+    """
+    cfg = MARKET_CONFIG.get(country, MARKET_CONFIG['us'])
+    result = {
+        'query': query,
+        'country': country,
+        'country_name': cfg['name'],
+        'currency': cfg['currency'],
+        'symbol': cfg['symbol'],
+        'price_analysis': {},
+        'market_overview': {},
+        'sales_data': {},
+        'top_products': [],
+        'amazon_listings': [],
+        'trends': {},
+        'keywords': {},
+        'ai_verdict': '',
+        'scraper_tiers_used': [],
+    }
+
+    all_prices = []
+
+    # ── 1. Google Shopping ────────────────────────────────────────────────
+    shop_data = serper_shopping_search(query, country, 20)
+    products = []
+    for item in shop_data.get('shopping', []):
+        pv = _parse_price(item.get('price', ''))
+        products.append({
+            'title':        item.get('title', ''),
+            'source':       item.get('source', ''),
+            'link':         item.get('link', ''),
+            'price_str':    item.get('price', ''),
+            'price_value':  pv,
+            'rating':       item.get('rating') or 0,
+            'rating_count': item.get('ratingCount') or 0,
+            'delivery':     item.get('delivery', ''),
+            'image_url':    item.get('imageUrl', ''),
+            'platform':     'google_shopping',
+        })
+        if pv > 0: all_prices.append(pv)
+    result['top_products'] = products[:20]
+
+    # ── 2. Amazon via Serper organic ─────────────────────────────────────
+    amazon_domain = cfg['amazon']
+    amz_data = serper_search('site:%s %s' % (amazon_domain, query), 10)
+    amz_listings = []
+    for item in amz_data.get('organic', [])[:10]:
+        snippet = item.get('snippet', '')
+        pm = re.search(r'[\$£€A-Z]*\s*(\d[\d,]*\.?\d{0,2})', snippet)
+        pv = float(pm.group(1).replace(',', '')) if pm else 0
+        rm = re.search(r'(\d+\.?\d)\s*out of\s*5', snippet)
+        rv = float(rm.group(1)) if rm else 0
+        amz_listings.append({
+            'title':   item.get('title', ''),
+            'link':    item.get('link', ''),
+            'snippet': snippet[:250],
+            'price_value': pv,
+            'rating':      rv,
+            'platform': 'amazon',
+        })
+        if pv > 0: all_prices.append(pv)
+    result['amazon_listings'] = amz_listings
+
+    # ── 3. eBay Sold Items (real historical sales data) ───────────────────
+    ebay_sold = _get_ebay_sold(query, country)
+    ebay_sold_prices = ebay_sold.get('prices', [])
+    all_prices.extend(ebay_sold_prices)
+
+    sold_mentions = ebay_sold.get('sold_mentions', [])
+    total_sold_badges = ebay_sold.get('total_sold', 0)
+    visible_items = ebay_sold.get('items_visible', 0)
+    # Estimate monthly from visible sold count (eBay shows ~last 90 days of sold)
+    monthly_estimate = max(
+        total_sold_badges // 3 if total_sold_badges else 0,
+        visible_items * 2
+    )
+    ebay_sold_avg = round(sum(ebay_sold_prices) / len(ebay_sold_prices), 2) if ebay_sold_prices else 0
+    result['sales_data'] = {
+        'monthly_sold_estimate': monthly_estimate,
+        'sold_items_visible': visible_items,
+        'total_sold_badges': total_sold_badges,
+        'ebay_sold_avg_price': ebay_sold_avg,
+        'data_source': 'ebay_sold_filter',
+        'note': 'Based on eBay Sold Items filter — real completed transactions',
+    }
+
+    # ── 4. eBay Active Listings (competition count) ───────────────────────
+    ebay_active = _get_ebay_active_count(query, country)
+    competition = _competition_label(ebay_active)
+    result['market_overview'] = {
+        'ebay_active_listings': ebay_active,
+        'competition_level': competition,
+        'total_shopping_products': len(products),
+        'amazon_results_found': len(amz_listings),
+        'ebay_domain': cfg['ebay'],
+        'amazon_domain': amazon_domain,
+    }
+
+    # ── 5. Price Analysis ─────────────────────────────────────────────────
+    result['price_analysis'] = _price_stats(all_prices)
+
+    # ── 6. Google Trends ──────────────────────────────────────────────────
+    result['trends'] = google_trends(query, cfg['gl'].upper())
+
+    # ── 7. Keyword Research ───────────────────────────────────────────────
+    kw = keyword_research(query, cfg['hl'])
+    result['keywords'] = {
+        'related':         kw.get('related_keywords', [])[:12],
+        'people_also_ask': kw.get('people_also_ask', [])[:6],
+        'autocomplete':    kw.get('autocomplete', [])[:12],
+        'ai_expanded':     kw.get('ai_expanded', [])[:10],
+    }
+
+    # ── 8. AI Verdict (Gemini) ────────────────────────────────────────────
+    pa = result['price_analysis']
+    mo = result['market_overview']
+    sd = result['sales_data']
+    trending = result['trends'].get('trending_topics', [])[:5]
+    prompt = (
+        'You are a professional e-commerce product researcher with 10+ years of experience.\n'
+        'Analyze this data and give a sharp, actionable 4-sentence verdict.\n\n'
+        'Product: %s\nMarket: %s (%s)\n\n'
+        'PRICE DATA:\n  Min: %s | Max: %s | Avg: %s | Median: %s\n  Sweet spot: %s | Sample: %s products\n\n'
+        'MARKET DATA:\n  Competition: %s | Active eBay listings: %s\n  Monthly sales estimate: %s units\n  eBay sold avg price: %s\n\n'
+        'TRENDING NOW: %s\n\n'
+        'Verdict must cover:\n'
+        '1. Is this a good product opportunity right now? (yes/no + why)\n'
+        '2. Best entry price point to be competitive\n'
+        '3. Competition difficulty and how to differentiate\n'
+        '4. Trend direction (growing/stable/declining) and best timing to enter'
+        % (
+            query, cfg['name'], cfg['currency'],
+            pa.get('min', 'N/A'), pa.get('max', 'N/A'), pa.get('avg', 'N/A'), pa.get('median', 'N/A'),
+            pa.get('sweet_spot', 'N/A'), pa.get('sample_size', 0),
+            mo.get('competition_level', 'N/A'), mo.get('ebay_active_listings', 'N/A'),
+            sd.get('monthly_sold_estimate', 'N/A'), sd.get('ebay_sold_avg_price', 'N/A'),
+            ', '.join(trending) or 'N/A',
+        )
+    )
+    verdict = gemini_call(prompt, 600)
+    result['ai_verdict'] = verdict or 'Research complete. Review the data above for insights.'
+
     return result
 
 # ──────────────────────────────────────────────────────────────
@@ -3932,12 +4340,14 @@ class Handler(BaseHTTPRequestHandler):
 
         elif p == '/ecommerce':
             try:
-                q = body.get('query', '')
-                plat = body.get('platform', 'amazon')
+                q       = body.get('query', '')
+                country = body.get('country', 'us').lower()
                 if not q:
                     self.send_json(400, {'error': 'query required'})
                     return
-                result = ecommerce_research(q, plat)
+                if country not in MARKET_CONFIG:
+                    country = 'us'
+                result = ecommerce_research(q, country)
                 self.send_json(200, result)
             except Exception as e:
                 self.send_json(500, {'error': str(e)})

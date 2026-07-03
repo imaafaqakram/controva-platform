@@ -1993,65 +1993,455 @@ const SocialPage = () => {
 };
 
 const EcommercePage = () => {
-  const [query, setQuery] = useState('');
-  const [platform, setPlatform] = useState('amazon');
-  const [result, setResult] = useState(null);
+  const [query, setQuery]     = useState('');
+  const [country, setCountry] = useState('us');
+  const [result, setResult]   = useState(null);
   const [loading, setLoading] = useState(false);
+  const [step, setStep]       = useState('');
+  const [activeTab, setActiveTab] = useState('products');
+  const { showToast } = useToast();
+
+  const COUNTRIES = [
+    { code: 'us', label: '🇺🇸 United States' },
+    { code: 'uk', label: '🇬🇧 United Kingdom' },
+    { code: 'au', label: '🇦🇺 Australia' },
+    { code: 'ca', label: '🇨🇦 Canada' },
+    { code: 'de', label: '🇩🇪 Germany' },
+    { code: 'fr', label: '🇫🇷 France' },
+    { code: 'it', label: '🇮🇹 Italy' },
+    { code: 'es', label: '🇪🇸 Spain' },
+  ];
 
   const run = async () => {
-    if (!query) return;
+    if (!query.trim()) return;
     setLoading(true); setResult(null);
+    const steps = [
+      'Searching Google Shopping...',
+      'Scanning Amazon listings...',
+      'Fetching eBay sold items (real sales data)...',
+      'Counting active competition...',
+      'Pulling Google Trends...',
+      'Expanding keywords...',
+      'Generating AI verdict...',
+    ];
+    let si = 0;
+    setStep(steps[0]);
+    const ticker = setInterval(() => {
+      si = Math.min(si + 1, steps.length - 1);
+      setStep(steps[si]);
+    }, 3500);
     try {
-      const r = await api.post('/ecommerce', { query, platform });
+      const r = await api.post('/ecommerce', { query: query.trim(), country });
       setResult(r);
-    } catch (e) {}
-    setLoading(false);
+      setActiveTab('products');
+    } catch (e) {
+      showToast('Research failed: ' + (e.message || 'unknown error'), 'error');
+    }
+    clearInterval(ticker);
+    setLoading(false); setStep('');
+  };
+
+  const sym = result ? result.symbol : '$';
+  const fmt = (v) => v != null ? sym + Number(v).toLocaleString() : '—';
+  const fmtN = (v) => v != null ? Number(v).toLocaleString() : '—';
+
+  const competitionColor = (level) => {
+    const m = { 'Low': 'text-green-600 bg-green-50 dark:bg-green-900/30', 'Medium': 'text-yellow-600 bg-yellow-50 dark:bg-yellow-900/30', 'High': 'text-orange-600 bg-orange-50 dark:bg-orange-900/30', 'Very High': 'text-red-600 bg-red-50 dark:bg-red-900/30' };
+    return m[level] || 'text-slate-600 bg-slate-50';
+  };
+
+  const StarRating = ({ rating }) => {
+    if (!rating) return null;
+    const stars = Math.round(rating);
+    return (
+      <span className="text-yellow-400 text-xs">
+        {'★'.repeat(stars)}{'☆'.repeat(5 - stars)}
+        <span className="text-slate-500 ml-1">{Number(rating).toFixed(1)}</span>
+      </span>
+    );
+  };
+
+  const PriceBar = ({ pa }) => {
+    if (!pa || !pa.min) return null;
+    const range = pa.max - pa.min;
+    if (!range) return null;
+    const avgPct = ((pa.avg - pa.min) / range) * 100;
+    const medPct = ((pa.median - pa.min) / range) * 100;
+    return (
+      <div className="mt-3">
+        <div className="relative h-3 bg-slate-100 dark:bg-slate-700 rounded-full overflow-hidden">
+          <div className="absolute inset-0 bg-gradient-to-r from-green-400 via-yellow-400 to-red-400 opacity-30 rounded-full" />
+          <div className="absolute top-0 h-full w-0.5 bg-blue-600" style={{left: avgPct + '%'}} title={'Avg: ' + fmt(pa.avg)} />
+          <div className="absolute top-0 h-full w-0.5 bg-purple-600" style={{left: medPct + '%'}} title={'Median: ' + fmt(pa.median)} />
+        </div>
+        <div className="flex justify-between text-xs text-slate-400 mt-1">
+          <span>{fmt(pa.min)}</span>
+          <span className="text-blue-600 font-medium">Avg {fmt(pa.avg)}</span>
+          <span>{fmt(pa.max)}</span>
+        </div>
+      </div>
+    );
   };
 
   return (
     <div className="space-y-6 fade-in">
+      {/* Header */}
       <div>
-        <h1 className="text-2xl font-bold">E-commerce Research</h1>
-        <p className="text-sm text-slate-500 mt-1">Product trends, pricing, competition</p>
+        <h1 className="text-2xl font-bold flex items-center gap-2">
+          <Icon name="ShoppingBag" size={24} /> Product Intelligence
+        </h1>
+        <p className="text-sm text-slate-500 mt-1">
+          Real eBay sold data · Google Shopping · Amazon · Trends · AI verdict
+        </p>
       </div>
+
+      {/* Search Card */}
       <Card>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-          <Input value={query} onChange={setQuery} placeholder="Product or niche" icon="ShoppingBag" onKeyDown={e => e.key === 'Enter' && run()} />
-          <select value={platform} onChange={e => setPlatform(e.target.value)}
-            className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-2.5 text-sm">
-            <option value="amazon">Amazon</option>
-            <option value="ebay">eBay</option>
+        <div className="flex flex-col md:flex-row gap-2">
+          <div className="flex-1">
+            <Input value={query} onChange={setQuery} placeholder="e.g. wireless earbuds, yoga mat, fishing rod..."
+              icon="Search" onKeyDown={e => e.key === 'Enter' && !loading && run()} />
+          </div>
+          <select value={country} onChange={e => setCountry(e.target.value)}
+            className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-2.5 text-sm min-w-[180px]">
+            {COUNTRIES.map(c => <option key={c.code} value={c.code}>{c.label}</option>)}
           </select>
-          <Button onClick={run} disabled={loading}>{loading ? <Spinner /> : 'Research'}</Button>
+          <Button onClick={run} disabled={loading} className="whitespace-nowrap">
+            {loading ? <><Spinner /> Researching...</> : <><Icon name="Zap" size={14} /> Deep Research</>}
+          </Button>
         </div>
+        {loading && (
+          <div className="mt-3 flex items-center gap-2 text-sm text-slate-500 fade-in">
+            <Spinner /> <span>{step}</span>
+          </div>
+        )}
       </Card>
+
       {result && (
-        <Card className="fade-in">
-          {result.price_range && Object.keys(result.price_range).length > 0 && (
-            <div className="grid grid-cols-3 gap-3 mb-4">
-              <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
-                <p className="text-xs text-slate-500">Min</p>
-                <p className="font-bold">${result.price_range.min}</p>
-              </div>
-              <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
-                <p className="text-xs text-slate-500">Avg</p>
-                <p className="font-bold">${result.price_range.avg?.toFixed(2)}</p>
-              </div>
-              <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
-                <p className="text-xs text-slate-500">Max</p>
-                <p className="font-bold">${result.price_range.max}</p>
+        <div className="space-y-4 fade-in">
+
+          {/* AI Verdict Banner */}
+          {result.ai_verdict && (
+            <div className="rounded-xl border border-accent-200 dark:border-accent-800 bg-accent-50 dark:bg-accent-900/20 p-4">
+              <div className="flex items-start gap-3">
+                <div className="w-8 h-8 rounded-full bg-accent-600 flex items-center justify-center flex-shrink-0 mt-0.5">
+                  <Icon name="Sparkles" size={14} className="text-white" />
+                </div>
+                <div>
+                  <p className="text-xs font-semibold text-accent-700 dark:text-accent-300 mb-1">AI PRODUCT VERDICT</p>
+                  <p className="text-sm leading-relaxed">{result.ai_verdict}</p>
+                </div>
               </div>
             </div>
           )}
-          <div className="space-y-2">
-            {(result.top_listings || []).map((l, i) => (
-              <a key={i} href={l.url} target="_blank" className="block p-3 bg-slate-50 dark:bg-slate-800 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700">
-                <p className="font-medium text-sm">{l.title}</p>
-                <p className="text-xs text-accent-600 truncate">{l.url}</p>
-              </a>
+
+          {/* Key Metrics Row */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            {/* Price Sweet Spot */}
+            <div className="rounded-xl border border-slate-200 dark:border-slate-800 p-4 bg-white dark:bg-slate-900">
+              <p className="text-xs text-slate-500 mb-1">Sweet Spot Price</p>
+              <p className="text-xl font-bold text-green-600">{result.price_analysis?.sweet_spot ? sym + result.price_analysis.sweet_spot : '—'}</p>
+              <p className="text-xs text-slate-400 mt-1">Most common range</p>
+            </div>
+            {/* Avg Price */}
+            <div className="rounded-xl border border-slate-200 dark:border-slate-800 p-4 bg-white dark:bg-slate-900">
+              <p className="text-xs text-slate-500 mb-1">Average Price</p>
+              <p className="text-xl font-bold">{fmt(result.price_analysis?.avg)}</p>
+              <p className="text-xs text-slate-400 mt-1">Median {fmt(result.price_analysis?.median)}</p>
+            </div>
+            {/* Monthly Sales */}
+            <div className="rounded-xl border border-slate-200 dark:border-slate-800 p-4 bg-white dark:bg-slate-900">
+              <p className="text-xs text-slate-500 mb-1">Est. Monthly Sales</p>
+              <p className="text-xl font-bold text-blue-600">{fmtN(result.sales_data?.monthly_sold_estimate)}</p>
+              <p className="text-xs text-slate-400 mt-1">eBay sold items</p>
+            </div>
+            {/* Competition */}
+            <div className="rounded-xl border border-slate-200 dark:border-slate-800 p-4 bg-white dark:bg-slate-900">
+              <p className="text-xs text-slate-500 mb-1">Competition</p>
+              <p className={'text-xl font-bold ' + (result.market_overview?.competition_level === 'Low' ? 'text-green-600' : result.market_overview?.competition_level === 'Medium' ? 'text-yellow-600' : 'text-red-600')}>
+                {result.market_overview?.competition_level || '—'}
+              </p>
+              <p className="text-xs text-slate-400 mt-1">{fmtN(result.market_overview?.ebay_active_listings)} eBay listings</p>
+            </div>
+          </div>
+
+          {/* Price Analysis Card */}
+          {result.price_analysis && result.price_analysis.min && (
+            <Card>
+              <h3 className="font-semibold mb-3 flex items-center gap-2"><Icon name="BarChart3" size={16} /> Price Analysis
+                <span className="text-xs text-slate-400 font-normal">({result.price_analysis.sample_size} products sampled)</span>
+              </h3>
+              <div className="grid grid-cols-4 gap-3 mb-2">
+                {[['Min', 'min', 'text-green-600'], ['Avg', 'avg', 'text-blue-600'], ['Median', 'median', 'text-purple-600'], ['Max', 'max', 'text-red-600']].map(([label, key, cls]) => (
+                  <div key={key} className="text-center p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                    <p className="text-xs text-slate-500">{label}</p>
+                    <p className={'font-bold ' + cls}>{fmt(result.price_analysis[key])}</p>
+                  </div>
+                ))}
+              </div>
+              <PriceBar pa={result.price_analysis} />
+              <p className="text-xs text-slate-400 mt-2 flex items-center gap-1">
+                <span className="inline-block w-2 h-2 bg-blue-600 rounded-full"></span> Average
+                <span className="inline-block w-2 h-2 bg-purple-600 rounded-full ml-2"></span> Median
+              </p>
+            </Card>
+          )}
+
+          {/* Market Overview */}
+          <Card>
+            <h3 className="font-semibold mb-3 flex items-center gap-2"><Icon name="Globe" size={16} /> Market Overview — {result.country_name}</h3>
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+              <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                <p className="text-xs text-slate-500">eBay Active Listings</p>
+                <p className="font-bold text-lg">{fmtN(result.market_overview?.ebay_active_listings)}</p>
+              </div>
+              <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                <p className="text-xs text-slate-500">Shopping Products</p>
+                <p className="font-bold text-lg">{fmtN(result.market_overview?.total_shopping_products)}</p>
+              </div>
+              <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                <p className="text-xs text-slate-500">Competition Level</p>
+                <span className={'text-sm font-bold px-2 py-1 rounded-full ' + competitionColor(result.market_overview?.competition_level)}>
+                  {result.market_overview?.competition_level || '—'}
+                </span>
+              </div>
+            </div>
+          </Card>
+
+          {/* eBay Sales Data */}
+          {result.sales_data && (
+            <Card>
+              <h3 className="font-semibold mb-3 flex items-center gap-2">
+                <Icon name="TrendingUp" size={16} />
+                eBay Sales Intelligence
+                <span className="text-xs bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300 px-2 py-0.5 rounded-full font-normal">Real sold data</span>
+              </h3>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                  <p className="text-xs text-slate-500">Est. Monthly Units</p>
+                  <p className="font-bold text-lg text-blue-600">{fmtN(result.sales_data.monthly_sold_estimate)}</p>
+                </div>
+                <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                  <p className="text-xs text-slate-500">Items Visible (sold)</p>
+                  <p className="font-bold text-lg">{fmtN(result.sales_data.sold_items_visible)}</p>
+                </div>
+                <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                  <p className="text-xs text-slate-500">Total Sold (badges)</p>
+                  <p className="font-bold text-lg">{fmtN(result.sales_data.total_sold_badges)}</p>
+                </div>
+                <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                  <p className="text-xs text-slate-500">eBay Sold Avg Price</p>
+                  <p className="font-bold text-lg">{fmt(result.sales_data.ebay_sold_avg_price)}</p>
+                </div>
+              </div>
+              <p className="text-xs text-slate-400 mt-2 flex items-center gap-1">
+                <Icon name="Info" size={11} /> {result.sales_data.note}
+              </p>
+            </Card>
+          )}
+
+          {/* Tabs: Products / Amazon / Trends / Keywords */}
+          <div>
+            <div className="flex gap-1 border-b border-slate-200 dark:border-slate-800 mb-4 overflow-x-auto">
+              {[
+                { id: 'products', label: 'Shopping Products', icon: 'ShoppingBag', count: result.top_products?.length },
+                { id: 'amazon',   label: 'Amazon',           icon: 'Package',     count: result.amazon_listings?.length },
+                { id: 'trends',   label: 'Trends',           icon: 'TrendingUp',  count: null },
+                { id: 'keywords', label: 'Keywords',         icon: 'Tag',         count: result.keywords?.related?.length },
+              ].map(t => (
+                <button key={t.id} onClick={() => setActiveTab(t.id)}
+                  className={'flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ' +
+                    (activeTab === t.id ? 'border-accent-600 text-accent-600' : 'border-transparent text-slate-500 hover:text-slate-900 dark:hover:text-white')}>
+                  <Icon name={t.icon} size={14} />
+                  {t.label}
+                  {t.count > 0 && <span className="text-xs bg-slate-100 dark:bg-slate-800 px-1.5 rounded-full">{t.count}</span>}
+                </button>
+              ))}
+            </div>
+
+            {/* Products Tab */}
+            {activeTab === 'products' && (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                {(result.top_products || []).map((p, i) => (
+                  <a key={i} href={p.link} target="_blank" rel="noopener noreferrer"
+                    className="block rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden hover:border-accent-400 transition-colors group">
+                    {p.image_url && (
+                      <div className="aspect-video bg-slate-50 dark:bg-slate-800 overflow-hidden">
+                        <img src={p.image_url} alt={p.title} className="w-full h-full object-contain p-2" onError={e => e.target.style.display='none'} />
+                      </div>
+                    )}
+                    <div className="p-3">
+                      <p className="text-sm font-medium line-clamp-2 group-hover:text-accent-600 transition-colors">{p.title}</p>
+                      <div className="flex items-center justify-between mt-2">
+                        <span className="font-bold text-green-600 text-base">{p.price_str || (p.price_value ? fmt(p.price_value) : '—')}</span>
+                        <span className="text-xs text-slate-400 truncate ml-2">{p.source}</span>
+                      </div>
+                      {p.rating > 0 && (
+                        <div className="mt-1 flex items-center gap-1">
+                          <StarRating rating={p.rating} />
+                          {p.rating_count > 0 && <span className="text-xs text-slate-400">({fmtN(p.rating_count)})</span>}
+                        </div>
+                      )}
+                      {p.delivery && <p className="text-xs text-slate-400 mt-1">{p.delivery}</p>}
+                    </div>
+                  </a>
+                ))}
+                {(!result.top_products || result.top_products.length === 0) && (
+                  <p className="text-slate-500 text-sm col-span-3">No shopping products found.</p>
+                )}
+              </div>
+            )}
+
+            {/* Amazon Tab */}
+            {activeTab === 'amazon' && (
+              <div className="space-y-2">
+                {(result.amazon_listings || []).map((a, i) => (
+                  <a key={i} href={a.link} target="_blank" rel="noopener noreferrer"
+                    className="flex items-start gap-3 p-3 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 hover:border-accent-400 transition-colors group">
+                    <div className="w-8 h-8 rounded-full bg-orange-100 dark:bg-orange-900/30 flex items-center justify-center flex-shrink-0 text-orange-600 text-xs font-bold mt-0.5">
+                      {i + 1}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium group-hover:text-accent-600 transition-colors line-clamp-2">{a.title}</p>
+                      {a.snippet && <p className="text-xs text-slate-500 mt-1 line-clamp-2">{a.snippet}</p>}
+                      <div className="flex items-center gap-3 mt-1">
+                        {a.price_value > 0 && <span className="text-sm font-bold text-green-600">{fmt(a.price_value)}</span>}
+                        {a.rating > 0 && <StarRating rating={a.rating} />}
+                      </div>
+                    </div>
+                  </a>
+                ))}
+                {(!result.amazon_listings || result.amazon_listings.length === 0) && (
+                  <p className="text-slate-500 text-sm">No Amazon listings found for this market.</p>
+                )}
+              </div>
+            )}
+
+            {/* Trends Tab */}
+            {activeTab === 'trends' && (
+              <div className="space-y-4">
+                {result.trends?.trending_topics?.length > 0 && (
+                  <div>
+                    <h4 className="text-sm font-semibold mb-2 text-slate-700 dark:text-slate-300">Trending Now</h4>
+                    <div className="flex flex-wrap gap-2">
+                      {result.trends.trending_topics.map((t, i) => (
+                        <span key={i} className="px-3 py-1.5 text-sm bg-accent-50 dark:bg-accent-900/20 text-accent-700 dark:text-accent-300 border border-accent-200 dark:border-accent-800 rounded-full">
+                          {t}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {result.trends?.related_queries?.length > 0 && (
+                  <div>
+                    <h4 className="text-sm font-semibold mb-2 text-slate-700 dark:text-slate-300">Related Searches</h4>
+                    <div className="flex flex-wrap gap-2">
+                      {result.trends.related_queries.map((q, i) => (
+                        <span key={i} className="px-3 py-1.5 text-sm bg-slate-100 dark:bg-slate-800 rounded-full text-slate-600 dark:text-slate-300">{q}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {result.trends?.rising_queries?.length > 0 && (
+                  <div>
+                    <h4 className="text-sm font-semibold mb-2 text-slate-700 dark:text-slate-300">People Also Ask</h4>
+                    <div className="space-y-2">
+                      {result.trends.rising_queries.map((r, i) => (
+                        <div key={i} className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                          <p className="text-sm font-medium">{r.query}</p>
+                          {r.snippet && <p className="text-xs text-slate-500 mt-1">{r.snippet}</p>}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {(!result.trends?.trending_topics?.length && !result.trends?.related_queries?.length) && (
+                  <p className="text-slate-500 text-sm">No trend data available.</p>
+                )}
+              </div>
+            )}
+
+            {/* Keywords Tab */}
+            {activeTab === 'keywords' && (
+              <div className="space-y-4">
+                {result.keywords?.autocomplete?.length > 0 && (
+                  <div>
+                    <h4 className="text-sm font-semibold mb-2 text-slate-700 dark:text-slate-300">Google Autocomplete</h4>
+                    <div className="flex flex-wrap gap-2">
+                      {result.keywords.autocomplete.map((k, i) => (
+                        <span key={i} className="px-3 py-1.5 text-sm bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800 rounded-full cursor-pointer hover:bg-blue-100"
+                          onClick={() => setQuery(k)}>
+                          {k}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {result.keywords?.related?.length > 0 && (
+                  <div>
+                    <h4 className="text-sm font-semibold mb-2 text-slate-700 dark:text-slate-300">Related Keywords</h4>
+                    <div className="flex flex-wrap gap-2">
+                      {result.keywords.related.map((k, i) => (
+                        <span key={i} className="px-3 py-1.5 text-sm bg-slate-100 dark:bg-slate-800 rounded-full text-slate-600 dark:text-slate-300 cursor-pointer hover:bg-slate-200 dark:hover:bg-slate-700"
+                          onClick={() => setQuery(k)}>
+                          {k}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {result.keywords?.ai_expanded?.length > 0 && (
+                  <div>
+                    <h4 className="text-sm font-semibold mb-2 text-slate-700 dark:text-slate-300 flex items-center gap-1">
+                      <Icon name="Sparkles" size={12} /> AI-Expanded Keywords
+                    </h4>
+                    <div className="flex flex-wrap gap-2">
+                      {result.keywords.ai_expanded.map((k, i) => (
+                        <span key={i} className="px-3 py-1.5 text-sm bg-purple-50 dark:bg-purple-900/20 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800 rounded-full cursor-pointer hover:bg-purple-100"
+                          onClick={() => setQuery(k)}>
+                          {k}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {result.keywords?.people_also_ask?.length > 0 && (
+                  <div>
+                    <h4 className="text-sm font-semibold mb-2 text-slate-700 dark:text-slate-300">Buyer Questions (PAA)</h4>
+                    <div className="space-y-2">
+                      {result.keywords.people_also_ask.map((p, i) => (
+                        <div key={i} className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                          <p className="text-sm font-medium">{p.question}</p>
+                          {p.answer && <p className="text-xs text-slate-500 mt-1 line-clamp-2">{p.answer}</p>}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+        </div>
+      )}
+
+      {!result && !loading && (
+        <div className="text-center py-16 text-slate-400">
+          <div className="text-5xl mb-4">🛒</div>
+          <p className="font-medium text-slate-600 dark:text-slate-300 text-lg mb-2">Product Intelligence Engine</p>
+          <p className="text-sm max-w-md mx-auto">
+            Enter any product — get real eBay sold data, Google Shopping prices, Amazon listings,
+            competition analysis, trends, and an AI verdict on whether it's worth selling.
+          </p>
+          <div className="flex flex-wrap justify-center gap-2 mt-4">
+            {['wireless earbuds', 'yoga mat', 'LED strip lights', 'fishing rod', 'phone case'].map(s => (
+              <button key={s} onClick={() => setQuery(s)}
+                className="text-xs px-3 py-1.5 bg-slate-100 dark:bg-slate-800 rounded-full hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors">
+                {s}
+              </button>
             ))}
           </div>
-        </Card>
+        </div>
       )}
     </div>
   );
@@ -2094,11 +2484,15 @@ const ApiKeyEditor = () => {
     claude_key:      'Anthropic Claude',
     replicate_token: 'Replicate (FLUX images)',
     imagine_art_key: 'imagine.art',
-    oxylabs_key:     'Oxylabs AI Studio',
+    oxylabs_key:     'Oxylabs AI Studio (paid — powerful)',
     resend_key:      'Resend.com (email)',
     from_email:      'From Email',
     from_name:       'From Name',
     here_api_key:    'HERE Maps (discovery)',
+    scrapingbee_key: 'ScrapingBee (free 1,000 req/mo)',
+    zenrows_key:     'ZenRows (free 1,000 req/mo)',
+    scrapingdog_key: 'Scrapingdog (free 1,000 req/mo)',
+    firecrawl_key:   'Firecrawl (free 500 req/mo)',
   };
 
   return (
