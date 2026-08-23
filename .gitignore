@@ -1,10 +1,18 @@
 # ── Secrets — NEVER commit these ───────────────────
 deploy.env
 server/config.json
+server/api_keys.json
+server_backup_before_cloudscape/
 *.key
 *.pem
 *.env
 !deploy.env.example
+
+# ── Dependencies & Builds ───────────────────────────
+node_modules/
+**/node_modules/
+dist/
+**/dist/
 
 # ── Python ──────────────────────────────────────────
 __pycache__/

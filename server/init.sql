@@ -6,9 +6,74 @@
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "pg_trgm";  -- For fuzzy text search
 
+-- ── TENANTS TABLE — Multi-tenancy support ─────────────────────
+CREATE TABLE IF NOT EXISTS tenants (
+    id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    name        VARCHAR(200) NOT NULL,
+    plan        VARCHAR(50) DEFAULT 'starter',
+    is_active   BOOLEAN DEFAULT TRUE,
+    created_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- ── USERS TABLE — Accounts within tenants ──────────────────────
+CREATE TABLE IF NOT EXISTS users (
+    id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id     UUID REFERENCES tenants(id) ON DELETE CASCADE,
+    email         VARCHAR(300) UNIQUE NOT NULL,
+    password_hash VARCHAR(200) NOT NULL,
+    role          VARCHAR(20) DEFAULT 'viewer',
+    is_active     BOOLEAN DEFAULT TRUE,
+    created_at    TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- ── SESSIONS TABLE — Auth tokens ────────────────────────────────
+CREATE TABLE IF NOT EXISTS sessions (
+    token       VARCHAR(64) PRIMARY KEY,
+    user_id     UUID REFERENCES users(id) ON DELETE CASCADE,
+    tenant_id   UUID REFERENCES tenants(id) ON DELETE CASCADE,
+    expires_at  TIMESTAMP WITH TIME ZONE,
+    created_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- ── TENANT SEARCH HISTORY — Private search logs ─────────────────
+CREATE TABLE IF NOT EXISTS tenant_search_history (
+    id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id   UUID REFERENCES tenants(id) ON DELETE CASCADE,
+    user_id     UUID REFERENCES users(id),
+    query_text  VARCHAR(300) NOT NULL,
+    niche       VARCHAR(200),
+    city        VARCHAR(200),
+    lead_count  INTEGER DEFAULT 0,
+    served_from VARCHAR(20) DEFAULT 'live',
+    searched_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- ── SEARCHED TILES — Backend coverage map ───────────────────────
+CREATE TABLE IF NOT EXISTS searched_tiles (
+    id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    niche       VARCHAR(200) NOT NULL,
+    city        VARCHAR(200) NOT NULL,
+    lat         DECIMAL(10,8),
+    lng         DECIMAL(11,8),
+    radius_m    INTEGER,
+    lead_count  INTEGER DEFAULT 0,
+    searched_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- ── CREDIT USAGE — Billing hooks ────────────────────────────────
+CREATE TABLE IF NOT EXISTS credit_usage (
+    id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id   UUID REFERENCES tenants(id),
+    event_type  VARCHAR(50),
+    credits     INTEGER DEFAULT 1,
+    saved       BOOLEAN DEFAULT FALSE,
+    created_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
 -- ── LEADS TABLE — Raw discovered businesses ─────────────────
 CREATE TABLE IF NOT EXISTS leads (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id       UUID REFERENCES tenants(id) ON DELETE SET NULL,
     place_id        VARCHAR(255) UNIQUE NOT NULL,  -- Google Places unique ID
     business_name   VARCHAR(500) NOT NULL,
     niche           VARCHAR(200),
@@ -62,6 +127,7 @@ CREATE TABLE IF NOT EXISTS assets (
 -- ── OUTREACH LOG — All emails sent ──────────────────────────
 CREATE TABLE IF NOT EXISTS outreach_log (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id       UUID REFERENCES tenants(id) ON DELETE SET NULL,
     lead_id         UUID REFERENCES leads(id) ON DELETE CASCADE,
     contact_id      UUID REFERENCES contacts(id) ON DELETE SET NULL,
     email_to        VARCHAR(500) NOT NULL,

@@ -508,3 +508,14 @@ Before going to production:
 **Built for:** Controva LLC (Support@controvallc.com)  
 **License:** Proprietary — Controva LLC  
 **Last updated:** June 2026
+
+
+TO run this platform on local : 
+1. Make sure the docker is running and postgres is running on docker-compose.yml file or use this command to start it: 
+docker compose -f docker-compose.local.yml up -d
+
+2. and use this command to start application server: 
+python server/leads_api.py
+
+3. Run the "1_INSTALLATION_GUIDE.md" guide 
+4. Start the platform using " HOW_TO_RUN.md" guide

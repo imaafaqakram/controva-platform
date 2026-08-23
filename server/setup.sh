@@ -85,6 +85,11 @@ cp ./config.json.template    /opt/leadgen/config.json
 cp ./leadgen-api.service     /etc/systemd/system/leadgen-api.service
 chmod +x /opt/leadgen/leads_api.py
 
+if [ -d "./frontend/dist" ]; then
+  mkdir -p /opt/leadgen/frontend
+  cp -r ./frontend/dist /opt/leadgen/frontend/dist
+fi
+
 # Step 7: Start Docker services
 echo ""
 echo "[7/9] Starting Docker services (PostgreSQL, Redis, Crawl4AI)..."

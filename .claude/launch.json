@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "leadgen-api",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-u", "server/leads_api.py"],
+      "port": 8080
+    }
+  ]
+}
