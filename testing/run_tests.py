@@ -80,7 +80,7 @@ print('='*78)
 print('\n--- PHASE 1: free endpoints (health, auth, config) ---')
 record('health check', 'GET', '/health', *http('GET', '/health'), cost_note='FREE')
 record('auth login', 'POST', '/auth/login',
-       *http('POST', '/auth/login', {'username': 'admin', 'password': 'ChangeMe_2026!'}), cost_note='FREE')
+       *http('POST', '/auth/login', {'username': 'admin', 'password': 'CHANGE_ME_BEFORE_DEPLOY'}), cost_note='FREE')
 record('config read', 'GET', '/config', *http('GET', '/config'), cost_note='FREE')
 record('api-keys masked view', 'GET', '/api-keys', *http('GET', '/api-keys'), cost_note='FREE')
 

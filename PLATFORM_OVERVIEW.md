@@ -42,9 +42,9 @@ leads_api.py  ←── Python backend, port 8080, handles all logic
 
 | Item | Value |
 |---|---|
-| Server IP | `2.25.152.153` |
-| Dashboard URL | `http://2.25.152.153:8080/` |
-| Login | `admin` / `ChangeMe_2026!` |
+| Server IP | `YOUR_SERVER_IP` |
+| Dashboard URL | `http://YOUR_SERVER_IP:8080/` |
+| Login | `admin` / `CHANGE_ME_BEFORE_DEPLOY` |
 | OS | Ubuntu 22.04/24.04 |
 | All files live at | `/opt/leadgen/` on the server |
 
@@ -83,7 +83,7 @@ These run in the background on your server. You never touch them directly.
 
 **Check if they're running:**
 ```bash
-ssh root@2.25.152.153
+ssh root@YOUR_SERVER_IP
 docker compose -f /opt/leadgen/docker-compose.yml ps
 ```
 
@@ -109,7 +109,7 @@ All keys are stored in `/opt/leadgen/config.json` on the server.
 
 **To update a key on the server:**
 ```bash
-ssh root@2.25.152.153
+ssh root@YOUR_SERVER_IP
 nano /opt/leadgen/config.json
 systemctl restart leadgen-api
 ```
@@ -212,7 +212,7 @@ discovered → enriched → scored → ready → approved → sent → replied �
 
 ```bash
 # SSH in
-ssh root@2.25.152.153
+ssh root@YOUR_SERVER_IP
 
 # Check everything is running
 systemctl status leadgen-api          # Is the Python API running?
@@ -268,7 +268,7 @@ python deploy.py pull     # Download live files FROM server to your PC
 
 - The `deploy.env` file contains your server SSH password — never share or commit it to GitHub
 - `leads_api.py` has API keys hardcoded as fallbacks — the real keys should be in `/opt/leadgen/config.json` on the server
-- The dashboard login (`admin` / `ChangeMe_2026!`) should be changed if this is a production server
+- The dashboard login (`admin` / `CHANGE_ME_BEFORE_DEPLOY`) should be changed if this is a production server
 - Port 8080 is open to the internet — anyone who knows the IP can reach the login page
 
 ---

@@ -15,7 +15,7 @@ Quickstart:
 Create first key:
     curl -X POST http://localhost:8081/api/v1/keys \
       -H "Content-Type: application/json" \
-      -d '{"master_secret":"controva-admin-2026","name":"my-app","scopes":["read","write"]}'
+      -d '{"master_secret":"YOUR_MASTER_SECRET","name":"my-app","scopes":["read","write"]}'
 """
 import json, time, hashlib, os, threading, urllib.request, urllib.parse, io, csv as csvlib
 import psycopg2, secrets, uuid
@@ -31,16 +31,44 @@ API_VER    = 'v1'
 BASE       = f'/api/{API_VER}'
 RATE_LIMIT = 100          # req / minute per key
 PLATFORM   = os.environ.get('PLATFORM_URL', 'http://localhost:8080')
-MASTER_KEY = os.environ.get('API_MASTER_SECRET', 'controva-admin-2026')
 
 DB = dict(
     host     = os.environ.get('DB_HOST',  '127.0.0.1'),
     port     = int(os.environ.get('DB_PORT', 5433)),
     database = os.environ.get('DB_NAME', 'leadgen_db'),
     user     = os.environ.get('DB_USER', 'leadgen'),
-    password = os.environ.get('DB_PASS', 'LeadGen_Secure_2024!'),
+    password = os.environ.get('DB_PASS', ''),
     connect_timeout = 2,
 )
+
+# ── Master secret & service token ─────────────────────────────
+# MASTER_KEY authorizes creating API keys. Set via env or the shared
+# config.json (the same file leads_api.py uses) — never hardcode it.
+# SERVICE_TOKEN is what we present to leads_api.py, which now rejects
+# anonymous requests.
+_LEADGEN_HOME = os.environ.get('LEADGEN_HOME', '/opt/leadgen')
+if not os.path.isdir(_LEADGEN_HOME):
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+    if os.path.exists(os.path.join(_script_dir, 'config.json')):
+        _LEADGEN_HOME = _script_dir
+
+def _read_shared_config(*keys):
+    vals = {}
+    for path in (os.path.join(_LEADGEN_HOME, 'config.json'),
+                 os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')):
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            for k in keys:
+                if k in data and data[k] and k not in vals:
+                    vals[k] = data[k]
+        except Exception:
+            pass
+    return vals
+
+_shared = _read_shared_config('master_secret', 'service_token')
+MASTER_KEY    = os.environ.get('API_MASTER_SECRET', '') or _shared.get('master_secret', '')
+SERVICE_TOKEN = os.environ.get('SERVICE_TOKEN', '') or _shared.get('service_token', '')
 
 
 
@@ -474,7 +502,7 @@ class H(BaseHTTPRequestHandler):
             req = urllib.request.Request(
                 f'{PLATFORM}/search', data=payload, method='POST',
                 headers={'Content-Type': 'application/json',
-                         'Authorization': 'Bearer temp-dev-token'})
+                         'Authorization': 'Bearer ' + SERVICE_TOKEN})
             resp = urllib.request.urlopen(req, timeout=10)
             r = json.loads(resp.read().decode())
             jid = r.get('job_id', '')
@@ -493,7 +521,7 @@ class H(BaseHTTPRequestHandler):
             req = urllib.request.Request(
                 f'{PLATFORM}/enrich', data=b'{}', method='POST',
                 headers={'Content-Type': 'application/json',
-                         'Authorization': 'Bearer temp-dev-token'})
+                         'Authorization': 'Bearer ' + SERVICE_TOKEN})
             resp = urllib.request.urlopen(req, timeout=10)
             r = json.loads(resp.read().decode())
             jid = r.get('job_id', '')
@@ -510,7 +538,7 @@ class H(BaseHTTPRequestHandler):
         try:
             req = urllib.request.Request(
                 f'{PLATFORM}/job-status?job_id={job_id}',
-                headers={'Authorization': 'Bearer temp-dev-token'})
+                headers={'Authorization': 'Bearer ' + SERVICE_TOKEN})
             resp = urllib.request.urlopen(req, timeout=10)
             r = json.loads(resp.read().decode())
             return self.ok({
@@ -527,7 +555,7 @@ class H(BaseHTTPRequestHandler):
         try:
             req = urllib.request.Request(
                 f'{PLATFORM}/jobs',
-                headers={'Authorization': 'Bearer temp-dev-token'})
+                headers={'Authorization': 'Bearer ' + SERVICE_TOKEN})
             resp = urllib.request.urlopen(req, timeout=5)
             return self.ok(json.loads(resp.read().decode()))
         except Exception:

@@ -8,7 +8,7 @@ os.makedirs(OUT, exist_ok=True)
 
 URL = 'http://127.0.0.1:8080/'
 USER = 'admin'
-PASS = 'ChangeMe_2026!'
+PASS = 'CHANGE_ME_BEFORE_DEPLOY'
 
 # Each tab in the dashboard sidebar. Map of label -> screenshot filename.
 # We click each one and screenshot.

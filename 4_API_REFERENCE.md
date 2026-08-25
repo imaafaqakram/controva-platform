@@ -17,7 +17,7 @@ Login and get a session token.
 ```bash
 curl -X POST http://localhost:8080/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"ChangeMe_2026!"}'
+  -d '{"username":"admin","password":"CHANGE_ME_BEFORE_DEPLOY"}'
 ```
 
 Response:

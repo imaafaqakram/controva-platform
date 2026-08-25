@@ -15,11 +15,11 @@ pip install psycopg2-binary
 
 # 2. Boot data services
 sudo pg_ctlcluster 16 main start
-redis-server --daemonize yes --port 6379 --requirepass "Redis_Secure_2024!"
+redis-server --daemonize yes --port 6379 --requirepass "CHANGE_ME_REDIS_PASS"
 
 # 3. Create DB + load schema + grant perms (one-shot)
 sudo -u postgres psql <<'EOF'
-CREATE USER leadgen WITH PASSWORD 'LeadGen_Secure_2024!';
+CREATE USER leadgen WITH PASSWORD 'CHANGE_ME_DB_PASS';
 CREATE DATABASE leadgen_db OWNER leadgen;
 EOF
 sudo -u postgres psql -d leadgen_db -c 'CREATE EXTENSION IF NOT EXISTS "uuid-ossp"; CREATE EXTENSION IF NOT EXISTS pg_trgm;'
@@ -36,7 +36,7 @@ cp server/leads_api.py server/dashboard.html /opt/leadgen/
 python3 /opt/leadgen/leads_api.py
 ```
 
-Open `http://localhost:8080/` — login `admin` / `ChangeMe_2026!`.
+Open `http://localhost:8080/` — login `admin` / `CHANGE_ME_BEFORE_DEPLOY`.
 
 ---
 
@@ -76,7 +76,7 @@ If you want JS-rendered scraping, run Crawl4AI as a Docker sidecar:
 ```bash
 docker run -d --name crawl4ai \
     -p 11235:11235 \
-    -e CRAWL4AI_API_TOKEN=crawl4ai_secret_token_2024 \
+    -e CRAWL4AI_API_TOKEN=CHANGE_ME_CRAWL4AI_TOKEN \
     unclecode/crawl4ai:latest
 ```
 
@@ -89,13 +89,13 @@ Not required for any of the tested features.
 ```bash
 sudo pg_ctlcluster 16 main start                  # PostgreSQL on 5432
 redis-server --daemonize yes --port 6379 \
-    --requirepass "Redis_Secure_2024!"            # Redis on 6379
+    --requirepass "CHANGE_ME_REDIS_PASS"            # Redis on 6379
 ```
 
 Verify:
 ```bash
 sudo pg_lsclusters                                 # status should be 'online'
-redis-cli -a Redis_Secure_2024! ping              # PONG
+redis-cli -a CHANGE_ME_REDIS_PASS ping              # PONG
 ```
 
 ---
@@ -104,7 +104,7 @@ redis-cli -a Redis_Secure_2024! ping              # PONG
 
 ```bash
 sudo -u postgres psql <<'EOF'
-CREATE USER leadgen WITH PASSWORD 'LeadGen_Secure_2024!';
+CREATE USER leadgen WITH PASSWORD 'CHANGE_ME_DB_PASS';
 CREATE DATABASE leadgen_db OWNER leadgen;
 EOF
 
@@ -192,7 +192,7 @@ curl -s http://127.0.0.1:8080/health | python3 -m json.tool
 ```
 http://localhost:8080/
 ```
-**Default login:** `admin` / `ChangeMe_2026!` — **change this immediately**
+**Default login:** `admin` / `CHANGE_ME_BEFORE_DEPLOY` — **change this immediately**
 (see `server/leads_api.py` for where the hash is checked).
 
 > **CDN-blocked networks:** the dashboard fetches React/Tailwind/Babel from
@@ -280,6 +280,6 @@ A full *find-50-leads → enrich → score → email-copy → send* run is typic
 
 1. **Rotate every API key in `server/leads_api.py:28-36`** — they're in git history.
 2. Move keys to `/opt/leadgen/config.json` (or env vars) and `.gitignore` the file.
-3. Change `admin / ChangeMe_2026!` password (and swap SHA256 for bcrypt — flagged in code).
+3. Change `admin / CHANGE_ME_BEFORE_DEPLOY` password (and swap SHA256 for bcrypt — flagged in code).
 4. Put the API behind Caddy or nginx with TLS + basic auth, not raw `:8080`.
 5. Configure firewall to expose only `:443` publicly.

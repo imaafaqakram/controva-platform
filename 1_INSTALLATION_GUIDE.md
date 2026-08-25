@@ -86,7 +86,7 @@ Expected output ends with:
 ```
 SETUP COMPLETE
 Dashboard URL: http://YOUR_IP:8080/
-Default login: admin / ChangeMe_2026!
+Default login: admin / CHANGE_ME_BEFORE_DEPLOY
 ```
 
 ### Step 4 — Add Your Real API Keys
@@ -109,7 +109,7 @@ systemctl restart leadgen-api
 
 In your browser: `http://YOUR_IP:8080/`
 
-Log in with `admin` / `ChangeMe_2026!`
+Log in with `admin` / `CHANGE_ME_BEFORE_DEPLOY`
 
 ### Step 6 — Change Default Passwords (CRITICAL)
 
@@ -123,11 +123,11 @@ nano /opt/leadgen/leads_api.py
 Find the line:
 ```python
 AUTH_USERS = {
-    "admin": {"salt": "controva2026salt", "hash": _h_hashlib.sha256(("ChangeMe_2026!" + "controva2026salt").encode()).hexdigest()}
+    "admin": {"salt": "controva2026salt", "hash": _h_hashlib.sha256(("CHANGE_ME_BEFORE_DEPLOY" + "controva2026salt").encode()).hexdigest()}
 }
 ```
 
-Replace `ChangeMe_2026!` with your new password. Save, then restart:
+Replace `CHANGE_ME_BEFORE_DEPLOY` with your new password. Save, then restart:
 
 ```bash
 systemctl restart leadgen-api
@@ -139,7 +139,7 @@ systemctl restart leadgen-api
 nano /opt/leadgen/docker-compose.yml
 ```
 
-Change all instances of `LeadGen_Secure_2024!` and `Redis_Secure_2024!` to your new passwords.
+Change all instances of `CHANGE_ME_DB_PASS` and `CHANGE_ME_REDIS_PASS` to your new passwords.
 
 Also update them in `/opt/leadgen/leads_api.py` (look for `DB = dict(...)` line).
 

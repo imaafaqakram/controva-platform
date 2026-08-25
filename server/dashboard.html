@@ -169,6 +169,7 @@ const ICONS = {
   Tag:           'M20.59 13.41L13.42 20.58a2 2 0 01-2.83 0L2 12V2h10l8.59 8.59a2 2 0 010 2.82zM7 7h.01',
   Zap:           'M13 2L3 14h9l-1 8 10-12h-9l1-8z',
   Shield:        'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z',
+  ShieldCheck:   'M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1 1 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1zM9 12l2 2 4-4',
   Gift:          'M20 12v10H4V12M2 7h20v5H2zM12 22V7M12 7H7.5a2.5 2.5 0 010-5C11 2 12 7 12 7zM12 7h4.5a2.5 2.5 0 000-5C13 2 12 7 12 7z',
   Image:         'M21 5v14a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h14a2 2 0 012 2zM8.5 11a1.5 1.5 0 100-3 1.5 1.5 0 000 3zM21 15l-5-5L5 21',
   ToggleRight:   'M16 16H8a4 4 0 010-8h8a4 4 0 010 8zM16 12a2 2 0 11-4 0 2 2 0 014 0z',
@@ -897,6 +898,8 @@ const LeadsPage = () => {
     else if (filter === 'no_website_verified') r = r.filter(l => l.website_verified === true && !l.has_website);
     else if (filter === 'enriched') r = r.filter(l => !['discovered', 'rejected'].includes(l.status));
     else if (filter === 'with_email') r = r.filter(l => l.owner_email);
+    else if (filter === 'verified_email') r = r.filter(l => l.email_status === 'deliverable');
+    else if (filter === 'bad_email') r = r.filter(l => l.email_status === 'undeliverable');
     else if (filter === 'with_linkedin') r = r.filter(l => l.linkedin_url);
     else if (filter === 'with_contact') r = r.filter(l => l.owner_email || l.linkedin_url);
     else if (filter === 'scored') r = r.filter(l => parseInt(l.ai_score) >= 7);
@@ -974,7 +977,10 @@ const LeadsPage = () => {
     showToast('Downloaded ' + rows.length + ' leads');
   };
 
-  const downloadAllCSV = () => { window.location.href = '/leads.csv'; };
+  const downloadAllCSV = () => {
+    let t = null; try { t = localStorage.getItem('auth_token'); } catch (e) {}
+    window.location.href = '/leads.csv' + (t ? '?token=' + encodeURIComponent(t) : '');
+  };
 
   const deleteSelected = async () => {
     const ids = [...selected];
@@ -1100,6 +1106,8 @@ const LeadsPage = () => {
                 { id: 'no_website_verified', label: '✓ No Website (verified)', count: leads.filter(l => l.website_verified === true && !l.has_website).length },
                 { id: 'enriched',            label: 'Enriched',             count: leads.filter(l => !['discovered', 'rejected'].includes(l.status)).length },
                 { id: 'with_email',          label: 'Has Email',            count: leads.filter(l => l.owner_email).length },
+                { id: 'verified_email',      label: '✓ Verified Email',      count: leads.filter(l => l.email_status === 'deliverable').length },
+                { id: 'bad_email',           label: '✗ Undeliverable',       count: leads.filter(l => l.email_status === 'undeliverable').length },
                 { id: 'with_linkedin',       label: 'Has LinkedIn',         count: leads.filter(l => l.linkedin_url).length },
                 { id: 'with_contact',        label: 'Has Email or LinkedIn', count: leads.filter(l => l.owner_email || l.linkedin_url).length },
                 { id: 'scored',              label: 'High Score (7+)',      count: leads.filter(l => parseInt(l.ai_score) >= 7).length },
@@ -1210,7 +1218,15 @@ const LeadsPage = () => {
                       <td className="py-3 px-3 text-slate-600 dark:text-slate-400 cursor-pointer truncate" onClick={() => setOpenLead(l.id)}>{l.city}</td>
                       <td className="py-3 px-3 text-slate-600 dark:text-slate-400 font-mono text-xs cursor-pointer" onClick={() => setOpenLead(l.id)}>{l.country}</td>
                       <td className="py-3 px-3 font-mono text-xs text-cyan-600 cursor-pointer" onClick={() => setOpenLead(l.id)}>{l.phone || '—'}</td>
-                      <td className="py-3 px-3 text-xs max-w-0">{l.owner_email ? <a href={'mailto:' + l.owner_email} onClick={e => e.stopPropagation()} className="text-accent-600 hover:underline block truncate" title={l.owner_email}>{l.owner_email}</a> : '—'}</td>
+                      <td className="py-3 px-3 text-xs max-w-0">{l.owner_email ? (
+                      <span className="flex items-center gap-1 min-w-0">
+                        {l.email_status === 'deliverable' && <span className="text-green-600 flex-shrink-0" title="Verified deliverable (SMTP-checked)">✓</span>}
+                        {l.email_status === 'risky' && <span className="text-amber-500 flex-shrink-0" title="Risky — catch-all domain or role account">⚠</span>}
+                        {l.email_status === 'undeliverable' && <span className="text-red-500 flex-shrink-0" title="Undeliverable — sending is blocked">✗</span>}
+                        {(!l.email_status || l.email_status === 'unknown') && <span className="text-slate-400 flex-shrink-0" title="Not verified yet — run Verify Emails on the Pipeline page">?</span>}
+                        <a href={'mailto:' + l.owner_email} onClick={e => e.stopPropagation()} className="text-accent-600 hover:underline block truncate" title={l.owner_email}>{l.owner_email}</a>
+                      </span>
+                    ) : '—'}</td>
                       <td className="py-3 px-3 text-center">
                         {l.linkedin_url ? (
                           <a href={l.linkedin_url} target="_blank" onClick={e => e.stopPropagation()}
@@ -1895,6 +1911,44 @@ const PipelinePage = () => {
           </Button>
         </Card>
       )}
+
+      {/* Email verification — required before outreach */}
+      <Card>
+        <h3 className="font-semibold mb-2 flex items-center gap-2"><Icon name="ShieldCheck" /> Verify Contact Emails</h3>
+        <p className="text-xs text-slate-500 mb-3">
+          SMTP-checks every stored email (up to 300/run): ✓ deliverable, ⚠ risky (catch-all / role), ✗ undeliverable.
+          Sending is blocked for ✗ addresses — verified emails protect your domain reputation.
+          New enrichments are verified automatically; use this for older leads.
+        </p>
+        {pStats && pStats.email_verification && (
+          <div className="grid grid-cols-3 md:grid-cols-6 gap-2 mb-3">
+            {[
+              { label: '✓ Deliverable', value: pStats.email_verification.deliverable, cls: 'text-green-600' },
+              { label: '⚠ Risky', value: pStats.email_verification.risky, cls: 'text-amber-500' },
+              { label: '✗ Undeliverable', value: pStats.email_verification.undeliverable, cls: 'text-red-500' },
+              { label: '? Unknown', value: pStats.email_verification.unknown, cls: 'text-slate-400' },
+              { label: 'Stale 60d+', value: pStats.email_verification.stale, cls: 'text-orange-500' },
+              { label: 'Sendable', value: pStats.email_verification.sendable, cls: 'text-accent-600 font-bold' },
+            ].map(x => (
+              <div key={x.label} className="p-2 rounded-lg bg-slate-50 dark:bg-slate-800 text-center">
+                <div className={'text-lg font-bold ' + x.cls}>{x.value ?? 0}</div>
+                <div className="text-[10px] text-slate-500 uppercase tracking-wide">{x.label}</div>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="flex gap-2 flex-wrap">
+          <Button variant="primary" icon="ShieldCheck" onClick={() => runStep('/verify-emails', 'Verify Emails')}>
+            Verify Unverified Emails
+          </Button>
+          <Button variant="secondary" icon="RefreshCw" onClick={() => runStep('/verify-emails', 'Re-Verify Stale Emails', { only_stale: true })}>
+            Re-Verify Older Than 60 Days
+          </Button>
+          <Button variant="secondary" icon="Inbox" onClick={() => runStep('/check-replies', 'Check Replies')}>
+            Check for Replies
+          </Button>
+        </div>
+      </Card>
 
       <Card>
         <h3 className="font-semibold mb-4">Enrich New Leads</h3>
@@ -3249,6 +3303,17 @@ const ApiKeyEditor = () => {
     firecrawl_key:   'Firecrawl (free 500 req/mo)',
     ebay_client_id:     'eBay App ID (free — developer.ebay.com)',
     ebay_client_secret: 'eBay Cert ID (free — developer.ebay.com)',
+    reddit_client_id:     'Reddit App ID (free — reddit.com/prefs/apps, script app)',
+    reddit_client_secret: 'Reddit App Secret (enables r/forhire live leads)',
+    freelancer_api_key:   'Freelancer.com API Key (free — developers.freelancer.com)',
+    millionverifier_key:  'MillionVerifier (optional ~$1/1k — resolves unknown emails)',
+    public_base_url:      'Public Base URL (https://app.yourdomain.com — enables unsubscribe links)',
+    company_name:         'Company Name (email footer)',
+    company_address:      'Company Postal Address (required by CAN-SPAM)',
+    resend_webhook_secret:'Resend Webhook Secret (wh_... from Resend dashboard)',
+    imap_host:            'IMAP Host (reply detection, e.g. imap.gmail.com)',
+    imap_user:            'IMAP Username (your reply mailbox)',
+    imap_pass:            'IMAP Password (app password)',
   };
 
   return (
@@ -3503,7 +3568,7 @@ const IntentPage = () => {
               <option value="55">Medium+ only</option>
               <option value="75">High only</option>
             </select>
-            <a href={API + '/intent-leads.csv?direction=' + direction + '&min_confidence=' + minConfFilter}
+            <a href={API + '/intent-leads.csv?direction=' + direction + '&min_confidence=' + minConfFilter + '&token=' + encodeURIComponent(((() => { try { return localStorage.getItem('auth_token') || ''; } catch (e) { return ''; } })()))}
               className="text-xs text-accent-600 hover:underline flex items-center gap-1">
               <Icon name="Download" size={12} /> Download CSV
             </a>
@@ -4114,10 +4179,9 @@ const LoginScreen = ({ onLogin }) => {
     setLoading(true); setError('');
     try {
       const r = await api.post('/auth/login', { username, password });
-      if (r.success || r.status === 'ok' || r.token) {
-        const token = r.token || 'temp-dev-token-controva-12345';
-        localStorage.setItem('auth_token', token);
-        onLogin(token);
+      if ((r.success || r.status === 'ok') && r.token) {
+        localStorage.setItem('auth_token', r.token);
+        onLogin(r.token);
       } else {
         setError(r.error || 'Invalid credentials');
       }

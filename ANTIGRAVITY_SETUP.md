@@ -29,7 +29,7 @@ pip install paramiko
 The file `deploy.env` already contains your server connection info:
 
 ```
-SERVER_IP=2.25.152.153
+SERVER_IP=YOUR_SERVER_IP
 SERVER_USER=root
 SERVER_PASSWORD=...
 REMOTE_DIR=/opt/leadgen
@@ -89,7 +89,7 @@ python deploy.py status    # service + container status
 2. Find the component, edit the Tailwind class
 3. Save (`Ctrl+S`)
 4. Run task **Deploy: UI only** (or `python deploy.py ui`)
-5. Refresh your browser at `http://2.25.152.153:8080/` (hard-refresh: `Ctrl+F5`)
+5. Refresh your browser at `http://YOUR_SERVER_IP:8080/` (hard-refresh: `Ctrl+F5`)
 
 ### Example 2 — Add a new API endpoint
 
@@ -98,7 +98,7 @@ python deploy.py status    # service + container status
    (see **3_DEVELOPER_GUIDE.docx** section 2.2 for the pattern)
 3. Save
 4. Run task **Deploy: API only** (or `python deploy.py api`)
-5. Test: `curl -X POST http://2.25.152.153:8080/your-endpoint`
+5. Test: `curl -X POST http://YOUR_SERVER_IP:8080/your-endpoint`
 
 ### Example 3 — Debug a server error
 
@@ -181,7 +181,7 @@ For the best experience, install these from the Extensions panel (`Ctrl+Shift+X`
 | Deploy only UI changes | Run Task → "Deploy: UI only" |
 | Watch live logs | Run Task → "Tail server logs" |
 | Pull latest from server | Run Task → "Pull from server" |
-| See the live dashboard | Browser → `http://2.25.152.153:8080/` |
+| See the live dashboard | Browser → `http://YOUR_SERVER_IP:8080/` |
 | Get AI help on the code | Open AI panel, reference `@server/leads_api.py` |
 
 That's it. Edit locally, deploy with one click, refresh the browser.

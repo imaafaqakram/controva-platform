@@ -79,7 +79,7 @@ systemctl restart leadgen-api
 ```
 
 Open `http://YOUR_SERVER_IP:8080/`  
-Login: `admin` / `ChangeMe_2026!` ← **change this immediately**
+Login: `admin` / `CHANGE_ME_BEFORE_DEPLOY` ← **change this immediately**
 
 ---
 
@@ -225,6 +225,68 @@ Processes up to 500 leads per run. Re-run anytime.
 
 ---
 
+## Email Verification
+
+Every email address is verified **before** it is stored or used — this protects your
+sender reputation (bounces are the #1 way cold-email domains get blacklisted).
+
+### How an address is checked (cheapest test first)
+
+1. **Syntax** — valid address format?
+2. **Disposable** — is the domain a temp-mail service? -> undeliverable
+3. **DNS / MX** — does the domain exist and accept mail? (dnspython)
+4. **SMTP mailbox probe** — we connect to the recipient's mail server and ask
+   whether the mailbox exists (250 = yes, 550 = no)
+5. **Catch-all detection** — if the server accepts even random addresses, the
+   address is marked risky because existence can't be confirmed
+6. **External fallback (optional)** — if the SMTP probe is inconclusive and a
+   `millionverifier_key` is set in Settings, MillionVerifier settles it (~$1/1000 checks)
+
+### Statuses
+
+| Status | Badge | Sending allowed? |
+|---|---|---|
+| deliverable | ✓ green | Yes |
+| risky | ⚠ amber (catch-all / role account) | Yes, with caution |
+| undeliverable | ✗ red | Blocked |
+| unknown | ? gray | Blocked until verified |
+
+### Where verification runs automatically
+
+- **Enrichment** — save_enrichment verifies every email before insert; undeliverable ones are dropped
+- **Re-enrichment** (Oxylabs) and **intent-lead emails** — same gate
+- **Before sending** — send_lead_email re-verifies and blocks anything not deliverable/risky
+- **People Finder** — found addresses are verified in the results
+- **Staleness** — statuses older than 60 days are re-verified on next use or via the
+  Pipeline -> Verify Emails buttons (background job, up to 300 per run)
+
+The Pipeline page shows a live summary: deliverable / risky / undeliverable / unknown /
+stale counts plus the total "sendable" pool.
+
+---
+
+## Outreach Compliance & Tracking (v7.1)
+
+### Before your first real campaign (one-time setup in Settings)
+
+| Setting | What it is |
+|---|---|
+| `public_base_url` | Your HTTPS dashboard URL (e.g. `https://app.controvallc.com`) — powers unsubscribe links |
+| `company_name` / `company_address` | Legal sender identity — CAN-SPAM requires a postal address in every email |
+| `resend_webhook_secret` | From Resend Dashboard → Webhooks → create webhook pointing at `https://YOUR_URL/webhook/resend` |
+| `imap_host` / `imap_user` / `imap_pass` | Optional — your reply mailbox, enables automatic reply detection |
+
+### What the platform enforces automatically
+
+- **Compliance footer** — every outreach email gets an unsubscribe link + company name + postal address
+- **One-click unsubscribe** — `GET /u/<token>` (public) suppresses the address permanently and marks the lead `unsubscribed`
+- **Suppression list** — unsubscribes, hard bounces, and spam complaints are never emailed again; complaints suppress the entire domain
+- **Send throttling** — max 30/hour and 100/day (configurable in config.json `send_hourly_limit` / `send_daily_limit`)
+- **Real tracking via Resend webhooks** — `email.delivered` / `email.opened` / `email.bounced` / `email.complained` update outreach_log and leads; webhooks are verified with Svix signatures (invalid or stale signatures are rejected)
+- **Reply detection** — Pipeline → Check for Replies scans your IMAP inbox and matches replies to outreach (sets `replied_at`, lead status `replied`)
+
+---
+
 ## Enrichment Strategies
 
 Set your strategy in **Settings → Enrichment Strategy** or select per-run on the **Pipeline** page.
@@ -254,7 +316,7 @@ Required GitHub repository secrets:
 
 | Secret | Value |
 |---|---|
-| `SERVER_HOST` | Your server IP (e.g. `2.25.152.153`) |
+| `SERVER_HOST` | Your server IP (e.g. `YOUR_SERVER_IP`) |
 | `SERVER_USER` | `root` |
 | `SERVER_PASS` | Your server SSH password |
 

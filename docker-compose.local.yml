@@ -16,7 +16,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: leadgen
-      POSTGRES_PASSWORD: LeadGen_Secure_2024!
+      POSTGRES_PASSWORD: ${LEADGEN_DB_PASS:?Set LEADGEN_DB_PASS in .env next to this file}
       POSTGRES_DB: leadgen_db
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -33,7 +33,7 @@ services:
     image: redis:7-alpine
     container_name: leadgen_redis
     restart: unless-stopped
-    command: redis-server --requirepass "Redis_Secure_2024!" --maxmemory 256mb --maxmemory-policy allkeys-lru
+    command: redis-server --requirepass "${LEADGEN_REDIS_PASS:?Set LEADGEN_REDIS_PASS in .env}" --maxmemory 256mb --maxmemory-policy allkeys-lru
     volumes:
       - redis_data:/data
     ports:
@@ -44,7 +44,7 @@ services:
     container_name: leadgen_crawl4ai
     restart: unless-stopped
     environment:
-      - CRAWL4AI_API_TOKEN=crawl4ai_secret_token_2024
+      - CRAWL4AI_API_TOKEN=${CRAWL4AI_TOKEN:?Set CRAWL4AI_TOKEN in .env}
     ports:
       - "11235:11235"
     shm_size: "1gb"

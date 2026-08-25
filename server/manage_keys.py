@@ -32,7 +32,7 @@ DB_CONFIG = dict(
     port     = int(os.environ.get('DB_PORT', 5433)),
     database = os.environ.get('DB_NAME', 'leadgen_db'),
     user     = os.environ.get('DB_USER', 'leadgen'),
-    password = os.environ.get('DB_PASS', 'LeadGen_Secure_2024!'),
+    password = os.environ.get('DB_PASS', ''),
     connect_timeout = 2,
 )
 

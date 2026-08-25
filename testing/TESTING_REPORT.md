@@ -127,7 +127,7 @@ All 14 UI screens captured live against the running platform — `screenshots/` 
 
 | File | What it shows |
 |---|---|
-| `00_login.png` | Login screen (admin / ChangeMe_2026!) |
+| `00_login.png` | Login screen (admin / CHANGE_ME_BEFORE_DEPLOY) |
 | `01_dashboard.png` | Home dashboard with stats tiles |
 | `02_search.png` | Natural-language lead search (density + filter modes) |
 | `03_leads.png` | Leads table with the 30 Cambridge leads |

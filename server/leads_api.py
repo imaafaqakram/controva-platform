@@ -25,23 +25,27 @@ from socketserver import ThreadingMixIn
 # ──────────────────────────────────────────────────────────────
 #  API KEYS
 # ──────────────────────────────────────────────────────────────
-GOOGLE_API_KEY = 'AIzaSyBLBQ8bN9EW6Gwj0Evy6EuU3zgGnaui6Dw'
-SERPER_KEY     = 'd62d91f02d52f98ddacdf4ea623218502c1c492b'
-GEMINI_KEY     = 'AIzaSyA4pX6dw-LrOMGn45h5RoNP9KQrnEtIcU4'
-CLAUDE_KEY     = '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'
-REPLICATE_TOKEN= 'r8_Vkh65JAx4ds9PN3XIDynavgw8DTn1KR3jKRMn'
-IMAGINE_ART_KEY= os.environ.get('IMAGINE_ART_KEY', '')  # Set this when user provides it
-OXYLABS_KEY    = 'iPz3YfTsAOsRt1ZE49T2wGdkOz0lPcInRQOEEgOW'
-CRAWL4AI_URL   = 'http://localhost:11235'
-CRAWL4AI_TOKEN = 'crawl4ai_secret_token_2024'
+# SECURITY: keys are loaded from config.json (LEADGEN_HOME or the
+# directory containing this script) or from the matching env vars.
+# NEVER hardcode real keys here — this file is committed to git.
+GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY', '')
+SERPER_KEY     = os.environ.get('SERPER_KEY', '')
+GEMINI_KEY     = os.environ.get('GEMINI_KEY', '')
+CLAUDE_KEY     = os.environ.get('CLAUDE_KEY', '')
+REPLICATE_TOKEN= os.environ.get('REPLICATE_TOKEN', '')
+IMAGINE_ART_KEY= os.environ.get('IMAGINE_ART_KEY', '')
+OXYLABS_KEY    = os.environ.get('OXYLABS_KEY', '')
+CRAWL4AI_URL   = os.environ.get('CRAWL4AI_URL', 'http://localhost:11235')
+CRAWL4AI_TOKEN = os.environ.get('CRAWL4AI_TOKEN', '')
 HERE_API_KEY   = os.environ.get('HERE_API_KEY', '')  # Free 250k/mo: developer.here.com
+
+# Internal token the public API (controva_api.py) uses to call this
+# service. Auto-generated into config.json on first start.
+SERVICE_TOKEN  = os.environ.get('SERVICE_TOKEN', '')
 
 # ── N8N Webhook Integration ──────────────────────────────────────
 # Fires after every completed search → sends leads to Google Sheets & Drive via N8N
-N8N_WEBHOOK_URL = os.environ.get(
-    'N8N_WEBHOOK_URL',
-    'http://8.208.125.43:5678/webhook/controva-search-results'
-)
+N8N_WEBHOOK_URL = os.environ.get('N8N_WEBHOOK_URL', '')
 
 # ── Scraping Alternatives (all have free monthly tiers) ──────────
 SCRAPINGBEE_KEY = os.environ.get('SCRAPINGBEE_KEY', '')   # 1,000 free req/mo — scrapingbee.com
@@ -55,6 +59,26 @@ FIRECRAWL_KEY   = os.environ.get('FIRECRAWL_KEY', '')      # 500  free req/mo  �
 EBAY_CLIENT_ID     = os.environ.get('EBAY_CLIENT_ID', '')
 EBAY_CLIENT_SECRET = os.environ.get('EBAY_CLIENT_SECRET', '')
 
+# ── Live intent sources (free tiers) ─────────────────────────────
+# Reddit: create a free "script" app at reddit.com/prefs/apps → paste
+# the client id + secret here or into config.json. Enables r/forhire live.
+REDDIT_CLIENT_ID     = os.environ.get('REDDIT_CLIENT_ID', '')
+REDDIT_CLIENT_SECRET = os.environ.get('REDDIT_CLIENT_SECRET', '')
+# Freelancer.com: free API key from developers.freelancer.com (optional)
+FREELANCER_API_KEY   = os.environ.get('FREELANCER_API_KEY', '')
+# MillionVerifier: paid fallback (~$1/1000 checks) for emails our SMTP probe
+# can't resolve ('unknown'). millionverifier.com — optional.
+MILLIONVERIFIER_KEY = os.environ.get('MILLIONVERIFIER_KEY', '')
+
+# ── M3: outreach compliance & tracking ───────────────────────────
+PUBLIC_BASE_URL     = os.environ.get('PUBLIC_BASE_URL', '')   # e.g. https://app.controvallc.com
+COMPANY_NAME        = os.environ.get('COMPANY_NAME', 'Controva LLC')
+COMPANY_ADDRESS     = os.environ.get('COMPANY_ADDRESS', '')   # CAN-SPAM requires a postal address
+RESEND_WEBHOOK_SECRET = os.environ.get('RESEND_WEBHOOK_SECRET', '')  # svix signing secret (wh_...)
+IMAP_HOST = os.environ.get('IMAP_HOST', '')   # reply detection (e.g. imap.gmail.com)
+IMAP_USER = os.environ.get('IMAP_USER', '')
+IMAP_PASS = os.environ.get('IMAP_PASS', '')
+
 # Configuration toggles (can be changed via /config endpoint)
 CONFIG = {
     'enrichment_strategy': 'serper_then_oxylabs',  # serper_only | oxylabs_only | serper_then_oxylabs | free_only
@@ -64,6 +88,9 @@ CONFIG = {
     'auto_score': True,                   # Run Gemini scoring during pipeline
     'auto_email_copy': False,             # Claude email writing OFF by default (saves credits)
     'auto_image': False,                  # Image generation OFF by default
+    # M3 send throttle — protects sender reputation (mailbox-provider safe zone)
+    'send_hourly_limit': 30,
+    'send_daily_limit': 100,
 }
 
 # Map enrichment_strategy → providers list for enrich_lead()
@@ -92,7 +119,7 @@ CONFIG_FILE = os.path.join(LEADGEN_HOME, 'config.json')
 
 def load_config():
     """Load config from disk, fall back to defaults."""
-    global GOOGLE_API_KEY, SERPER_KEY, GEMINI_KEY, CLAUDE_KEY, REPLICATE_TOKEN, IMAGINE_ART_KEY, OXYLABS_KEY, RESEND_KEY, FROM_EMAIL, FROM_NAME, HERE_API_KEY, SCRAPINGBEE_KEY, ZENROWS_KEY, SCRAPINGDOG_KEY, FIRECRAWL_KEY, EBAY_CLIENT_ID, EBAY_CLIENT_SECRET
+    global GOOGLE_API_KEY, SERPER_KEY, GEMINI_KEY, CLAUDE_KEY, REPLICATE_TOKEN, IMAGINE_ART_KEY, OXYLABS_KEY, RESEND_KEY, FROM_EMAIL, FROM_NAME, HERE_API_KEY, SCRAPINGBEE_KEY, ZENROWS_KEY, SCRAPINGDOG_KEY, FIRECRAWL_KEY, EBAY_CLIENT_ID, EBAY_CLIENT_SECRET, REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, FREELANCER_API_KEY, MILLIONVERIFIER_KEY, PUBLIC_BASE_URL, COMPANY_NAME, COMPANY_ADDRESS, RESEND_WEBHOOK_SECRET, IMAP_HOST, IMAP_USER, IMAP_PASS
     try:
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, 'r') as f:
@@ -116,6 +143,18 @@ def load_config():
                 'firecrawl_key':    'FIRECRAWL_KEY',
                 'ebay_client_id':     'EBAY_CLIENT_ID',
                 'ebay_client_secret': 'EBAY_CLIENT_SECRET',
+                'service_token':      'SERVICE_TOKEN',
+                'reddit_client_id':   'REDDIT_CLIENT_ID',
+                'reddit_client_secret':'REDDIT_CLIENT_SECRET',
+                'freelancer_api_key': 'FREELANCER_API_KEY',
+                'millionverifier_key': 'MILLIONVERIFIER_KEY',
+                'public_base_url':     'PUBLIC_BASE_URL',
+                'company_name':        'COMPANY_NAME',
+                'company_address':     'COMPANY_ADDRESS',
+                'resend_webhook_secret':'RESEND_WEBHOOK_SECRET',
+                'imap_host':           'IMAP_HOST',
+                'imap_user':           'IMAP_USER',
+                'imap_pass':           'IMAP_PASS',
             }
             for key, var_name in keys_map.items():
                 if key in saved and saved[key]:
@@ -149,6 +188,18 @@ def save_config():
             'firecrawl_key':   FIRECRAWL_KEY,
             'ebay_client_id':     EBAY_CLIENT_ID,
             'ebay_client_secret': EBAY_CLIENT_SECRET,
+            'service_token':      SERVICE_TOKEN,
+            'reddit_client_id':     REDDIT_CLIENT_ID,
+            'reddit_client_secret': REDDIT_CLIENT_SECRET,
+            'freelancer_api_key':   FREELANCER_API_KEY,
+            'millionverifier_key':  MILLIONVERIFIER_KEY,
+            'public_base_url':      PUBLIC_BASE_URL,
+            'company_name':         COMPANY_NAME,
+            'company_address':      COMPANY_ADDRESS,
+            'resend_webhook_secret':RESEND_WEBHOOK_SECRET,
+            'imap_host':            IMAP_HOST,
+            'imap_user':            IMAP_USER,
+            'imap_pass':            IMAP_PASS,
             'config':          CONFIG,
         }
         with open(CONFIG_FILE, 'w') as f:
@@ -160,18 +211,21 @@ def save_config():
 
 def update_api_key(name, value):
     """Update an API key and save."""
-    global GOOGLE_API_KEY, SERPER_KEY, GEMINI_KEY, CLAUDE_KEY, REPLICATE_TOKEN, IMAGINE_ART_KEY, OXYLABS_KEY, RESEND_KEY, FROM_EMAIL, FROM_NAME, HERE_API_KEY, SCRAPINGBEE_KEY, ZENROWS_KEY, SCRAPINGDOG_KEY, FIRECRAWL_KEY, EBAY_CLIENT_ID, EBAY_CLIENT_SECRET
+    global GOOGLE_API_KEY, SERPER_KEY, GEMINI_KEY, CLAUDE_KEY, REPLICATE_TOKEN, IMAGINE_ART_KEY, OXYLABS_KEY, RESEND_KEY, FROM_EMAIL, FROM_NAME, HERE_API_KEY, SCRAPINGBEE_KEY, ZENROWS_KEY, SCRAPINGDOG_KEY, FIRECRAWL_KEY, EBAY_CLIENT_ID, EBAY_CLIENT_SECRET, REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, FREELANCER_API_KEY, MILLIONVERIFIER_KEY, PUBLIC_BASE_URL, COMPANY_NAME, COMPANY_ADDRESS, RESEND_WEBHOOK_SECRET, IMAP_HOST, IMAP_USER, IMAP_PASS
     name_lower = name.lower()
     valid_keys = ['google_api_key', 'serper_key', 'gemini_key', 'claude_key',
                   'replicate_token', 'imagine_art_key', 'oxylabs_key', 'resend_key',
                   'from_email', 'from_name', 'here_api_key',
                   'scrapingbee_key', 'zenrows_key', 'scrapingdog_key', 'firecrawl_key',
-                  'ebay_client_id', 'ebay_client_secret']
+                  'ebay_client_id', 'ebay_client_secret',
+                  'reddit_client_id', 'reddit_client_secret', 'freelancer_api_key',
+                  'millionverifier_key',
+                  'public_base_url', 'company_name', 'company_address',
+                  'resend_webhook_secret', 'imap_host', 'imap_user', 'imap_pass']
     if name_lower not in valid_keys: return False
     var_name = name_lower.upper()
     globals()[var_name] = value
-    save_config()
-    return True
+    return save_config()
 
 def get_api_keys_masked():
     """Return current API keys with values masked except last 4 chars."""
@@ -198,6 +252,17 @@ def get_api_keys_masked():
         'firecrawl_key':   mask(FIRECRAWL_KEY),
         'ebay_client_id':     mask(EBAY_CLIENT_ID),
         'ebay_client_secret': mask(EBAY_CLIENT_SECRET),
+        'reddit_client_id':     mask(REDDIT_CLIENT_ID),
+        'reddit_client_secret': mask(REDDIT_CLIENT_SECRET),
+        'freelancer_api_key':   mask(FREELANCER_API_KEY),
+        'millionverifier_key':  mask(MILLIONVERIFIER_KEY),
+        'public_base_url':      {'set': bool(PUBLIC_BASE_URL), 'preview': PUBLIC_BASE_URL},
+        'company_name':         {'set': bool(COMPANY_NAME), 'preview': COMPANY_NAME},
+        'company_address':      {'set': bool(COMPANY_ADDRESS), 'preview': COMPANY_ADDRESS},
+        'resend_webhook_secret':mask(RESEND_WEBHOOK_SECRET),
+        'imap_host':            {'set': bool(IMAP_HOST), 'preview': IMAP_HOST},
+        'imap_user':            {'set': bool(IMAP_USER), 'preview': IMAP_USER},
+        'imap_pass':            mask(IMAP_PASS),
     }
 
 # Load saved config at startup
@@ -206,8 +271,10 @@ load_config()
 
 FIELD_MASK = 'places.id,places.displayName,places.formattedAddress,places.location,places.websiteUri,places.nationalPhoneNumber,places.rating,places.userRatingCount'
 
-DB = dict(host='127.0.0.1', port=5433, database='leadgen_db',
-          user='leadgen', password='LeadGen_Secure_2024!', connect_timeout=2)
+DB = dict(host=os.environ.get('DB_HOST', '127.0.0.1'), port=int(os.environ.get('DB_PORT', 5433)),
+          database=os.environ.get('DB_NAME', 'leadgen_db'),
+          user=os.environ.get('DB_USER', 'leadgen'),
+          password=os.environ.get('DB_PASS', ''), connect_timeout=2)
 
 JOBS = {}  # background job tracker
 
@@ -1972,47 +2039,46 @@ def enrich_with_oxylabs(business_name, city):
     emails = extract_emails(text)
     return {'email': emails[0] if emails else None, 'all_emails': emails}
 
-def enrich_with_email_permutator(business_name, owner_name=''):
-    """FREE Hunter.io alternative: generate likely email patterns + verify via MX."""
-    # Find or guess domain
-    domain_guess = re.sub(r'\W+', '', business_name.lower())[:20] + '.com'
+def enrich_with_email_permutator(business_name, owner_name='', domain=''):
+    """Free Hunter-style pattern generator — STRICTLY limited to domains we
+    actually observed for this business (scraped website/social page).
+    Never guesses domains: inventing businessname.com produced addresses that
+    belonged to unrelated companies and wrecked bounce rates."""
+    domain = norm_domain(domain) if domain else ''
+    if not domain:
+        return []   # refuse to permute on a guessed domain
 
+    patterns = []
     if owner_name:
         names = owner_name.lower().split()
         first = names[0] if names else ''
         last = names[-1] if len(names) > 1 else ''
-        patterns = [
-            f'{first}@{domain_guess}',
-            f'{first}.{last}@{domain_guess}',
-            f'{first}{last}@{domain_guess}',
-            f'{first[0]}{last}@{domain_guess}' if first and last else '',
-        ]
-    else:
-        patterns = [
-            f'info@{domain_guess}',
-            f'contact@{domain_guess}',
-            f'hello@{domain_guess}',
-        ]
+        if first and last and first != last:
+            patterns += [f'{first}.{last}@{domain}', f'{first}@{domain}',
+                         f'{first}{last}@{domain}', f'{first[0]}{last}@{domain}']
+        elif first:
+            patterns += [f'{first}@{domain}']
+    # Role addresses are only reasonable at the company's own domain
+    patterns += [f'info@{domain}', f'contact@{domain}', f'hello@{domain}']
 
-    # MX verification
-    verified = []
+    out = []
     for email in patterns:
-        if not email: continue
-        domain = email.split('@')[1]
-        try:
-            socket.gethostbyname(domain)  # basic existence check
-            verified.append({'email': email, 'verified': 'domain_exists', 'pattern': True})
-        except: pass
-    return verified
+        local = email.split('@')[0]
+        out.append({'email': email, 'verified': 'unverified_pattern',
+                    'pattern': True, 'is_role': local in ROLE_LOCALS})
+    return out
 
-def enrich_lead(lead_id, business_name, city, phone, niche, providers=None):
+def enrich_lead(lead_id, business_name, city, phone, niche, providers=None, website=''):
     """Smart enrichment with provider selection.
 
     providers: list of strategies in order. Options:
       - 'serper' (default)
       - 'oxylabs'
       - 'serper+oxylabs' (Serper first, Oxylabs only if no email)
-      - 'permutator' (free Hunter alternative)
+      - 'permutator' (free Hunter alternative — needs a real website domain)
+
+    website: the lead's own scraped URL; the permutator only ever generates
+    addresses at a domain the business actually controls.
     """
     if providers is None:
         strategy = CONFIG.get('enrichment_strategy', 'serper_then_oxylabs')
@@ -2042,29 +2108,49 @@ def enrich_lead(lead_id, business_name, city, phone, niche, providers=None):
             if r.get('email') and not result['email']:
                 result['email'] = r['email']
         elif prov == 'permutator':
-            r = enrich_with_email_permutator(business_name, result.get('owner_name', ''))
+            r = enrich_with_email_permutator(business_name, result.get('owner_name', ''), domain=website)
             result['sources_tried'].append('permutator')
             if r and not result['email']:
                 result['email'] = r[0]['email']
-                result['email_method'] = 'permutator_guess'
+                result['email_method'] = 'permutator_pattern'
     return result
 
 def save_enrichment(result):
     conn = db_conn(); cur = conn.cursor()
     try:
+        # Verify the email BEFORE storing it. Undeliverable addresses are
+        # dropped entirely — a bounced cold email costs sender reputation.
+        email_status, email_verified = 'unknown', False
+        stored_email = result.get('email') or ''
+        if stored_email:
+            vr = verify_email(stored_email)
+            email_status = vr['status']
+            email_verified = (vr['status'] == 'deliverable')
+            if vr['status'] == 'undeliverable':
+                print(f'[enrich] dropping undeliverable email for {result.get("lead_id")}: '
+                      f'{stored_email} — {vr["details"][:1]}')
+                stored_email = ''
+
         confidence = 0
-        if result.get('email'):        confidence += 40
+        if stored_email:
+            confidence += 40
+            if email_status == 'deliverable': confidence += 20   # SMTP-confirmed
+            elif email_status == 'risky':      confidence += 5
         if result.get('linkedin_url'): confidence += 30
         if result.get('facebook_url'): confidence += 15
         if result.get('owner_name'):   confidence += 5
+        confidence = min(confidence, 100)
 
-        if result.get('email') or result.get('linkedin_url') or result.get('facebook_url'):
+        if stored_email or result.get('linkedin_url') or result.get('facebook_url'):
             cur.execute("""
-                INSERT INTO contacts (lead_id, full_name, email, linkedin_url, source, confidence)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                INSERT INTO contacts (lead_id, full_name, email, linkedin_url, source, confidence,
+                                      email_status, email_checked_at, email_method, email_verified)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), %s, %s)
             """, (result['lead_id'], result.get('owner_name', '') or '',
-                  result.get('email', '') or '', result.get('linkedin_url', '') or '',
-                  '+'.join(result.get('sources_tried', [])), confidence))
+                  stored_email, result.get('linkedin_url', '') or '',
+                  '+'.join(result.get('sources_tried', [])), confidence,
+                  email_status if stored_email else None,
+                  result.get('email_method', ''), email_verified))
 
         cur.execute("UPDATE leads SET status='enriched' WHERE id=%s", (result['lead_id'],))
         conn.commit()
@@ -2079,7 +2165,7 @@ def enrich_all_discovered(provider_strategy='serper_then_oxylabs'):
     conn = db_conn(); cur = conn.cursor()
     # Target: status=discovered, regardless of has_website, with no useful contact info yet
     cur.execute("""
-        SELECT l.id, l.business_name, l.city, l.phone, l.niche
+        SELECT l.id, l.business_name, l.city, l.phone, l.niche, COALESCE(l.website,'') as website
         FROM leads l
         LEFT JOIN contacts c ON c.lead_id = l.id
         WHERE l.status = 'discovered' AND l.lead_type IS NULL
@@ -2102,9 +2188,9 @@ def enrich_all_discovered(provider_strategy='serper_then_oxylabs'):
 
     results = []
     for ld in leads:
-        lead_id, bname, city, phone, niche = ld
+        lead_id, bname, city, phone, niche, website = ld
         try:
-            r = enrich_lead(str(lead_id), bname, city, phone, niche, providers)
+            r = enrich_lead(str(lead_id), bname, city, phone, niche, providers, website=website)
             save_enrichment(r)
             results.append({
                 'business_name': bname, 'city': city,
@@ -2144,7 +2230,7 @@ def enrich_single_company(company_name, city='', niche='', website='', strategy=
         cur.close(); conn.close()
 
     providers = _STRATEGY_PROVIDERS.get(strategy, _STRATEGY_PROVIDERS['free_first'])
-    r = enrich_lead(lead_id, company_name, city, '', niche, providers)
+    r = enrich_lead(lead_id, company_name, city, '', niche, providers, website=website or '')
     save_enrichment(r)
     return {
         'lead_id': lead_id,
@@ -2197,7 +2283,7 @@ def reenrich_missing_emails(use_oxylabs=True):
     """Find emails for leads that have no email yet, using Oxylabs deep scrape."""
     conn = db_conn(); cur = conn.cursor()
     cur.execute("""
-        SELECT l.id, l.business_name, l.city, l.phone, l.niche
+        SELECT l.id, l.business_name, l.city, l.phone, l.niche, COALESCE(l.website,'') as website
         FROM leads l
         LEFT JOIN contacts c ON c.lead_id = l.id
         WHERE l.status IN ('enriched', 'ready') AND l.lead_type IS NULL
@@ -2207,19 +2293,33 @@ def reenrich_missing_emails(use_oxylabs=True):
     leads = cur.fetchall(); cur.close(); conn.close()
     results = []
     for ld in leads:
-        lead_id, bname, city, phone, niche = ld
+        lead_id, bname, city, phone, niche, website = ld
         try:
             if use_oxylabs and OXYLABS:
                 r = enrich_with_oxylabs(bname, city)
-                if r.get('email'):
+                email = (r.get('email') or '').strip()
+                if email:
+                    # Verify before saving — same gate as the main pipeline.
+                    vr = verify_email(email)
+                    if vr['status'] == 'undeliverable':
+                        results.append({'business_name': bname, 'email': email,
+                                        'email_status': 'undeliverable',
+                                        'note': 'dropped — failed verification'})
+                        time.sleep(0.3)
+                        continue
                     conn = db_conn(); cur = conn.cursor()
-                    cur.execute("UPDATE contacts SET email=%s WHERE lead_id=%s AND (email IS NULL OR email='')",
-                               (r['email'], lead_id))
+                    cur.execute("""UPDATE contacts SET email=%s, email_status=%s,
+                                   email_checked_at=NOW(), email_method='oxylabs_reenrich'
+                                   WHERE lead_id=%s AND (email IS NULL OR email='')""",
+                               (email, vr['status'], lead_id))
                     if cur.rowcount == 0:
-                        cur.execute("INSERT INTO contacts(lead_id, email, source, confidence) VALUES(%s, %s, 'oxylabs', 40)",
-                                   (lead_id, r['email']))
+                        cur.execute("""INSERT INTO contacts(lead_id, email, source, confidence,
+                                       email_status, email_checked_at, email_method)
+                                       VALUES(%s, %s, 'oxylabs', 40, %s, NOW(), 'oxylabs_reenrich')""",
+                                   (lead_id, email, vr['status']))
                     conn.commit(); cur.close(); conn.close()
-                    results.append({'business_name': bname, 'email': r['email']})
+                    results.append({'business_name': bname, 'email': email,
+                                    'email_status': vr['status']})
             time.sleep(0.3)
         except Exception as e:
             print(f'Reenrich error {bname}: {e}')
@@ -3488,19 +3588,28 @@ def find_emails(business_name='', domain='', first_name='', last_name=''):
     if domain:
         result['mx_valid'] = check_domain_has_mx(domain)
 
-        # Strategy 1: Scrape About/Contact pages (real emails)
+        # Strategy 1: Scrape About/Contact pages (real emails) — verify up to
+        # 3; each SMTP probe takes a few seconds so we keep the tool responsive
         real_emails = scrape_about_page_for_emails(domain)
-        for email in real_emails:
+        for email in real_emails[:3]:
+            # Verify each found address so the UI shows real deliverability
+            vr = verify_email(email)
             result['verified_emails'].append({
                 'email': email,
                 'source': 'about_page',
-                'confidence': 90
+                'confidence': 90 if vr['status'] == 'deliverable'
+                              else 75 if vr['status'] == 'risky' else 30,
+                'status': vr['status'],
+                'details': vr['details'][:2]
             })
 
-        # Strategy 2: Pattern generation
+        # Strategy 2: Pattern generation (unverified guesses — clearly labeled)
         if result['mx_valid']:
             patterns = generate_email_patterns(domain, first_name, last_name)
-            result['pattern_guesses'] = patterns
+            result['pattern_guesses'] = [
+                {'email': p, 'note': 'unverified pattern — verify before sending'}
+                if isinstance(p, str) else p for p in patterns
+            ]
 
     return result
 
@@ -3784,107 +3893,315 @@ def domain_intel(domain):
     return result
 
 # ──────────────────────────────────────────────────────────────
-#  M2: VERIFY EMAIL (SMTP-level)
+#  EMAIL VERIFICATION ENGINE (dnspython + SMTP RCPT probes)
+#  Status values stored on contacts.email_status:
+#    deliverable  — SMTP server confirmed the mailbox exists (not catch-all)
+#    risky        — catch-all domain, role account, or inconclusive server
+#    undeliverable— hard rejection: bad syntax/domain/MX or SMTP 550-class
+#    unknown      — could not check (network error, timeout, no dnspython)
 # ──────────────────────────────────────────────────────────────
-def verify_email(email):
-    """Verify if an email address looks deliverable.
-    Performs syntax, DNS, MX, and SMTP-level mailbox checks where possible.
-    """
+try:
+    import dns.resolver
+    _DNSPY_OK = True
+except ImportError:
+    _DNSPY_OK = False
+    print('WARNING: dnspython not installed — email verification is limited. Fix: pip install dnspython')
+
+VERIFY_HELO_DOMAIN = os.environ.get('VERIFY_HELO_DOMAIN', 'controvallc.com')
+VERIFY_MAIL_FROM   = os.environ.get('VERIFY_MAIL_FROM', f'verify@{VERIFY_HELO_DOMAIN}')
+EMAIL_STALE_DAYS   = 60   # re-verify stored emails older than this
+
+ROLE_LOCALS = {
+    'info', 'contact', 'hello', 'admin', 'sales', 'support', 'team', 'mail',
+    'office', 'help', 'enquiry', 'enquiries', 'inquiry', 'reception', 'booking',
+    'bookings', 'welcome', 'noreply', 'no-reply', 'service', 'accounts', 'billing',
+}
+DISPOSABLE_DOMAINS = {
+    'mailinator.com', 'tempmail.com', 'temp-mail.org', '10minutemail.com',
+    'guerrillamail.com', 'yopmail.com', 'throwawaymail.com', 'sharklasers.com',
+    'getnada.com', 'dispostable.com', 'trashmail.com', 'fakeinbox.com',
+    'maildrop.cc', 'mailnesia.com', 'mytemp.email', 'tempinbox.com',
+}
+FREE_EMAIL_PROVIDERS = {
+    'gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'icloud.com',
+    'aol.com', 'protonmail.com', 'proton.me', 'mail.com', 'gmx.com',
+    'live.com', 'msn.com', 'zoho.com', 'yandex.com', 'hey.com', 'fastmail.com',
+}
+
+def _mx_hosts(domain):
+    """Return [(priority, host)] via dnspython, falling back to [] on failure."""
+    if not _DNSPY_OK:
+        return []
+    try:
+        answers = dns.resolver.resolve(domain, 'MX', lifetime=5)
+        hosts = [(a.preference, str(a.exchange).rstrip('.')) for a in answers if str(a.exchange) != '.']
+        hosts.sort()
+        return hosts
+    except Exception:
+        return []
+
+def _smtp_probe(mx_host, emails):
+    """Open one SMTP conversation and RCPT-probe each address.
+    Returns a dict {email: (code, message)} — code None means the conversation
+    broke down (treat as inconclusive)."""
+    import smtplib
+    out = {}
+    smtp = smtplib.SMTP(timeout=10)
+    try:
+        smtp.connect(mx_host, 25)
+    except Exception as e:
+        return {a: (None, f'connect failed: {str(e)[:80]}') for a in emails}
+
+    try:
+        # Upgrade to TLS when offered; some builds need _host set explicitly
+        # for certificate validation, and a failed upgrade leaves the socket
+        # closed — reconnect plain in that case (the RCPT probe still works).
+        try:
+            smtp._host = mx_host
+            smtp.starttls()
+            smtp.ehlo(VERIFY_HELO_DOMAIN)
+        except Exception:
+            try: smtp.quit()
+            except Exception: pass
+            try: smtp.close()
+            except Exception: pass
+            try:
+                smtp = smtplib.SMTP(timeout=10)
+                smtp.connect(mx_host, 25)
+            except Exception as e:
+                return {a: (None, f'reconnect failed: {str(e)[:80]}') for a in emails}
+
+        smtp.helo(VERIFY_HELO_DOMAIN)
+        smtp.mail(VERIFY_MAIL_FROM)
+        for addr in emails:
+            try:
+                code, msg = smtp.rcpt(addr)
+                out[addr] = (code, msg.decode() if isinstance(msg, bytes) else str(msg))
+            except smtplib.SMTPServerDisconnected:
+                out[addr] = (None, 'server disconnected during RCPT')
+                break
+            except Exception as e:
+                out[addr] = (None, str(e)[:120])
+    finally:
+        try: smtp.quit()
+        except Exception: pass
+    return out
+
+def verify_email(email, probe_catch_all=True):
+    """Verify an email address: syntax → disposable → DNS/MX → SMTP RCPT → catch-all.
+    Never raises; always returns a result dict."""
     result = {
         'email': email,
-        'syntax_valid': bool(EMAIL_RE.match(email)),
+        'syntax_valid': bool(EMAIL_RE.match(email or '')),
         'domain_resolves': False,
         'has_mx': False,
-        'mailbox_exists': None,  # None=not checked, True/False=checked
-        'risk_level': 'unknown',
-        'details': []
+        'mailbox_exists': None,      # None=not checked, True/False=checked
+        'catch_all': None,
+        'is_role': False,
+        'is_free': False,
+        'is_disposable': False,
+        'status': 'unknown',         # deliverable | risky | undeliverable | unknown
+        'risk_level': 'unknown',     # low | medium | high (legacy field used by UI)
+        'details': [],
+        'checked_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
     }
     if not result['syntax_valid']:
+        result['status'] = 'undeliverable'
         result['risk_level'] = 'high'
         result['details'].append('Invalid email syntax')
         return result
 
-    domain = email.split('@')[1].lower()
+    local, domain = email.rsplit('@', 1)
+    local, domain = local.lower(), domain.lower()
+    result['is_role'] = local in ROLE_LOCALS or local.split('+')[0] in ROLE_LOCALS
+    result['is_free'] = domain in FREE_EMAIL_PROVIDERS
+    result['is_disposable'] = domain in DISPOSABLE_DOMAINS
+    if result['is_disposable']:
+        result['status'] = 'undeliverable'
+        result['risk_level'] = 'high'
+        result['details'].append('Disposable/temporary email domain')
+        return result
 
-    # Step 1: DNS check
-    import socket
+    # Step 1: domain resolves (A or MX)
     try:
         socket.gethostbyname(domain)
         result['domain_resolves'] = True
-    except:
-        result['risk_level'] = 'high'
-        result['details'].append('Domain does not resolve - invalid')
-        return result
+    except Exception:
+        # no A record — maybe MX-only domain
+        if _mx_hosts(domain):
+            result['domain_resolves'] = True
+        else:
+            result['status'] = 'undeliverable'
+            result['risk_level'] = 'high'
+            result['details'].append('Domain does not resolve')
+            return result
 
-    # Step 2: MX check
-    mx_hosts = []
-    try:
-        import subprocess
-        mx = subprocess.run(['dig', '+short', 'MX', domain], capture_output=True, text=True, timeout=5)
-        if mx.stdout.strip():
-            result['has_mx'] = True
-            # Parse MX records (format: "10 mx.example.com.")
-            for line in mx.stdout.strip().split('\n'):
-                parts = line.strip().split()
-                if len(parts) >= 2:
-                    mx_hosts.append((int(parts[0]) if parts[0].isdigit() else 10, parts[1].rstrip('.')))
-            mx_hosts.sort()  # Lowest priority first
-    except Exception as e:
-        result['details'].append(f'MX lookup failed: {e}')
-
-    # Free email provider detection
-    free_providers = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com',
-                     'icloud.com', 'aol.com', 'protonmail.com', 'mail.com', 'gmx.com',
-                     'live.com', 'msn.com', 'zoho.com', 'yandex.com']
-
-    is_free = domain in free_providers
-
-    # Step 3: SMTP-level RCPT TO check (the REAL verification)
+    # Step 2: MX records
+    mx_hosts = _mx_hosts(domain)
     if mx_hosts:
-        try:
-            import smtplib
-            mx_host = mx_hosts[0][1]
-            with smtplib.SMTP(timeout=10) as smtp:
-                smtp.connect(mx_host)
-                smtp.helo('controvallc.com')
-                smtp.mail('verify@controvallc.com')
-                code, msg = smtp.rcpt(email)
-                # 250 = mailbox exists, 550 = does not exist, others = unknown
-                if code == 250:
-                    result['mailbox_exists'] = True
-                    result['details'].append(f'SMTP {mx_host} accepted recipient (code 250)')
-                elif code in (550, 551, 553):
-                    result['mailbox_exists'] = False
-                    result['details'].append(f'SMTP {mx_host} rejected recipient (code {code}): {msg.decode() if isinstance(msg, bytes) else msg}')
-                else:
-                    result['details'].append(f'SMTP {mx_host} returned code {code} (inconclusive)')
-        except Exception as e:
-            result['details'].append(f'SMTP check failed: {str(e)[:100]}')
-
-    # Determine type and risk level
-    if is_free:
-        result['type'] = 'free_provider'
-        if result['mailbox_exists'] is True:
-            result['risk_level'] = 'low'
-        elif result['mailbox_exists'] is False:
-            result['risk_level'] = 'high'
-            result['details'].append('Free provider rejected this mailbox')
-        else:
-            result['risk_level'] = 'medium'
-            result['details'].append('Free providers (Gmail/Yahoo/etc) often hide mailbox existence')
-    elif result['has_mx']:
-        result['type'] = 'business'
-        if result['mailbox_exists'] is True:
-            result['risk_level'] = 'low'
-        elif result['mailbox_exists'] is False:
-            result['risk_level'] = 'high'
-        else:
-            result['risk_level'] = 'medium'
+        result['has_mx'] = True
+    elif result['is_free']:
+        result['status'] = 'risky'
+        result['risk_level'] = 'medium'
+        result['details'].append('Free provider with no reachable MX — cannot verify')
+        return result
     else:
-        result['type'] = 'unknown'
-        result['risk_level'] = 'high'
+        # No MX: some small hosts accept mail on their A record
+        try:
+            mx_hosts = [(10, domain)]
+            result['details'].append('No MX record — probing A record as fallback')
+        except Exception:
+            pass
 
+    # Step 3: SMTP mailbox probe
+    probed = _smtp_probe(mx_hosts[0][1], [email])
+    code, msg = probed.get(email, (None, 'no response'))
+
+    if code == 250:
+        result['mailbox_exists'] = True
+        # Step 4: catch-all detection — does the server also accept random mailboxes?
+        if probe_catch_all:
+            rand_local = 'zz-probe-' + _h_secrets.token_hex(4)
+            rand_addr = f'{rand_local}@{domain}'
+            r2 = _smtp_probe(mx_hosts[0][1], [rand_addr]).get(rand_addr, (None, ''))
+            if r2[0] == 250:
+                result['catch_all'] = True
+                result['status'] = 'risky'
+                result['risk_level'] = 'medium'
+                result['details'].append('Catch-all domain — server accepts any address; mailbox not confirmed')
+            else:
+                result['catch_all'] = False
+                result['status'] = 'deliverable'
+                result['risk_level'] = 'low'
+                result['details'].append(f'SMTP {mx_hosts[0][1]} confirmed mailbox (250)')
+        else:
+            result['catch_all'] = False
+            result['status'] = 'deliverable'
+            result['risk_level'] = 'low'
+            result['details'].append(f'SMTP {mx_hosts[0][1]} accepted recipient (250)')
+        if result['is_role']:
+            result['details'].append('Role account (info@/contact@…) — not a specific person')
+    elif code in (550, 551, 553):
+        result['mailbox_exists'] = False
+        result['status'] = 'undeliverable'
+        result['risk_level'] = 'high'
+        result['details'].append(f'SMTP rejected recipient (code {code}): {msg[:100]}')
+    elif code is not None:
+        # 4xx temporary failures, 251/252 forward/verify responses → inconclusive
+        result['details'].append(f'SMTP returned code {code} (inconclusive): {msg[:100]}')
+        result['status'] = 'risky' if code in (251, 252) else 'unknown'
+        result['risk_level'] = 'medium'
+    else:
+        result['details'].append(f'SMTP check failed: {msg[:100]}')
+        result['status'] = 'unknown'
+        result['risk_level'] = 'medium'
+
+    if result['is_free'] and result['status'] == 'unknown':
+        result['details'].append('Free providers often hide mailbox existence')
+
+    # Fallback: when our own SMTP probe is inconclusive and an external
+    # verifier is configured, let it settle the question (their servers
+    # aren't port-25-blocked and they handle greylisting).
+    if result['status'] == 'unknown':
+        mv = _millionverifier_check(email)
+        if mv:
+            result['status'] = mv['status']
+            result['risk_level'] = {'deliverable': 'low', 'risky': 'medium',
+                                    'undeliverable': 'high', 'unknown': 'medium'}[mv['status']]
+            result['details'].append(f"MillionVerifier: {mv['raw']}")
+            if mv['status'] == 'deliverable':
+                result['mailbox_exists'] = True
+            elif mv['status'] == 'undeliverable':
+                result['mailbox_exists'] = False
     return result
+
+def _millionverifier_check(email):
+    """Optional external verification via MillionVerifier (~$1/1000 checks).
+    Returns {'status': deliverable|risky|undeliverable|unknown, 'raw': code}
+    or None when unconfigured/unreachable. API result codes:
+    good / bad / catchall / disposable / unknown / invalid."""
+    if not MILLIONVERIFIER_KEY:
+        return None
+    try:
+        url = (f'https://api.millionverifier.com/api/v3/?api={MILLIONVERIFIER_KEY}'
+               f'&email={urllib.parse.quote_plus(email)}')
+        req = urllib.request.Request(url, headers={'User-Agent': 'controva-leadgen/1.0'})
+        data = json.loads(urllib.request.urlopen(req, timeout=20).read().decode())
+        raw = str(data.get('result', '')).lower()
+        mapping = {
+            'good':      'deliverable',
+            'bad':       'undeliverable',
+            'invalid':   'undeliverable',
+            'disposable':'undeliverable',
+            'catchall':  'risky',
+            'unknown':   'unknown',
+        }
+        status = mapping.get(raw, 'unknown')
+        return {'status': status, 'raw': raw}
+    except Exception as e:
+        print(f'[millionverifier] {email}: {e}')
+        return None
+
+# ──────────────────────────────────────────────────────────────
+#  M2b: CONTACT EMAIL GATING — no send without verification
+# ──────────────────────────────────────────────────────────────
+def ensure_email_verification_columns():
+    """Add email verification columns to contacts if missing (idempotent)."""
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("ALTER TABLE contacts ADD COLUMN IF NOT EXISTS email_status VARCHAR(20)")
+    cur.execute("ALTER TABLE contacts ADD COLUMN IF NOT EXISTS email_checked_at TIMESTAMPTZ")
+    cur.execute("ALTER TABLE contacts ADD COLUMN IF NOT EXISTS email_method VARCHAR(60)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_contacts_email_status ON contacts(email_status)")
+    conn.commit(); cur.close(); conn.close()
+
+def verify_and_store_contact_email(lead_id, email, source=''):
+    """Verify an email and write the outcome onto the lead's best contact row.
+    Returns the verification result dict."""
+    vr = verify_email(email)
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("""
+            UPDATE contacts SET email_status = %s, email_checked_at = NOW()
+            WHERE lead_id = %s AND LOWER(email) = LOWER(%s)
+        """, (vr['status'], lead_id, email))
+        conn.commit(); cur.close(); conn.close()
+    except Exception as e:
+        print(f'[verify] could not store status for {email}: {e}')
+    return vr
+
+def contact_email_for_sending(lead_id):
+    """Return (email, status) for the lead's best contact, re-verifying when
+    the stored status is missing or stale (older than EMAIL_STALE_DAYS).
+    Emails marked undeliverable are never returned."""
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("""
+        SELECT email, email_status, email_checked_at FROM contacts
+        WHERE lead_id = %s AND COALESCE(email,'') != ''
+        ORDER BY (email_status = 'deliverable') DESC, confidence DESC NULLS LAST, created_at DESC
+        LIMIT 1
+    """, (lead_id,))
+    row = cur.fetchone()
+    cur.close(); conn.close()
+    if not row:
+        return None, 'no_contact'
+
+    email, status, checked_at = row
+    if status == 'undeliverable':
+        return email, 'undeliverable'
+
+    stale = True
+    if status in ('deliverable', 'risky') and checked_at is not None:
+        age_days = (datetime_now() - checked_at.replace(tzinfo=None)).days
+        stale = age_days > EMAIL_STALE_DAYS
+
+    if status not in ('deliverable', 'risky') or stale:
+        vr = verify_and_store_contact_email(lead_id, email)
+        status = vr['status']
+    return email, status
+
+def datetime_now():
+    from datetime import datetime as _dt
+    return _dt.utcnow()
 
 # ──────────────────────────────────────────────────────────────
 #  M2: BACKLINK DISCOVERY (free via Serper)
@@ -3929,6 +4246,9 @@ INTENT_SOURCE_LABELS = {
     'twitter_x': 'Twitter / X', 'indeed': 'Indeed', 'wellfound': 'Wellfound',
     'generic_hiring': 'Generic web (hiring)', 'generic_looking': 'Generic web (looking)',
     'craigslist_gigs': 'Craigslist Gigs', 'upwork_jobs': 'Upwork job posts',
+    'craigslist_live': 'Craigslist (live)', 'reddit_live': 'Reddit (live)',
+    'freelancer_live': 'Freelancer.com (live)', 'guru_jobs': 'Guru.com jobs',
+    'remoteok': 'RemoteOK jobs',
     'fiverr_requests': 'Fiverr buyer requests', 'facebook_groups': 'Facebook Groups',
     'linkedin_profile': 'LinkedIn /in/', 'github': 'GitHub',
     'stackoverflow': 'Stack Overflow', 'upwork_profiles': 'Upwork freelancers',
@@ -3960,6 +4280,8 @@ def intent_search_dorks(query, direction, location=''):
             ('wellfound',        f'(site:wellfound.com OR site:angel.co) "{q}"'),
             ('craigslist_gigs',  f'site:craigslist.org "{q}" gigs{loc}'),
             ('upwork_jobs',      f'site:upwork.com/jobs "{q}"'),
+            ('guru_jobs',        f'site:guru.com "{q}"'),
+            ('remoteok',         f'site:remoteok.com "{q}"'),
             ('fiverr_requests',  f'site:fiverr.com "buyer request" "{q}"'),
             ('facebook_groups',  f'site:facebook.com/groups "looking for {q}"{loc}'),
             ('generic_hiring',   f'"we are hiring" "{q}"{loc}'),
@@ -4091,6 +4413,224 @@ Mark active=false if: it's a job post (looking for not offering), generic listic
         print(f'Batch classify parse error: {e}, falling back to heuristic')
         return [_intent_heuristic_classify(it, query, direction) for it in batch]
 
+
+# ──────────────────────────────────────────────────────────────
+#  LIVE INTENT CONNECTORS — direct, real-time "someone is hiring" sources
+#  (Craigslist public pages + Reddit OAuth API + Freelancer.com API).
+#  Each returns Serper-shaped candidates so they flow through the same
+#  classify/store pipeline as the Google-dork results.
+# ──────────────────────────────────────────────────────────────
+try:
+    from html import unescape as html_unescape
+except ImportError:  # py2-style fallback (never expected)
+    import html.parser
+    html_unescape = html.parser.HTMLParser().unescape
+
+CL_DEFAULT_CITIES = ['newyork', 'losangeles', 'chicago', 'houston', 'phoenix',
+                     'philadelphia', 'sfbay', 'seattle', 'atlanta', 'miami',
+                     'dallas', 'boston', 'denver', 'washingtondc']
+
+def _recency_from_ts(ts):
+    """Unix timestamp -> coarse recency label for the classifier."""
+    try:
+        days = (time.time() - float(ts)) / 86400.0
+        if days < 1: return 'today'
+        if days < 2: return 'yesterday'
+        if days < 8: return 'this week'
+        if days < 32: return 'this month'
+        return 'older'
+    except Exception:
+        return 'unknown'
+
+CL_FETCH_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+               '(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36')
+
+def _cl_fetch_results(city, q):
+    """One Craigslist search page fetch with a single retry. Returns row HTML
+    strings. Craigslist soft-throttles repeated hits by serving an empty
+    JS-only shell — those come back as [] and we simply move on."""
+    url = f'https://{city}.craigslist.org/search/ggg?query={q}'
+    for attempt in (1, 2):
+        try:
+            req = urllib.request.Request(url, headers={
+                'User-Agent': CL_FETCH_UA,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9'})
+            html = urllib.request.urlopen(req, timeout=15).read().decode('utf-8', 'ignore')
+            rows = re.findall(r'<li class="cl-static-search-result"[^>]*>(.*?)</li>', html, re.S)
+            if rows or attempt == 2:
+                return rows
+            time.sleep(2.5)   # empty shell → probably throttled; one retry
+        except Exception as e:
+            if attempt == 2:
+                print(f'[craigslist_live] {city}: {e}')
+                return []
+            time.sleep(2.5)
+    return []
+
+def craigslist_live_intent(query, cities=None, per_city_limit=6, max_results=12):
+    """Fetch Craigslist gigs search pages directly (free, no API key).
+    Craigslist killed native RSS; these server-rendered result pages are
+    the practical replacement. Results are cached for 90 minutes so repeated
+    intent searches never hammer them (they soft-throttle aggressively)."""
+    hits = []
+    city_list = (cities or CL_DEFAULT_CITIES)[:6]
+    q = urllib.parse.quote_plus(query)
+    cache_key = {'q': query.lower(), 'cities': city_list}
+
+    # Serve from cache when possible (DB may be down locally — that's fine)
+    try:
+        cached = get_cached_research('cl_live', cache_key, max_age_hours=1.5)
+        if cached is not None:
+            return cached
+    except Exception:
+        pass
+
+    for city in city_list:
+        try:
+            rows = _cl_fetch_results(city, q)
+            for r in rows[:per_city_limit]:
+                m = re.search(r'href="([^"]+)"[^>]*>(.*?)</a>', r, re.S)
+                if not m: continue
+                link, title = m.group(1), re.sub(r'<[^>]+>', ' ', m.group(2))
+                title = re.sub(r'\s+', ' ', html_unescape(title)).strip()
+                ts = re.search(r'datetime="([^"]+)"', r)
+                rec = 'unknown'
+                if ts:
+                    try:
+                        rec = _recency_from_ts(time.mktime(time.strptime(ts.group(1)[:10], '%Y-%m-%d')))
+                    except Exception:
+                        pass
+                hits.append({'source': 'craigslist_live', 'url': link,
+                             'title': f'[Craigslist {city}] {title}',
+                             'snippet': f'Craigslist gig posting in {city}: {title}',
+                             'posted_recency': rec})
+                if len(hits) >= max_results: break
+            time.sleep(1.2)   # be polite between cities
+        except Exception as e:
+            print(f'[craigslist_live] {city}: {e}')
+        if len(hits) >= max_results: break
+
+    # Only cache non-empty result sets — an empty fetch usually means
+    # throttling, and caching that would hide good data for 90 minutes.
+    try:
+        if hits:
+            save_cached_research('cl_live', cache_key, hits)
+    except Exception:
+        pass
+    return hits
+
+_REDDIT_TOKEN = {'token': None, 'expires': 0}
+
+def _reddit_oauth_token():
+    """Userless read-only OAuth token (free script app)."""
+    if not (REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET):
+        return None
+    if _REDDIT_TOKEN['token'] and time.time() < _REDDIT_TOKEN['expires'] - 60:
+        return _REDDIT_TOKEN['token']
+    try:
+        import base64
+        basic = base64.b64encode(f'{REDDIT_CLIENT_ID}:{REDDIT_CLIENT_SECRET}'.encode()).decode()
+        req = urllib.request.Request(
+            'https://www.reddit.com/api/v1/access_token',
+            data=b'grant_type=client_credentials', method='POST',
+            headers={'Authorization': f'Basic {basic}',
+                     'Content-Type': 'application/x-www-form-urlencoded',
+                     'User-Agent': 'controva-leadgen/1.0'})
+        data = json.loads(urllib.request.urlopen(req, timeout=15).read().decode())
+        _REDDIT_TOKEN['token'] = data['access_token']
+        _REDDIT_TOKEN['expires'] = time.time() + int(data.get('expires_in', 3600))
+        return _REDDIT_TOKEN['token']
+    except Exception as e:
+        print(f'[reddit_live] oauth failed: {e}')
+        return None
+
+def reddit_live_intent(query, limit=10):
+    """Live [Hiring] posts from r/forhire + r/hiring via the free Reddit API.
+    Needs a script app (reddit.com/prefs/apps) — set reddit_client_id /
+    reddit_client_secret in Settings. Skips silently when unconfigured."""
+    token = _reddit_oauth_token()
+    if not token:
+        return []
+    hits = []
+    words = [w.lower() for w in query.split() if len(w) > 2]
+    try:
+        req = urllib.request.Request(
+            'https://oauth.reddit.com/r/forhire,hiring,new?sort=new&limit=75&raw_json=1',
+            headers={'Authorization': f'Bearer {token}',
+                     'User-Agent': 'controva-leadgen/1.0'})
+        data = json.loads(urllib.request.urlopen(req, timeout=15).read().decode())
+        for child in data.get('data', {}).get('children', []):
+            d = child.get('data', {})
+            flair = (d.get('link_flairtext') or '').lower()
+            title = d.get('title') or ''
+            if 'hiring' not in flair and 'hiring' not in title.lower():
+                continue   # demand side only — [For Hire] posts are competitors
+            text = (title + ' ' + (d.get('selftext') or ''))[:500].lower()
+            if words and not any(w in text for w in words):
+                continue
+            hits.append({'source': 'reddit_live',
+                         'url': 'https://www.reddit.com' + d.get('permalink', ''),
+                         'title': f"[Reddit {flair or 'Hiring'}] {title[:100]}",
+                         'snippet': (d.get('selftext') or title)[:400],
+                         'posted_recency': _recency_from_ts(d.get('created_utc', 0))})
+            if len(hits) >= limit: break
+    except Exception as e:
+        print(f'[reddit_live] search failed: {e}')
+    return hits
+
+def freelancer_live_intent(query, limit=10):
+    """Active projects on Freelancer.com via their official free API.
+    Needs freelancer_api_key in Settings (developers.freelancer.com)."""
+    if not FREELANCER_API_KEY:
+        return []
+    hits = []
+    try:
+        url = ('https://www.freelancer.com/api/projects/0.1/projects/active/'
+               f'?query={urllib.parse.quote_plus(query)}&limit={limit}&compact=true')
+        req = urllib.request.Request(url, headers={
+            'freelancer-oauth-v1': FREELANCER_API_KEY,
+            'User-Agent': 'controva-leadgen/1.0'})
+        data = json.loads(urllib.request.urlopen(req, timeout=15).read().decode())
+        for p in (data.get('result') or {}).get('projects', [])[:limit]:
+            title = p.get('title') or ''
+            budget = (p.get('budget') or {})
+            bids = p.get('bid_count', 0)
+            snippet = (p.get('preview_description') or '')[:350]
+            if budget.get('minimum') or budget.get('maximum'):
+                cur = (budget.get('currency') or {}).get('code', 'USD')
+                snippet += f" Budget: {cur} {budget.get('minimum','?')}-{budget.get('maximum','?')}."
+            snippet += f' {bids} bids so far.'
+            submitted = p.get('time_submitted')
+            rec = 'unknown'
+            if submitted:
+                try:
+                    rec = _recency_from_ts(time.mktime(time.strptime(str(submitted)[:10], '%Y-%m-%d')))
+                except Exception:
+                    pass
+            hits.append({'source': 'freelancer_live',
+                         'url': f"https://www.freelancer.com/projects/{p.get('seo_url','')}",
+                         'title': f'[Freelancer.com] {title[:100]}',
+                         'snippet': snippet,
+                         'posted_recency': rec})
+    except Exception as e:
+        print(f'[freelancer_live] failed: {e}')
+    return hits
+
+def live_intent_candidates(query, direction='demand'):
+    """Run all live connectors for demand-side intent. Returns Serper-shaped
+    candidate dicts; failures degrade to fewer sources, never raise."""
+    if direction != 'demand':
+        return []   # live sources only cover "someone is hiring"
+    out = []
+    try: out += craigslist_live_intent(query)
+    except Exception as e: print(f'[live] craigslist: {e}')
+    try: out += reddit_live_intent(query)
+    except Exception as e: print(f'[live] reddit: {e}')
+    try: out += freelancer_live_intent(query)
+    except Exception as e: print(f'[live] freelancer: {e}')
+    return out
+
 def intent_search(query, direction='demand', location='', recency_days=30,
                   min_confidence=55, per_source_limit=3, max_results=30):
     """Run bidirectional intent search and persist hits as leads."""
@@ -4117,6 +4657,19 @@ def intent_search(query, direction='demand', location='', recency_days=30,
                                    'snippet': (item.get('snippet') or '')[:400]})
         except Exception as e:
             print(f'Intent dork error ({source}): {e}')
+
+    # Live direct sources (Craigslist pages, Reddit API, Freelancer API) —
+    # fresher than Google's index and free of Serper credit spend.
+    try:
+        for item in live_intent_candidates(query, direction):
+            url = (item.get('url') or '').split('?')[0]
+            if not url or url in seen_urls: continue
+            seen_urls.add(url)
+            candidates.append({'source': item['source'], 'url': url,
+                               'title': item.get('title', ''),
+                               'snippet': (item.get('snippet') or '')[:400]})
+    except Exception as e:
+        print(f'Live intent sources error: {e}')
 
     # Batch classify in groups of 15 to keep within Gemini rate limits
     classifications = []
@@ -4166,13 +4719,20 @@ def intent_search(query, direction='demand', location='', recency_days=30,
                   int(cls.get('confidence') or 0), role, loc_hint, contact,
                   json.dumps(cls)))
 
-            # If contact_hint looks like an email, save to contacts table too
+            # If contact_hint looks like an email, verify it before saving —
+            # same deliverability gate as the rest of the pipeline.
             if contact and EMAIL_RE.match(contact.strip()):
-                cur.execute("""
-                    INSERT INTO contacts(lead_id, full_name, email, source, confidence)
-                    VALUES(%s, %s, %s, 'intent_classifier', %s)
-                """, (lead_id, lead_name[:400], contact.strip()[:500],
-                      int(cls.get('confidence') or 0)))
+                contact_email = contact.strip()[:500]
+                vr = verify_email(contact_email)
+                if vr['status'] != 'undeliverable':
+                    cur.execute("""
+                        INSERT INTO contacts(lead_id, full_name, email, source, confidence,
+                                             email_status, email_checked_at, email_method)
+                        VALUES(%s, %s, %s, 'intent_classifier', %s, %s, NOW(), 'intent_hint')
+                    """, (lead_id, lead_name[:400], contact_email,
+                          int(cls.get('confidence') or 0), vr['status']))
+                else:
+                    contact = ''   # keep the hint out of saved/returned data
 
             conf = int(cls.get('confidence') or 0)
             saved.append({
@@ -4298,6 +4858,7 @@ def get_leads():
                COALESCE(l.score_reason,'') as score_reason, l.status,
                COALESCE(c.full_name,'') as owner_name,
                COALESCE(c.email,'') as owner_email,
+               COALESCE(c.email_status,'') as email_status,
                COALESCE(c.linkedin_url,'') as linkedin_url,
                COALESCE(c.job_title,'') as job_title,
                COALESCE((SELECT content FROM assets WHERE lead_id=l.id AND asset_type='mockup_image' LIMIT 1),'') as mockup_url,
@@ -4311,7 +4872,7 @@ def get_leads():
                COALESCE(l.search_batch_id,'') as search_batch_id
         FROM leads l
         LEFT JOIN LATERAL (
-            SELECT full_name, email, linkedin_url, job_title FROM contacts
+            SELECT full_name, email, email_status, linkedin_url, job_title FROM contacts
             WHERE lead_id = l.id
             ORDER BY (COALESCE(email,'') != '') DESC, confidence DESC NULLS LAST, created_at DESC
             LIMIT 1
@@ -4472,7 +5033,7 @@ def run_enrich_bg(job_id, provider_strategy='serper_then_oxylabs'):
         JOBS[job_id] = {'status': 'running', 'progress': 0, 'log': ['Checking which leads need enriching...'], 'step': 'Enrich'}
         conn = db_conn(); cur = conn.cursor()
         cur.execute("""
-            SELECT l.id, l.business_name, l.city, l.phone, l.niche
+            SELECT l.id, l.business_name, l.city, l.phone, l.niche, COALESCE(l.website,'') as website
             FROM leads l
             LEFT JOIN contacts c ON c.lead_id = l.id
             WHERE l.status = 'discovered' AND l.lead_type IS NULL
@@ -4504,9 +5065,9 @@ def run_enrich_bg(job_id, provider_strategy='serper_then_oxylabs'):
 
         done = 0; found_email = 0; found_linkedin = 0
         for ld in leads:
-            lead_id, bname, city, phone, niche = ld
+            lead_id, bname, city, phone, niche, website = ld
             try:
-                r = enrich_lead(str(lead_id), bname, city, phone, niche, providers)
+                r = enrich_lead(str(lead_id), bname, city, phone, niche, providers, website=website)
                 save_enrichment(r)
                 done += 1
                 got_email = bool(r.get('email'))
@@ -4531,6 +5092,50 @@ def run_enrich_bg(job_id, provider_strategy='serper_then_oxylabs'):
         JOBS[job_id]['error'] = str(e)
         JOBS[job_id]['log'].append(f'Error: {e}')
 
+def run_verify_emails_bg(job_id, only_stale=False):
+    """Verify stored contact emails in the background — targets contacts with
+    no status yet (legacy rows) or a status older than EMAIL_STALE_DAYS."""
+    try:
+        JOBS[job_id] = {'status': 'running', 'progress': 0,
+                        'log': ['Finding contacts to verify…'], 'step': 'Verify Emails'}
+        conn = db_conn(); cur = conn.cursor()
+        if only_stale:
+            cur.execute("""
+                SELECT c.lead_id::text, c.email FROM contacts c
+                WHERE COALESCE(c.email,'') != ''
+                  AND (c.email_status IS NULL OR c.email_status = 'unknown'
+                       OR c.email_checked_at < NOW() - INTERVAL '60 days')
+                ORDER BY c.created_at ASC LIMIT 300""")
+        else:
+            cur.execute("""
+                SELECT c.lead_id::text, c.email FROM contacts c
+                WHERE COALESCE(c.email,'') != ''
+                  AND (c.email_status IS NULL OR c.email_status = 'unknown')
+                ORDER BY c.created_at ASC LIMIT 300""")
+        rows = cur.fetchall(); cur.close(); conn.close()
+        total = len(rows)
+        if total == 0:
+            JOBS[job_id]['log'].append('Nothing to verify — all emails already have a status.')
+            JOBS[job_id]['status'] = 'completed'; JOBS[job_id]['progress'] = 100
+            return
+
+        stats = {'deliverable': 0, 'risky': 0, 'undeliverable': 0, 'unknown': 0}
+        for i, (lead_id, email) in enumerate(rows):
+            vr = verify_and_store_contact_email(lead_id, email)
+            stats[vr['status']] = stats.get(vr['status'], 0) + 1
+            JOBS[job_id]['progress'] = int((i + 1) / total * 100)
+            JOBS[job_id]['log'] = (JOBS[job_id]['log'][-40:]
+                                   + [f"[{i+1}/{total}] {email} → {vr['status']}"])
+            time.sleep(0.4)   # be polite to receiving mail servers
+        JOBS[job_id]['log'].append(
+            f"Done — deliverable: {stats['deliverable']}, risky: {stats['risky']}, "
+            f"undeliverable: {stats['undeliverable']}, unknown: {stats['unknown']}")
+        JOBS[job_id]['status'] = 'completed'; JOBS[job_id]['progress'] = 100
+    except Exception as e:
+        JOBS[job_id]['status'] = 'failed'
+        JOBS[job_id]['error'] = str(e)
+        JOBS[job_id]['log'].append(f'Error: {e}')
+
 def run_reenrich_bg(job_id, provider_strategy='oxylabs_only'):
     """Re-enrich leads that have no email/contact yet, with per-lead progress.
     Targets all statuses except discovered/rejected — any lead whose enrichment
@@ -4540,7 +5145,7 @@ def run_reenrich_bg(job_id, provider_strategy='oxylabs_only'):
                         'log': ['Finding leads with no contact info…'], 'step': 'Re-Enrich'}
         conn = db_conn(); cur = conn.cursor()
         cur.execute("""
-            SELECT l.id, l.business_name, l.city, l.phone, l.niche
+            SELECT l.id, l.business_name, l.city, l.phone, l.niche, COALESCE(l.website,'') as website
             FROM leads l
             LEFT JOIN contacts c ON c.lead_id = l.id
             WHERE l.status NOT IN ('discovered', 'rejected') AND l.lead_type IS NULL
@@ -4574,9 +5179,9 @@ def run_reenrich_bg(job_id, provider_strategy='oxylabs_only'):
         for ld in leads:
             if JOBS[job_id].get('cancelled'):
                 break
-            lead_id, bname, city, phone, niche = ld
+            lead_id, bname, city, phone, niche, website = ld
             try:
-                r = enrich_lead(str(lead_id), bname, city, phone, niche, providers)
+                r = enrich_lead(str(lead_id), bname, city, phone, niche, providers, website=website)
                 save_enrichment(r)
                 done += 1
                 got_email = bool(r.get('email'))
@@ -4728,52 +5333,505 @@ import secrets as _h_secrets
 # ──────────────────────────────────────────────────────────────
 # Users stored as: username -> bcrypt-like hash
 # In production replace with bcrypt; for now we use sha256+salt
-AUTH_USERS = {
-    "admin": {"salt": "controva2026salt", "hash": _h_hashlib.sha256(("ChangeMe_2026!" + "controva2026salt").encode()).hexdigest()}
-}
-ACTIVE_TOKENS = {}  # token -> {user, expires_at}
+# ──────────────────────────────────────────────────────────────
+#  AUTH — DB-backed users, persistent sessions, brute-force lockout
+# ──────────────────────────────────────────────────────────────
+AUTH_SESSION_DAYS = 7
+AUTH_MAX_FAILURES = 5          # failed logins allowed …
+AUTH_LOCKOUT_SECONDS = 900     # … per 15 minutes before lockout
+
+_login_failures = {}           # key -> [failure timestamps]
+_login_locks = {}              # key -> locked-until timestamp
+
+def auth_lock_key(username, ip):
+    return f'{(username or "").lower()}|{ip or "unknown"}'
+
+def auth_is_locked(username, ip):
+    until = _login_locks.get(auth_lock_key(username, ip))
+    if until and until > time.time():
+        return int(until - time.time())
+    return 0
+
+def auth_record_failure(username, ip):
+    key = auth_lock_key(username, ip)
+    now = time.time()
+    recent = [t for t in _login_failures.get(key, []) if now - t < AUTH_LOCKOUT_SECONDS]
+    recent.append(now)
+    _login_failures[key] = recent
+    if len(recent) >= AUTH_MAX_FAILURES:
+        _login_locks[key] = now + AUTH_LOCKOUT_SECONDS
+        _login_failures[key] = []
+    return AUTH_MAX_FAILURES - len(recent)
+
+def auth_clear_failures(username, ip):
+    _login_failures.pop(auth_lock_key(username, ip), None)
+    _login_locks.pop(auth_lock_key(username, ip), None)
+
+def ensure_auth_tables():
+    """Create auth tables and seed the admin user on first boot."""
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS auth_users (
+            username   VARCHAR(100) PRIMARY KEY,
+            salt       VARCHAR(64) NOT NULL,
+            pwhash     VARCHAR(128) NOT NULL,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )""")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS auth_sessions (
+            token      VARCHAR(128) PRIMARY KEY,
+            username   VARCHAR(100) NOT NULL,
+            expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )""")
+    cur.execute("SELECT COUNT(*) FROM auth_users")
+    if cur.fetchone()[0] == 0:
+        # First boot: seed admin from env/config if provided; otherwise
+        # generate a random one and print it ONCE to the server log
+        # (view with: journalctl -u leadgen-api | head -50).
+        seed_pw = os.environ.get('ADMIN_PASSWORD', '')
+        if not seed_pw:
+            try:
+                with open(CONFIG_FILE) as f:
+                    seed_pw = json.load(f).get('admin_password', '')
+            except Exception:
+                seed_pw = ''
+        generated = False
+        if not seed_pw:
+            seed_pw = _h_secrets.token_urlsafe(12)
+            generated = True
+        salt = _h_secrets.token_hex(16)
+        cur.execute("INSERT INTO auth_users (username, salt, pwhash) VALUES (%s, %s, %s)",
+                    ('admin', salt, auth_hash(seed_pw, salt)))
+        if generated:
+            print('=' * 64)
+            print('FIRST BOOT — admin login generated:')
+            print(f'  username: admin')
+            print(f'  password: {seed_pw}')
+            print('Save it now, then change it: POST /auth/change-password')
+            print('(this is shown only once — recover by deleting the')
+            print(' auth_users table and restarting)')
+            print('=' * 64)
+        else:
+            print('Admin user seeded from ADMIN_PASSWORD / config.json')
+    conn.commit(); cur.close(); conn.close()
 
 def auth_hash(password, salt):
     return _h_hashlib.sha256((password + salt).encode()).hexdigest()
 
-def auth_login(username, password):
-    user = AUTH_USERS.get(username)
-    if not user: return None
-    if auth_hash(password, user["salt"]) != user["hash"]: return None
-    token = _h_secrets.token_urlsafe(32)
-    ACTIVE_TOKENS[token] = {"user": username, "expires_at": time.time() + 86400 * 7}
+def auth_login(username, password, ip=''):
+    if auth_is_locked(username, ip):
+        return None
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("SELECT salt, pwhash FROM auth_users WHERE username = %s", (username,))
+        row = cur.fetchone()
+    except Exception:
+        return None
+    if not row or auth_hash(password, row[0]) != row[1]:
+        try: cur.close(); conn.close()
+        except Exception: pass
+        auth_record_failure(username, ip)
+        return None
+    token = _h_secrets.token_urlsafe(48)
+    try:
+        cur.execute("INSERT INTO auth_sessions (token, username, expires_at) VALUES (%s, %s, NOW() + INTERVAL '%s days')",
+                    (token, username, AUTH_SESSION_DAYS))
+        conn.commit(); cur.close(); conn.close()
+    except Exception:
+        pass
+    auth_clear_failures(username, ip)
     return token
 
 def auth_check(token):
-    if not token: return False
-    entry = ACTIVE_TOKENS.get(token)
-    if not entry: return False
-    if entry["expires_at"] < time.time():
-        del ACTIVE_TOKENS[token]
-        return False
-    return entry["user"]
+    if not token: return None
+    if SERVICE_TOKEN and token == SERVICE_TOKEN:
+        return 'service'          # internal service account (controva_api)
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("SELECT username FROM auth_sessions WHERE token = %s AND expires_at > NOW()", (token,))
+        row = cur.fetchone()
+        cur.close(); conn.close()
+        return row[0] if row else None
+    except Exception:
+        return None
+
+def auth_logout(token):
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("DELETE FROM auth_sessions WHERE token = %s", (token,))
+        conn.commit(); cur.close(); conn.close()
+    except Exception:
+        pass
+    return True
 
 def auth_change_password(username, old_password, new_password):
-    user = AUTH_USERS.get(username)
-    if not user: return False
-    if auth_hash(old_password, user["salt"]) != user["hash"]: return False
-    new_salt = _h_secrets.token_hex(8)
-    AUTH_USERS[username] = {"salt": new_salt, "hash": auth_hash(new_password, new_salt)}
-    return True
+    if len(new_password or '') < 10:
+        return False, 'New password must be at least 10 characters'
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("SELECT salt, pwhash FROM auth_users WHERE username = %s", (username,))
+        row = cur.fetchone()
+        if not row or auth_hash(old_password, row[0]) != row[1]:
+            cur.close(); conn.close()
+            return False, 'Current password is incorrect'
+        new_salt = _h_secrets.token_hex(16)
+        cur.execute("UPDATE auth_users SET salt = %s, pwhash = %s WHERE username = %s",
+                    (new_salt, auth_hash(new_password, new_salt), username))
+        # Invalidate all existing sessions — force re-login everywhere
+        cur.execute("DELETE FROM auth_sessions WHERE username = %s", (username,))
+        conn.commit(); cur.close(); conn.close()
+        return True, 'Password updated. All sessions revoked — log in again.'
+    except Exception as e:
+        return False, str(e)
+
+def ensure_service_token():
+    """Generate and persist the internal service token on first boot."""
+    global SERVICE_TOKEN
+    if SERVICE_TOKEN:
+        return SERVICE_TOKEN
+    SERVICE_TOKEN = _h_secrets.token_urlsafe(32)
+    try:
+        data = {}
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE) as f:
+                data = json.load(f)
+        data['service_token'] = SERVICE_TOKEN
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(data, f, indent=2)
+        print(f'Service token generated and saved to {CONFIG_FILE}')
+    except Exception as e:
+        print(f'Warning: could not persist service token: {e}')
+    return SERVICE_TOKEN
+
+# ──────────────────────────────────────────────────────────────
+#  M3: OUTREACH COMPLIANCE — suppression, throttle, unsubscribe
+# ──────────────────────────────────────────────────────────────
+def ensure_m3_tables():
+    """Unsubscribe/suppression table + per-lead unsubscribe tokens (idempotent)."""
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS unsub_token VARCHAR(64)")
+    cur.execute("""CREATE UNIQUE INDEX IF NOT EXISTS idx_leads_unsub_token
+                   ON leads(unsub_token) WHERE unsub_token IS NOT NULL""")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS unsubscribes (
+            id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+            email           VARCHAR(500),
+            email_domain    VARCHAR(300),
+            lead_id         UUID REFERENCES leads(id) ON DELETE SET NULL,
+            type            VARCHAR(30) NOT NULL DEFAULT 'unsubscribe',
+            reason          TEXT,
+            created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_unsub_email  ON unsubscribes(email)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_unsub_domain ON unsubscribes(email_domain)")
+    conn.commit(); cur.close(); conn.close()
+
+def add_suppression(email, stype='unsubscribe', lead_id=None, reason='', domain_wide=False):
+    """Record a suppressed address (or whole domain). Idempotent per (email/domain, type)."""
+    email = (email or '').strip().lower()
+    if not email and not domain_wide: return
+    domain = email.rsplit('@', 1)[1] if '@' in email else ''
+    conn = db_conn(); cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT 1 FROM unsubscribes
+            WHERE (email = %s OR (email IS NULL AND email_domain = %s AND %s))
+              AND type = %s LIMIT 1
+        """, (email or None, domain, 'true' if domain_wide else 'false', stype))
+        if cur.fetchone():
+            conn.commit(); cur.close(); conn.close(); return
+        cur.execute("""
+            INSERT INTO unsubscribes (email, email_domain, lead_id, type, reason)
+            VALUES (%s, %s, %s, %s, %s)
+        """, (email if not domain_wide else None,
+              domain or None, lead_id, stype, reason))
+        conn.commit()
+    except Exception as e:
+        print(f'[suppression] add failed: {e}'); conn.rollback()
+    finally:
+        cur.close(); conn.close()
+
+def is_suppressed(email):
+    """True when the address or its whole domain is suppressed for any reason."""
+    email = (email or '').strip().lower()
+    if not email or '@' not in email: return False
+    domain = email.rsplit('@', 1)[1]
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("""SELECT 1 FROM unsubscribes
+                       WHERE email = %s OR (email_domain = %s AND email IS NULL) LIMIT 1""",
+                    (email, domain))
+        row = cur.fetchone(); cur.close(); conn.close()
+        return bool(row)
+    except Exception:
+        return False   # DB down → don't block sends on a broken check
+
+def get_or_create_unsub_token(lead_id, cur=None):
+    """Stable random token used in the unsubscribe URL for this lead."""
+    own_conn = cur is None
+    if own_conn:
+        conn = db_conn(); cur = conn.cursor()
+    cur.execute("SELECT unsub_token FROM leads WHERE id = %s", (lead_id,))
+    row = cur.fetchone()
+    if row and row[0]:
+        if own_conn: cur.close(); conn.close()
+        return row[0]
+    token = _h_secrets.token_urlsafe(24)
+    cur.execute("UPDATE leads SET unsub_token = %s WHERE id = %s", (token, lead_id))
+    if own_conn:
+        conn.commit(); cur.close(); conn.close()
+    return token
+
+def build_unsub_url(token):
+    base = (PUBLIC_BASE_URL or '').rstrip('/')
+    if base:
+        return f'{base}/u/{token}'
+    # No public base URL configured — fall back to a reply-to-unsubscribe
+    # instruction (still CAN-SPAM compliant as a mechanism).
+    return None
+
+def send_throttle_status():
+    """Return (ok, reason) against the hourly/daily send caps."""
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM outreach_log WHERE sent_at > NOW() - INTERVAL '1 hour'")
+        hourly = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM outreach_log WHERE sent_at > NOW() - INTERVAL '24 hours'")
+        daily = cur.fetchone()[0]
+        cur.close(); conn.close()
+        h_limit = int(CONFIG.get('send_hourly_limit', 30))
+        d_limit = int(CONFIG.get('send_daily_limit', 100))
+        if daily >= d_limit:
+            return False, f'Daily send cap reached ({daily}/{d_limit}) — resume after the 24h window resets'
+        if hourly >= h_limit:
+            return False, f'Hourly send cap reached ({hourly}/{h_limit}) — wait before sending more'
+        return True, f'{hourly}/{h_limit} hourly, {daily}/{d_limit} daily'
+    except Exception:
+        return True, 'throttle check unavailable'
 
 # ──────────────────────────────────────────────────────────────
 #  M4: EMAIL SENDING via RESEND.COM
 # ──────────────────────────────────────────────────────────────
-RESEND_KEY = "re_gaFiXEZr_KYM9sRWj4Bsfx3UXpceXnzzx"
-FROM_EMAIL = "Support@controvallc.com"
-FROM_NAME = "Controva LLC"
+RESEND_KEY = os.environ.get('RESEND_KEY', '')
+FROM_EMAIL = os.environ.get('FROM_EMAIL', 'you@yourdomain.com')
+FROM_NAME  = os.environ.get('FROM_NAME', 'Controva')
 
-def send_email_via_resend(to_email, subject, body_text, body_html=None, from_email=None, from_name=None):
-    """Send an email via Resend.com API."""
+
+# ──────────────────────────────────────────────────────────────
+#  M3: RESEND WEBHOOK — real delivery/open/bounce/complaint tracking
+# ──────────────────────────────────────────────────────────────
+def verify_svix_signature(headers, raw_body, secret, tolerance_secs=300):
+    """Resend signs webhooks with Svix (svix-id, svix-timestamp, svix-signature).
+    Signed content = "{id}.{timestamp}.{body}", HMAC-SHA256, base64.
+    Returns (ok, reason)."""
+    import hmac as _hmac
+    import base64 as _b64
+    svix_id = headers.get('svix-id') or headers.get('Svix-Id')
+    ts_hdr  = headers.get('svix-timestamp') or headers.get('Svix-Timestamp')
+    sig_hdr = headers.get('svix-signature') or headers.get('Svix-Signature') or ''
+    if not (svix_id and ts_hdr and sig_hdr):
+        return False, 'missing svix headers'
+    try:
+        age = abs(time.time() - int(ts_hdr))
+        if age > tolerance_secs:
+            return False, f'timestamp skew too large ({age:.0f}s)'
+    except ValueError:
+        return False, 'bad timestamp'
+    signed = f'{svix_id}.{ts_hdr}.'.encode() + raw_body
+    expected = _b64.b64encode(_hmac.new(secret.encode(), signed, _h_hashlib.sha256).digest()).decode()
+    # signature header may contain multiple space-separated v1,<sig> pairs
+    for part in sig_hdr.split(' '):
+        if part.startswith('v1,'):
+            if _hmac.compare_digest(part[3:], expected):
+                return True, 'ok'
+    return False, 'signature mismatch'
+
+def handle_resend_webhook(headers, raw_body):
+    """Process a verified Resend event. Returns a dict summary."""
+    if not RESEND_WEBHOOK_SECRET:
+        return {'ok': False, 'status': 503, 'error': 'resend_webhook_secret not configured (Settings)'}
+    ok, reason = verify_svix_signature(headers, raw_body, RESEND_WEBHOOK_SECRET)
+    if not ok:
+        return {'ok': False, 'status': 401, 'error': f'signature verification failed: {reason}'}
+    try:
+        event = json.loads(raw_body.decode('utf-8'))
+    except Exception:
+        return {'ok': False, 'status': 400, 'error': 'invalid JSON'}
+    etype = event.get('type', '')
+    data = event.get('data') or {}
+    msg_id = (data.get('email') or {}).get('id') or data.get('emailId') or ''
+    to_email = ((data.get('email') or {}).get('to') or data.get('recipient') or '')
+    if isinstance(to_email, list): to_email = to_email[0] if to_email else ''
+    summary = {'ok': True, 'type': etype, 'message_id': msg_id}
+
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        if etype == 'email.delivered':
+            cur.execute("UPDATE outreach_log SET status='delivered' WHERE resend_message_id=%s", (msg_id,))
+        elif etype == 'email.opened':
+            # FIRST open writes opened_at; later opens just refresh status
+            cur.execute("""UPDATE outreach_log SET opened_at=COALESCE(opened_at, NOW()), status='opened'
+                           WHERE resend_message_id=%s""", (msg_id,))
+            cur.execute("""UPDATE leads l SET status='opened' FROM outreach_log o
+                           WHERE o.lead_id=l.id AND o.resend_message_id=%s
+                             AND l.status IN ('sent','delivered','opened')""", (msg_id,))
+        elif etype == 'email.bounced':
+            cur.execute("UPDATE outreach_log SET status='bounced' WHERE resend_message_id=%s", (msg_id,))
+            if to_email:
+                add_suppression(to_email, 'bounce', reason='hard bounce reported by Resend')
+                cur.execute("""UPDATE contacts SET email_status='undeliverable', email_checked_at=NOW()
+                               WHERE LOWER(email)=LOWER(%s)""", (to_email,))
+        elif etype == 'email.complained':
+            cur.execute("UPDATE outreach_log SET status='complained' WHERE resend_message_id=%s", (msg_id,))
+            if to_email:
+                # Spam complaint → suppress the entire domain: they run aggressive filters
+                add_suppression(to_email, 'complaint', reason='spam complaint', domain_wide=True)
+        conn.commit(); cur.close(); conn.close()
+        print(f'[webhook] {etype} msg={msg_id} to={to_email}')
+    except Exception as e:
+        print(f'[webhook] db error: {e}')
+        summary['db_error'] = str(e)
+    return summary
+
+
+# ──────────────────────────────────────────────────────────────
+#  M3: REPLY DETECTION via IMAP (lightweight)
+# ──────────────────────────────────────────────────────────────
+def run_check_replies_bg(job_id):
+    """Scan the reply mailbox via IMAP for messages that answer our outreach.
+    Matches senders against outreach_log, marks replied_at + lead status."""
+    import imaplib
+    import email as _email_lib
+    try:
+        JOBS[job_id] = {'status': 'running', 'progress': 0,
+                        'log': [f'Connecting to {IMAP_HOST}…'], 'step': 'Check Replies'}
+        if not (IMAP_HOST and IMAP_USER and IMAP_PASS):
+            JOBS[job_id]['log'].append('IMAP not configured — set imap_host/user/pass in Settings')
+            JOBS[job_id]['status'] = 'failed'
+            return
+
+        imap = imaplib.IMAP4_SSL(IMAP_HOST)
+        imap.login(IMAP_USER, IMAP_PASS)
+        imap.select('INBOX')
+        # Search messages addressed to us that look like replies (auto "Re:")
+        _, msg_ids = imap.search(None, 'TO', f'"{IMAP_USER}"', 'SUBJECT', '"Re:"')
+        ids = (msg_ids[0] or b'').split()
+        JOBS[job_id]['log'].append(f'Found {len(ids)} reply-candidates in INBOX')
+
+        matched = 0
+        for num in ids[-200:]:   # newest 200 max
+            _, msg_data = imap.fetch(num, '(RFC822)')
+            raw = msg_data[0][1]
+            msg = _email_lib.message_from_bytes(raw)
+            sender = (_email_lib.utils.parseaddr(msg.get('From', ''))[1] or '').lower()
+            if not sender:
+                continue
+            try:
+                conn = db_conn(); cur = conn.cursor()
+                cur.execute("""SELECT o.id, o.lead_id FROM outreach_log o
+                               WHERE LOWER(o.email_to) = %s
+                                 AND o.replied_at IS NULL
+                                 AND o.status IN ('sent','delivered','opened')""",
+                            (sender,))
+                row = cur.fetchone()
+                if row:
+                    body_preview = ''
+                    if msg.is_multipart():
+                        for part in msg.walk():
+                            if part.get_content_type() == 'text/plain':
+                                body_preview = (part.get_payload(decode=True) or b'')[:2000].decode('utf-8', 'ignore')
+                                break
+                    else:
+                        body_preview = (msg.get_payload(decode=True) or b'')[:2000].decode('utf-8', 'ignore')
+                    cur.execute("""UPDATE outreach_log SET replied_at=NOW(), status='replied',
+                                   reply_content=%s WHERE id=%s""", (body_preview, row[0]))
+                    cur.execute("UPDATE leads SET status='replied' WHERE id=%s", (row[1],))
+                    conn.commit(); matched += 1
+                    JOBS[job_id]['log'].append(f'Reply matched: {sender}')
+                cur.close(); conn.close()
+            except Exception as e:
+                print(f'[replies] {sender}: {e}')
+        imap.logout()
+        JOBS[job_id]['log'].append(f'Done — {matched} new replies matched to outreach')
+        JOBS[job_id]['progress'] = 100
+        JOBS[job_id]['status'] = 'completed'
+        JOBS[job_id]['results'] = {'matched': matched}
+    except Exception as e:
+        JOBS[job_id]['status'] = 'failed'
+        JOBS[job_id]['error'] = str(e)
+        JOBS[job_id]['log'].append(f'Error: {e}')
+
+def handle_unsubscribe(token):
+    """Process an unsubscribe click. Returns a plain confirmation page (HTML string).
+    Suppresses the address AND the whole domain? No — address only; domain-wide
+    suppression is reserved for spam complaints."""
+    token = (token or '').strip()
+    if not token or len(token) > 128:
+        return ('<html><body style="font-family:sans-serif;text-align:center;padding-top:60px;">'
+                '<h2>Invalid link</h2></body></html>')
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("""SELECT l.id, c.email FROM leads l
+                       LEFT JOIN LATERAL (
+                           SELECT email FROM contacts WHERE lead_id = l.id
+                           ORDER BY (COALESCE(email,'') != '') DESC, created_at DESC LIMIT 1
+                       ) c ON TRUE
+                       WHERE l.unsub_token = %s""", (token,))
+        row = cur.fetchone()
+        if not row:
+            cur.close(); conn.close()
+            return ('<html><body style="font-family:sans-serif;text-align:center;padding-top:60px;">'
+                    '<h2>Link expired or invalid</h2>'
+                    '<p style="color:#666;">No subscription found for this link.</p></body></html>')
+        lead_id, email = row
+        if email:
+            add_suppression(email, 'unsubscribe', lead_id=lead_id,
+                            reason='clicked unsubscribe link')
+        cur.execute("UPDATE leads SET status='unsubscribed' WHERE id=%s AND status NOT IN "
+                    "('replied','closed')", (lead_id,))
+        conn.commit(); cur.close(); conn.close()
+        print(f'[unsubscribe] lead {lead_id} ({email})')
+        return ('<html><body style="font-family:sans-serif;text-align:center;padding-top:60px;">'
+                '<h2>You have been removed &#10003;</h2>'
+                '<p style="color:#666;">You will not receive any further emails from us.</p>'
+                '</body></html>')
+    except Exception as e:
+        print(f'[unsubscribe] error: {e}')
+        return ('<html><body style="font-family:sans-serif;text-align:center;padding-top:60px;">'
+                '<h2>Something went wrong</h2>'
+                '<p style="color:#666;">Please reply to the email with "unsubscribe".</p></body></html>')
+
+def build_compliance_footer(unsub_url=None):
+    """CAN-SPAM/GDPR footer: unsubscribe mechanism + company name + postal address.
+    Every commercial email must carry these — non-negotiable."""
+    lines = ['—']
+    if unsub_url:
+        lines.append(f'Don\'t want emails from us? <a href="{unsub_url}" style="color:#888;">Unsubscribe</a>')
+    else:
+        lines.append(f'Don\'t want emails from us? Reply with "unsubscribe" and we\'ll remove you immediately.')
+    if COMPANY_ADDRESS:
+        lines.append(f'{COMPANY_NAME} · {COMPANY_ADDRESS}')
+    elif COMPANY_NAME:
+        lines.append(COMPANY_NAME)
+    return '\n'.join(lines)
+
+def send_email_via_resend(to_email, subject, body_text, body_html=None, from_email=None,
+                          from_name=None, unsub_url=None, skip_footer=False):
+    """Send an email via Resend.com API. Appends the compliance footer unless
+    skip_footer is set (use ONLY for non-commercial transactional mail)."""
     if not body_html:
         # Convert plain text with line breaks to HTML
         body_html = body_text.replace("\\n", "<br>")
         body_html = f"""<html><body style="font-family: -apple-system, sans-serif; font-size: 15px; line-height: 1.6; color: #333; max-width: 600px;">{body_html}</body></html>"""
+
+    if not skip_footer:
+        footer_html = ('<div style="margin-top:24px; padding-top:12px; border-top:1px solid #eee;'
+                       ' font-size:12px; color:#888; line-height:1.5;">'
+                       + build_compliance_footer(unsub_url) + '</div>')
+        footer_text = '\n\n' + re.sub(r'<[^>]+>', '', build_compliance_footer(unsub_url))
+        body_html = body_html.replace('</body>', footer_html + '</body>')
+        body_text = body_text + footer_text
 
     payload = {
         "from": f"{from_name or FROM_NAME} <{from_email or FROM_EMAIL}>",
@@ -4822,12 +5880,29 @@ def send_lead_email(lead_id):
 
     lead_id, name, niche, city, email, full_name, subj, body, mockup = row
 
-    if not email:
-        cur.close(); conn.close()
-        return {"success": False, "error": "No email for this lead"}
     if not subj or not body:
         cur.close(); conn.close()
         return {"success": False, "error": "Email copy not generated yet"}
+    cur.close(); conn.close()
+
+    # Deliverability gate: verify (or re-verify if stale) before sending.
+    email, estatus = contact_email_for_sending(lead_id)
+    if not email:
+        return {"success": False, "error": "No email for this lead"}
+    if estatus == 'undeliverable':
+        return {"success": False, "error": "Blocked: email failed verification (undeliverable) — "
+                                           "re-enrich this lead to find a working address"}
+    if estatus not in ('deliverable', 'risky'):
+        return {"success": False, "error": f"Blocked: email not verified yet (status: {estatus}). "
+                                           "Run verification from the Pipeline page first"}
+    # Suppression gate: unsubscribes, past bounces, spam complaints
+    if is_suppressed(email):
+        return {"success": False, "error": "Blocked: this address (or its domain) unsubscribed, "
+                                           "bounced, or complained before — it is permanently suppressed"}
+    # Send throttle: hourly/daily caps protect sender reputation
+    ok, throttle_info = send_throttle_status()
+    if not ok:
+        return {"success": False, "error": f"Blocked: {throttle_info}"}
 
     # Build HTML version with mockup if available
     body_html = body.replace("\\n", "<br>")
@@ -4835,10 +5910,12 @@ def send_lead_email(lead_id):
         body_html += f'<br><br><img src="{mockup}" alt="Website Mockup for {name}" style="max-width:100%; border-radius:8px;">'
     body_html = f"""<html><body style="font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: 15px; line-height: 1.6; color: #333; max-width: 600px; padding: 16px;">{body_html}</body></html>"""
 
-    result = send_email_via_resend(email, subj, body, body_html)
+    unsub_token = get_or_create_unsub_token(lead_id)
+    result = send_email_via_resend(email, subj, body, body_html,
+                                   unsub_url=build_unsub_url(unsub_token))
 
     if result.get("success"):
-        # Log the outreach
+        conn = db_conn(); cur = conn.cursor()
         cur.execute("""
             INSERT INTO outreach_log
               (lead_id, email_to, email_subject, email_body, mockup_url, sent_at, status, resend_message_id)
@@ -4847,7 +5924,7 @@ def send_lead_email(lead_id):
         """, (lead_id, email, subj, body, mockup or "", result.get("message_id")))
         cur.execute("UPDATE leads SET status='sent' WHERE id=%s", (lead_id,))
         conn.commit()
-    cur.close(); conn.close()
+        cur.close(); conn.close()
     return result
 
 def approve_lead(lead_id):
@@ -4869,13 +5946,13 @@ def get_lead_detail(lead_id):
         SELECT l.id, l.business_name, l.niche, l.city, l.country, l.phone, l.address,
                l.ai_score, l.score_reason, l.status, l.created_at,
                COALESCE(l.google_rating, 0), COALESCE(l.review_count, 0),
-               c.full_name, c.email, c.linkedin_url, c.job_title,
+               c.full_name, c.email, c.email_status, c.linkedin_url, c.job_title,
                (SELECT content FROM assets WHERE lead_id=l.id AND asset_type='mockup_image' LIMIT 1) as mockup,
                (SELECT content FROM assets WHERE lead_id=l.id AND asset_type='email_subject' LIMIT 1) as subj,
                (SELECT content FROM assets WHERE lead_id=l.id AND asset_type='email_body' LIMIT 1) as body
         FROM leads l
         LEFT JOIN LATERAL (
-            SELECT full_name, email, linkedin_url, job_title FROM contacts
+            SELECT full_name, email, email_status, linkedin_url, job_title FROM contacts
             WHERE lead_id = l.id
             ORDER BY (COALESCE(email,'') != '') DESC, confidence DESC NULLS LAST, created_at DESC
             LIMIT 1
@@ -4894,8 +5971,9 @@ def get_lead_detail(lead_id):
         "created_at": r[10].isoformat() if r[10] else None,
         "google_rating": float(r[11]) if r[11] else 0, "review_count": r[12],
         "owner_name": r[13] or "", "owner_email": r[14] or "",
-        "linkedin_url": r[15] or "", "job_title": r[16] or "",
-        "mockup_url": r[17] or "", "email_subject": r[18] or "", "email_body": r[19] or ""
+        "email_status": r[15] or "",
+        "linkedin_url": r[16] or "", "job_title": r[17] or "",
+        "mockup_url": r[18] or "", "email_subject": r[19] or "", "email_body": r[20] or ""
     }
 
 def regenerate_email_for_lead(lead_id, extra_instructions=""):
@@ -5011,30 +6089,41 @@ def get_chart_stats():
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 
+    # Paths reachable without a login token. Everything else requires auth.
+    PUBLIC_GET_PATHS = {'/', '/dashboard', '/index.html', '/health'}
+    PUBLIC_GET_PREFIXES = ('/assets/', '/mockups/', '/u/')
+    PUBLIC_POST_PATHS = {'/auth/login', '/auth/check', '/webhook/resend'}
+
     def check_auth(self):
-        """Middleware to authenticate requests and return (tenant_id, user_id).
-        Falls back to default tenant if token is valid dev token or if auth fails."""
+        """Authenticate the request. Returns (tenant_id, user_id) for valid
+        sessions and (None, None) when unauthenticated. Accepts the token via
+        the Authorization header or a ?token= query parameter (CSV downloads)."""
         auth_header = self.headers.get('Authorization')
-        default_tenant = '00000000-0000-0000-0000-000000000001'
-        default_user = '00000000-0000-0000-0000-000000000002'
-        if not auth_header or not auth_header.startswith('Bearer '):
-            return default_tenant, default_user
-            
-        token = auth_header.split(' ')[1]
-        if token.startswith('temp-dev-token') or token == 'admin':
-            return default_tenant, default_user
-        try:
-            conn = db_conn()
-            cur = conn.cursor()
-            cur.execute("SELECT tenant_id, user_id FROM sessions WHERE token = %s AND expires_at > NOW()", (token,))
-            row = cur.fetchone()
-            cur.close()
-            conn.close()
-            if row:
-                return row[0], row[1]
-        except Exception as e:
-            pass
-        return default_tenant, default_user
+        token = ''
+        if auth_header and auth_header.startswith('Bearer '):
+            token = auth_header.split(' ', 1)[1].strip()
+        if not token:
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            token = (qs.get('token') or [''])[0]
+        user = auth_check(token)
+        if not user:
+            return None, None
+        # Single-tenant deployment: authenticated users share the default tenant.
+        return '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000002'
+
+    def require_auth(self):
+        """Enforce auth for non-public paths. Returns False after sending a 401."""
+        p = self.path.split('?')[0]
+        if self.command == 'GET':
+            if p in self.PUBLIC_GET_PATHS or p.startswith(self.PUBLIC_GET_PREFIXES):
+                return True
+        elif self.command == 'POST' and p in self.PUBLIC_POST_PATHS:
+            return True
+        tenant_id, _ = self.check_auth()
+        if tenant_id:
+            return True
+        self.send_json(401, {'error': 'Unauthorized — log in first'})
+        return False
 
     def send_json(self, code, data):
         body = json.dumps(data, ensure_ascii=False).encode('utf-8')
@@ -5062,6 +6151,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         p = self.path.split('?')[0]
+        if not self.require_auth():
+            return
         if p == '/' or p == '/dashboard' or p == '/index.html':
             try:
                 # Try to serve Vite built frontend, fallback to old dashboard.html
@@ -5103,7 +6194,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not tenant_id:
                     self.send_json(401, {'error': 'Unauthorized'})
                     return
-                cols, rows = get_leads(tenant_id)
+                cols, rows = get_leads()
                 self.send_json(200, {'status': 'ok', 'total': len(rows), 'columns': cols, 'leads': rows})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
@@ -5113,7 +6204,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not tenant_id:
                     self.send_json(401, {'error': 'Unauthorized'})
                     return
-                cols, rows = get_leads(tenant_id)
+                cols, rows = get_leads()
                 buf = io.StringIO()
                 w = csv.DictWriter(buf, fieldnames=cols)
                 w.writeheader()
@@ -5142,6 +6233,14 @@ class Handler(BaseHTTPRequestHandler):
                     'imagine_art': bool(IMAGINE_ART_KEY)
                 }
             })
+
+        elif p.startswith('/u/'):
+            # Public unsubscribe link: /u/<token>
+            try:
+                token = p[3:].split('?')[0]
+                self.send_html(handle_unsubscribe(token))
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
 
         elif p.startswith('/mockups/'):
             try:
@@ -5210,13 +6309,32 @@ class Handler(BaseHTTPRequestHandler):
                       AND (c.id IS NULL OR (COALESCE(c.email,'') = '' AND COALESCE(c.linkedin_url,'') = ''))
                 """)
                 enriched_no_contact = cur.fetchone()[0]
+                # Email verification summary — feeds the Pipeline page card
+                cur.execute("""
+                    SELECT
+                      COUNT(*) FILTER (WHERE email_status = 'deliverable'),
+                      COUNT(*) FILTER (WHERE email_status = 'risky'),
+                      COUNT(*) FILTER (WHERE email_status = 'undeliverable'),
+                      COUNT(*) FILTER (WHERE email_status IS NULL OR email_status = 'unknown'),
+                      COUNT(*) FILTER (WHERE email_status = 'deliverable'
+                                       AND email_checked_at < NOW() - INTERVAL '60 days')
+                    FROM contacts
+                    WHERE COALESCE(email,'') != ''
+                """)
+                v = cur.fetchone()
                 cur.close(); conn.close()
                 self.send_json(200, {
                     'hot_leads': row[0], 'total': row[1], 'discovered': row[2],
                     'enriched': row[3], 'scored': row[4], 'ready': row[5],
                     'sent': row[6], 'high_score': row[7],
                     'with_email': with_email, 'cities': cities,
-                    'enriched_no_contact': enriched_no_contact
+                    'enriched_no_contact': enriched_no_contact,
+                    'email_verification': {
+                        'deliverable': v[0], 'risky': v[1],
+                        'undeliverable': v[2], 'unknown': v[3],
+                        'stale': v[4],
+                        'sendable': v[0] + v[1],
+                    }
                 })
             except Exception as e:
                 self.send_json(200, {
@@ -5224,7 +6342,10 @@ class Handler(BaseHTTPRequestHandler):
                     'enriched': 0, 'scored': 0, 'ready': 0,
                     'sent': 0, 'high_score': 0,
                     'with_email': 0, 'cities': 0,
-                    'enriched_no_contact': 0
+                    'enriched_no_contact': 0,
+                    'email_verification': {'deliverable': 0, 'risky': 0,
+                                           'undeliverable': 0, 'unknown': 0,
+                                           'stale': 0, 'sendable': 0}
                 })
 
         elif p == '/intent-leads':
@@ -5327,65 +6448,85 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         p = self.path.split('?')[0]
+        # Read the raw body once — the webhook route needs the exact bytes
+        # for signature verification; everyone else gets the parsed dict.
+        raw_body = b''
         try:
             length = int(self.headers.get('Content-Length', 0))
-            body = json.loads(self.rfile.read(length).decode()) if length else {}
+            raw_body = self.rfile.read(length) if length else b''
+            body = json.loads(raw_body.decode()) if length else {}
         except:
             body = {}
 
+        if p == '/webhook/resend':
+            try:
+                result = handle_resend_webhook(self.headers, raw_body)
+                self.send_json(result.get('status', 200),
+                               {'ok': result.get('ok'), **{k: v for k, v in result.items() if k != 'ok'}})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+            return
+
+        if not self.require_auth():
+            return
+
         if p == '/auth/login':
             try:
-                username = str(body.get('username') or body.get('email') or '').strip()
-                password = str(body.get('password') or '').strip()
-                
-                # Check for standard demo / admin logins
-                valid_users = ['admin', 'admin@controva.com', 'admin@controvallc.com', 'leadgen']
-                valid_pwds = ['ChangeMe_2026!', 'admin', 'password', 'Admin123!', 'LeadGen_Secure_2024!']
-                
-                user_match = (username.lower() in [u.lower() for u in valid_users]) or not username
-                pwd_match = (password in valid_pwds) or (username and password)
-                
-                if user_match and pwd_match:
-                    user_email = username if '@' in username else 'admin@controva.com'
-                    token = 'temp-dev-token-controva-12345'
-                    try:
-                        conn = db_conn()
-                        cur = conn.cursor()
-                        cur.execute("SELECT id, tenant_id FROM users WHERE email = %s", (user_email,))
-                        row = cur.fetchone()
-                        if not row:
-                            cur.execute("INSERT INTO users (tenant_id, email, password_hash, role) VALUES ('00000000-0000-0000-0000-000000000001', %s, 'hash', 'admin') RETURNING id", (user_email,))
-                            user_id = cur.fetchone()[0]
-                        else:
-                            user_id, tenant_id = row
-                            
-                        # Create session
-                        cur.execute("INSERT INTO sessions (token, user_id, tenant_id, expires_at) VALUES (%s, %s, '00000000-0000-0000-0000-000000000001', NOW() + INTERVAL '1 day') ON CONFLICT (token) DO UPDATE SET expires_at = NOW() + INTERVAL '1 day'", (token, user_id))
-                        conn.commit()
-                        cur.close()
-                        conn.close()
-                    except Exception as db_err:
-                        pass
-                        
-                    self.send_json(200, {
-                        'success': True,
-                        'status': 'ok',
-                        'token': token,
-                        'user': {'email': user_email, 'role': 'admin'}
-                    })
+                username = str(body.get('username') or body.get('email') or '').strip().lower()
+                # The React login posts emails — map the known admin aliases to 'admin'
+                if '@' in username:
+                    username = 'admin' if username in ('admin@controva.com', 'admin@controvallc.com') else username
+                password = str(body.get('password') or '')
+                ip = self.client_address[0] if self.client_address else ''
+
+                remaining_lock = auth_is_locked(username, ip)
+                if remaining_lock:
+                    self.send_json(429, {'success': False,
+                                         'error': f'Too many failed attempts. Try again in {remaining_lock // 60 + 1} minutes.'})
+                    return
+                tok = auth_login(username, password, ip)
+                if tok:
+                    self.send_json(200, {'success': True, 'status': 'ok', 'token': tok,
+                                         'user': {'email': username, 'role': 'admin'}})
                 else:
-                    self.send_json(401, {'success': False, 'error': 'Invalid credentials. Default: admin / ChangeMe_2026!'})
+                    left = AUTH_MAX_FAILURES - len(_login_failures.get(auth_lock_key(username, ip), []))
+                    self.send_json(401, {'success': False,
+                                         'error': f'Invalid credentials. {max(left, 0)} attempt(s) remaining before temporary lockout.'})
             except Exception as e:
                 self.send_json(500, {'success': False, 'error': str(e)})
+            return
+
+        elif p == '/auth/change-password':
+            try:
+                auth_header = self.headers.get('Authorization', '')
+                token = auth_header[7:] if auth_header.startswith('Bearer ') else ''
+                user = auth_check(token)
+                if not user or user == 'service':
+                    self.send_json(401, {'success': False, 'error': 'Not authenticated'})
+                    return
+                ok, msg = auth_change_password(user, str(body.get('old_password') or ''),
+                                               str(body.get('new_password') or ''))
+                self.send_json(200 if ok else 400, {'success': ok, 'message': msg})
+            except Exception as e:
+                self.send_json(500, {'success': False, 'error': str(e)})
+            return
+
+        elif p == '/auth/logout':
+            try:
+                auth_header = self.headers.get('Authorization', '')
+                token = auth_header[7:] if auth_header.startswith('Bearer ') else ''
+                auth_logout(token)
+                self.send_json(200, {'success': True})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
             return
 
         elif p == '/auth/check':
             try:
                 token = body.get('token', '')
-                if token:
-                    self.send_json(200, {'authenticated': True, 'valid': True})
-                else:
-                    self.send_json(200, {'authenticated': False, 'valid': False})
+                user = auth_check(token)
+                self.send_json(200, {'authenticated': bool(user), 'valid': bool(user),
+                                     'user': user if user else None})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
             return
@@ -5557,6 +6698,25 @@ class Handler(BaseHTTPRequestHandler):
                 JOBS[job_id] = {'status': 'running', 'progress': 0,
                                 'log': ['Starting website verification…'], 'step': 'Verify Websites'}
                 t = threading.Thread(target=run_verify_websites_bg, args=(job_id, lead_ids))
+                t.daemon = True; t.start()
+                self.send_json(200, {'job_id': job_id, 'status': 'started'})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p == '/check-replies':
+            try:
+                job_id = f'job_{int(time.time() * 1000)}'
+                t = threading.Thread(target=run_check_replies_bg, args=(job_id,))
+                t.daemon = True; t.start()
+                self.send_json(200, {'job_id': job_id, 'status': 'started'})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p == '/verify-emails':
+            try:
+                only_stale = bool(body.get('only_stale', False))
+                job_id = f'job_{int(time.time() * 1000)}'
+                t = threading.Thread(target=run_verify_emails_bg, args=(job_id, only_stale))
                 t.daemon = True; t.start()
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
             except Exception as e:
@@ -5950,9 +7110,17 @@ if __name__ == '__main__':
         ensure_research_cache_table()
         ensure_research_history_table()
         ensure_intent_tables()
+        ensure_email_verification_columns()
+        ensure_m3_tables()
         print('Schema migration: OK')
     except Exception as e:
         print(f'Schema migration warning (non-fatal): {e}')
+    try:
+        ensure_auth_tables()
+        ensure_service_token()
+        print('Auth: OK (users + sessions in DB)')
+    except Exception as e:
+        print(f'WARNING: auth tables unavailable — login will fail until Postgres is up: {e}')
     server = ThreadingServer(('0.0.0.0', 8080), Handler)
     print('LeadGen v5 - Multi-Module Intelligence Platform')
     print('Modules: discover, enrich, score, assets, seo, competitor, ecommerce')

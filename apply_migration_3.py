@@ -1,6 +1,6 @@
 import psycopg2
 
-DB = dict(host='127.0.0.1', port=5433, database='leadgen_db', user='leadgen', password='LeadGen_Secure_2024!')
+DB = dict(host='127.0.0.1', port=5433, database='leadgen_db', user='leadgen', password='CHANGE_ME_DB_PASS')
 
 sql = """
 -- ── TENANT LEADS — Many-to-many relationship for caching ──────────────────────
