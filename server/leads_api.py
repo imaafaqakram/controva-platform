@@ -91,6 +91,9 @@ CONFIG = {
     # M3 send throttle — protects sender reputation (mailbox-provider safe zone)
     'send_hourly_limit': 30,
     'send_daily_limit': 100,
+    # M4 sequences — automatic multi-touch follow-ups
+    'sequences_enabled': True,
+    'sequence_interval_minutes': 10,
 }
 
 # Map enrichment_strategy → providers list for enrich_lead()
@@ -5505,6 +5508,269 @@ def ensure_service_token():
     return SERVICE_TOKEN
 
 # ──────────────────────────────────────────────────────────────
+#  M4: FOLLOW-UP SEQUENCES — automatic multi-touch outreach
+#  Default: Day 0 initial → Day 3 nudge → Day 8 final note.
+#  Stops automatically on reply, unsubscribe, or bounced email.
+# ──────────────────────────────────────────────────────────────
+DEFAULT_SEQUENCE = [
+    {'step': 1, 'delay_days': 0,  'kind': 'initial'},   # uses existing generated email
+    {'step': 2, 'delay_days': 3,  'kind': 'nudge'},
+    {'step': 3, 'delay_days': 8,  'kind': 'final'},
+]
+
+def ensure_m4_tables():
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS sequences (
+            id          SERIAL PRIMARY KEY,
+            name        VARCHAR(200) NOT NULL,
+            is_active   BOOLEAN DEFAULT TRUE,
+            created_at  TIMESTAMPTZ DEFAULT NOW()
+        )""")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS sequence_steps (
+            id           SERIAL PRIMARY KEY,
+            sequence_id  INT REFERENCES sequences(id) ON DELETE CASCADE,
+            step_number  INT NOT NULL,
+            delay_days   INT NOT NULL DEFAULT 0,
+            kind         VARCHAR(30) NOT NULL,   -- initial | nudge | final
+            UNIQUE (sequence_id, step_number)
+        )""")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS enrollments (
+            id            SERIAL PRIMARY KEY,
+            lead_id       UUID REFERENCES leads(id) ON DELETE CASCADE,
+            sequence_id   INT REFERENCES sequences(id) ON DELETE CASCADE,
+            current_step  INT DEFAULT 1,
+            next_send_at  TIMESTAMPTZ,
+            status        VARCHAR(30) DEFAULT 'active',  -- active|completed|stopped|replied|unsubscribed|bounced
+            stop_reason   TEXT,
+            steps_sent    INT DEFAULT 0,
+            last_sent_at  TIMESTAMPTZ,
+            created_at    TIMESTAMPTZ DEFAULT NOW(),
+            updated_at    TIMESTAMPTZ DEFAULT NOW()
+        )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_enroll_due ON enrollments(status, next_send_at)")
+    # Seed the default sequence once
+    cur.execute("SELECT COUNT(*) FROM sequences")
+    if cur.fetchone()[0] == 0:
+        cur.execute("INSERT INTO sequences (name) VALUES ('3-Touch Outreach') RETURNING id")
+        seq_id = cur.fetchone()[0]
+        for st in DEFAULT_SEQUENCE:
+            cur.execute("INSERT INTO sequence_steps (sequence_id, step_number, delay_days, kind) VALUES (%s,%s,%s,%s)",
+                        (seq_id, st['step'], st['delay_days'], st['kind']))
+    conn.commit(); cur.close(); conn.close()
+
+def generate_followup_copy(business_name, niche, city, owner_name, kind, prev_subject=''):
+    """Claude-generated follow-up emails (sequence steps 2 and 3)."""
+    if not CLAUDE_KEY:
+        return None
+    if kind == 'nudge':
+        spec = ("This is follow-up #2 of 3 (they got an initial email 3 days ago offering a free "
+                "website mockup). Keep it under 70 words. Reference the mockup we made for them. "
+                "One soft question. Friendly, zero pressure. DON'T apologize for emailing again.")
+    else:
+        spec = ("This is follow-up #3 of 3, the final message (initial + one nudge already sent). "
+                "Under 50 words. Politely signal this is the last email — e.g. asking whether to "
+                "close their file. Leave the door open. No guilt-tripping.")
+    name_part = owner_name if owner_name else 'there'
+    prompt = f"""Write a cold-outreach follow-up email for a small business owner.
+
+Business: {business_name}
+Type: {niche}
+City: {city}
+Owner: {name_part}
+Previous email subject: {prev_subject or '(initial offer of a free website mockup)'}
+{spec}
+
+Respond ONLY with valid JSON:
+{{"subject": "<under 7 words, Re: style ok>", "body": "<body with \\n for line breaks>"}}"""
+    try:
+        body = json.dumps({
+            'model': 'claude-opus-4-5', 'max_tokens': 400,
+            'messages': [{'role': 'user', 'content': prompt}]
+        }).encode()
+        req = urllib.request.Request(
+            'https://api.anthropic.com/v1/messages', data=body, method='POST',
+            headers={'x-api-key': CLAUDE_KEY, 'anthropic-version': '2023-06-01',
+                     'Content-Type': 'application/json'})
+        resp = urllib.request.urlopen(req, timeout=30)
+        text = json.loads(resp.read().decode())['content'][0]['text']
+        m = re.search(r'\{[\s\S]*\}', text)
+        if m: return json.loads(m.group())
+    except Exception as e:
+        print(f'[sequence] claude {kind} failed: {e}')
+    return None
+
+def enroll_lead_in_default(lead_id):
+    """Enroll a lead into the default 3-touch sequence (step 1 sends on the next tick)."""
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("SELECT id FROM sequences WHERE is_active ORDER BY id LIMIT 1")
+        row = cur.fetchone()
+        if not row:
+            cur.close(); conn.close(); return {'success': False, 'error': 'no sequence configured'}
+        seq_id = row[0]
+        cur.execute("""SELECT id, status FROM enrollments
+                       WHERE lead_id = %s AND status = 'active'""", (lead_id,))
+        if cur.fetchone():
+            cur.close(); conn.close(); return {'success': False, 'error': 'already enrolled'}
+        cur.execute("""INSERT INTO enrollments (lead_id, sequence_id, current_step, next_send_at, status)
+                       VALUES (%s, %s, 1, NOW(), 'active') RETURNING id""", (lead_id, seq_id))
+        enrollment_id = cur.fetchone()[0]
+        conn.commit(); cur.close(); conn.close()
+        return {'success': True, 'enrollment_id': enrollment_id}
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+
+def stop_enrollment(lead_id, status, reason):
+    """Auto-exit hook: called on reply/unsubscribe/bounce."""
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("""UPDATE enrollments SET status=%s, stop_reason=%s, updated_at=NOW()
+                       WHERE lead_id=%s AND status='active'""", (status, reason, lead_id))
+        conn.commit(); cur.close(); conn.close()
+    except Exception as e:
+        print(f'[sequence] stop failed: {e}')
+
+def get_sequence_step_assets(lead_id, step, kind, detail):
+    """Return (subject, body) for a step, generating + caching follow-ups via Claude."""
+    if step == 1:
+        return detail.get('email_subject') or '', detail.get('email_body') or ''
+    subj_key, body_key = f'email_subject_step{step}', f'email_body_step{step}'
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("""SELECT (SELECT content FROM assets WHERE lead_id=%s AND asset_type=%s LIMIT 1),
+                          (SELECT content FROM assets WHERE lead_id=%s AND asset_type=%s LIMIT 1)""",
+                (lead_id, subj_key, lead_id, body_key))
+    row = cur.fetchone(); cur.close(); conn.close()
+    if row and row[0] and row[1]:
+        return row[0], row[1]
+    copy = generate_followup_copy(detail['business_name'], detail['niche'], detail['city'],
+                                  detail.get('owner_name'), kind,
+                                  prev_subject=detail.get('email_subject') or '')
+    if not copy:
+        return None, None
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("INSERT INTO assets (lead_id, asset_type, content) VALUES (%s,%s,%s)", (lead_id, subj_key, copy['subject']))
+    cur.execute("INSERT INTO assets (lead_id, asset_type, content) VALUES (%s,%s,%s)", (lead_id, body_key, copy['body']))
+    conn.commit(); cur.close(); conn.close()
+    return copy['subject'], copy['body']
+
+def process_due_enrollments():
+    """One scheduler pass: send every due step, respect all M2/M3 gates."""
+    if not CONFIG.get('sequences_enabled', True):
+        return
+    sent, skipped, stopped = 0, 0, 0
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("""
+            SELECT e.id, e.lead_id::text, e.current_step, ss.delay_days, ss.kind
+            FROM enrollments e
+            JOIN sequences q ON q.id = e.sequence_id AND q.is_active
+            JOIN sequence_steps ss ON ss.sequence_id = e.sequence_id AND ss.step_number = e.current_step
+            WHERE e.status = 'active' AND e.next_send_at <= NOW()
+            ORDER BY e.next_send_at ASC LIMIT 25
+        """)
+        due = cur.fetchall(); cur.close(); conn.close()
+    except Exception as e:
+        print(f'[sequence] due query failed: {e}')
+        return
+
+    for en_id, lead_id, step, delay_days, kind in due:
+        detail = get_lead_detail(lead_id)
+        if not detail:
+            continue
+        # Auto-exit conditions
+        lstatus = (detail.get('status') or '').lower()
+        if lstatus in ('replied', 'closed'):
+            stop_enrollment(lead_id, 'replied', 'lead replied'); stopped += 1; continue
+        if lstatus in ('unsubscribed', 'rejected'):
+            stop_enrollment(lead_id, 'unsubscribed', f'lead status {lstatus}'); stopped += 1; continue
+
+        # Deliverability + suppression + throttle gates (same as manual send)
+        email, estatus = contact_email_for_sending(lead_id)
+        if not email or estatus == 'undeliverable':
+            stop_enrollment(lead_id, 'bounced', f'email {estatus or "missing"}'); stopped += 1; continue
+        if estatus not in ('deliverable', 'risky'):
+            skipped += 1; continue
+        if is_suppressed(email):
+            stop_enrollment(lead_id, 'unsubscribed', 'address suppressed'); stopped += 1; continue
+        ok, throttle_info = send_throttle_status()
+        if not ok:
+            print(f'[sequence] throttle: {throttle_info}')
+            skipped += 1
+            break   # hour/day cap reached — stop processing, retry next tick
+
+        subject, body = get_sequence_step_assets(lead_id, step, kind, detail)
+        if not subject or not body:
+            print(f'[sequence] step {step} copy unavailable for {lead_id} (no Claude key?)')
+            skipped += 1
+            # Push a day so we don't spin
+            try:
+                conn = db_conn(); cur = conn.cursor()
+                cur.execute("UPDATE enrollments SET next_send_at = NOW() + INTERVAL '1 day', updated_at=NOW() WHERE id=%s", (en_id,))
+                conn.commit(); cur.close(); conn.close()
+            except Exception:
+                pass
+            continue
+
+        unsub_token = get_or_create_unsub_token(lead_id)
+        body_html = body.replace('\n', '<br>')
+        if detail.get('mockup_url'):
+            body_html += f'<br><br><img src="{detail["mockup_url"]}" alt="Website Mockup" style="max-width:100%; border-radius:8px;">'
+        result = send_email_via_resend(email, subject, body, body_html,
+                                       unsub_url=build_unsub_url(unsub_token))
+        try:
+            conn = db_conn(); cur = conn.cursor()
+            if result.get('success'):
+                cur.execute("""INSERT INTO outreach_log (lead_id, email_to, email_subject, email_body,
+                               mockup_url, sent_at, status, resend_message_id)
+                               VALUES (%s,%s,%s,%s,%s,NOW(),'sent',%s)""",
+                            (lead_id, email, subject, body, detail.get('mockup_url') or '',
+                             result.get('message_id')))
+                # advance; gap to next step from the schedule (absolute days → difference)
+                cur.execute("""SELECT ns.delay_days - ss.delay_days FROM enrollments e
+                               JOIN sequence_steps ss ON ss.sequence_id=e.sequence_id AND ss.step_number=e.current_step
+                               JOIN sequence_steps ns ON ns.sequence_id=e.sequence_id AND ns.step_number=e.current_step+1
+                               WHERE e.id=%s""", (en_id,))
+                gap_row = cur.fetchone()
+                if step >= 3 or not gap_row:
+                    cur.execute("""UPDATE enrollments SET steps_sent=steps_sent+1, last_sent_at=NOW(),
+                                   status='completed', current_step=current_step+1, updated_at=NOW() WHERE id=%s""", (en_id,))
+                else:
+                    gap_days = max(int(gap_row[0]), 1)
+                    cur.execute("""UPDATE enrollments SET steps_sent=steps_sent+1, last_sent_at=NOW(),
+                                   current_step=current_step+1, next_send_at=NOW() + (%s || ' days')::interval,
+                                   updated_at=NOW() WHERE id=%s""", (str(gap_days), en_id))
+                sent += 1
+            else:
+                err = str(result.get('error'))[:200]
+                # auth errors = permanent stop; anything else (network, provider
+                # hiccup) = retry tomorrow instead of hammering every 10 minutes
+                if '403' in err or '401' in err:
+                    cur.execute("UPDATE enrollments SET status='stopped', stop_reason=%s, updated_at=NOW() WHERE id=%s",
+                                (f'send failed: {err}', en_id))
+                    stopped += 1
+                else:
+                    cur.execute("UPDATE enrollments SET stop_reason=%s, next_send_at=NOW() + INTERVAL '1 day', updated_at=NOW() WHERE id=%s",
+                                (f'send failed: {err}', en_id))
+            conn.commit(); cur.close(); conn.close()
+        except Exception as e:
+            print(f'[sequence] update failed: {e}')
+    if sent or stopped:
+        print(f'[sequence] pass: sent={sent} skipped={skipped} stopped={stopped}')
+
+def sequence_scheduler_loop():
+    """Background thread: process due sequence steps every N minutes."""
+    interval = max(int(CONFIG.get('sequence_interval_minutes', 10)), 1) * 60
+    while True:
+        try:
+            process_due_enrollments()
+        except Exception as e:
+            print(f'[sequence] scheduler error: {e}')
+        time.sleep(interval)
+
+# ──────────────────────────────────────────────────────────────
 #  M3: OUTREACH COMPLIANCE — suppression, throttle, unsubscribe
 # ──────────────────────────────────────────────────────────────
 def ensure_m3_tables():
@@ -5680,6 +5946,9 @@ def handle_resend_webhook(headers, raw_body):
             cur.execute("UPDATE outreach_log SET status='bounced' WHERE resend_message_id=%s", (msg_id,))
             if to_email:
                 add_suppression(to_email, 'bounce', reason='hard bounce reported by Resend')
+                cur.execute("UPDATE enrollments SET status='bounced', stop_reason='hard bounce', updated_at=NOW() "
+                            "WHERE status='active' AND lead_id IN "
+                            "(SELECT lead_id FROM outreach_log WHERE resend_message_id=%s)", (msg_id,))
                 cur.execute("""UPDATE contacts SET email_status='undeliverable', email_checked_at=NOW()
                                WHERE LOWER(email)=LOWER(%s)""", (to_email,))
         elif etype == 'email.complained':
@@ -5747,6 +6016,7 @@ def run_check_replies_bg(job_id):
                     cur.execute("""UPDATE outreach_log SET replied_at=NOW(), status='replied',
                                    reply_content=%s WHERE id=%s""", (body_preview, row[0]))
                     cur.execute("UPDATE leads SET status='replied' WHERE id=%s", (row[1],))
+                    stop_enrollment(row[1], 'replied', 'reply detected via IMAP')
                     conn.commit(); matched += 1
                     JOBS[job_id]['log'].append(f'Reply matched: {sender}')
                 cur.close(); conn.close()
@@ -5790,6 +6060,7 @@ def handle_unsubscribe(token):
                             reason='clicked unsubscribe link')
         cur.execute("UPDATE leads SET status='unsubscribed' WHERE id=%s AND status NOT IN "
                     "('replied','closed')", (lead_id,))
+        stop_enrollment(lead_id, 'unsubscribed', 'clicked unsubscribe link')
         conn.commit(); cur.close(); conn.close()
         print(f'[unsubscribe] lead {lead_id} ({email})')
         return ('<html><body style="font-family:sans-serif;text-align:center;padding-top:60px;">'
@@ -6275,6 +6546,30 @@ class Handler(BaseHTTPRequestHandler):
 
         elif p.startswith('/job/'):
             self.send_json(200, JOBS.get(p[5:], {'status': 'not_found'}))
+        elif p == '/sequences':
+            try:
+                conn = db_conn(); cur = conn.cursor()
+                cur.execute("""SELECT q.id, q.name, q.is_active,
+                               (SELECT COUNT(*) FROM sequence_steps WHERE sequence_id=q.id),
+                               (SELECT COUNT(*) FROM enrollments WHERE sequence_id=q.id AND status='active')
+                               FROM sequences q ORDER BY q.id""")
+                seqs = [{'id': r[0], 'name': r[1], 'is_active': r[2],
+                         'steps': r[3], 'active_enrollments': r[4]} for r in cur.fetchall()]
+                cur.execute("""SELECT e.id, e.lead_id::text, l.business_name, e.current_step,
+                                      e.status, e.steps_sent, to_char(e.next_send_at,'YYYY-MM-DD HH24:MI'),
+                                      e.stop_reason
+                               FROM enrollments e JOIN leads l ON l.id=e.lead_id
+                               WHERE e.status IN ('active','completed') OR e.updated_at > NOW() - INTERVAL '7 days'
+                               ORDER BY e.status='active' DESC, e.updated_at DESC LIMIT 50""")
+                enrls = [{'id': r[0], 'lead_id': r[1], 'business': r[2], 'step': r[3],
+                          'status': r[4], 'steps_sent': r[5], 'next_send': r[6], 'stop_reason': r[7]}
+                         for r in cur.fetchall()]
+                cur.close(); conn.close()
+                self.send_json(200, {'sequences': seqs, 'enrollments': enrls,
+                                     'enabled': bool(CONFIG.get('sequences_enabled', True))})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
         elif p == '/stats':
             try:
                 conn = db_conn(); cur = conn.cursor()
@@ -6703,6 +6998,37 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
+        elif p == '/sequence/enroll':
+            try:
+                lead_ids = body.get('lead_ids') or ([body['lead_id']] if body.get('lead_id') else [])
+                results = []
+                for lid in lead_ids[:50]:
+                    r = enroll_lead_in_default(lid)
+                    r['lead_id'] = lid
+                    results.append(r)
+                ok_count = sum(1 for r in results if r.get('success'))
+                self.send_json(200, {'success': ok_count > 0,
+                                     'enrolled': ok_count,
+                                     'already': sum(1 for r in results if r.get('error') == 'already enrolled'),
+                                     'results': results})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p == '/sequence/stop':
+            try:
+                lead_id = body.get('lead_id', '')
+                stop_enrollment(lead_id, 'stopped', 'stopped manually')
+                self.send_json(200, {'success': True})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p == '/sequence/run':
+            try:
+                process_due_enrollments()
+                self.send_json(200, {'success': True, 'message': 'scheduler pass complete'})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
         elif p == '/check-replies':
             try:
                 job_id = f'job_{int(time.time() * 1000)}'
@@ -7112,6 +7438,7 @@ if __name__ == '__main__':
         ensure_intent_tables()
         ensure_email_verification_columns()
         ensure_m3_tables()
+        ensure_m4_tables()
         print('Schema migration: OK')
     except Exception as e:
         print(f'Schema migration warning (non-fatal): {e}')
@@ -7121,6 +7448,11 @@ if __name__ == '__main__':
         print('Auth: OK (users + sessions in DB)')
     except Exception as e:
         print(f'WARNING: auth tables unavailable — login will fail until Postgres is up: {e}')
+    # M4: follow-up sequence scheduler (every N minutes)
+    if CONFIG.get('sequences_enabled', True):
+        t = threading.Thread(target=sequence_scheduler_loop, daemon=True)
+        t.start()
+        print('Sequences: scheduler running')
     server = ThreadingServer(('0.0.0.0', 8080), Handler)
     print('LeadGen v5 - Multi-Module Intelligence Platform')
     print('Modules: discover, enrich, score, assets, seo, competitor, ecommerce')

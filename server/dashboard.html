@@ -170,6 +170,7 @@ const ICONS = {
   Zap:           'M13 2L3 14h9l-1 8 10-12h-9l1-8z',
   Shield:        'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z',
   ShieldCheck:   'M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1 1 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1zM9 12l2 2 4-4',
+  Repeat:        'M17 1l4 4-4 4M3 11V9a4 4 0 014-4h14M7 23l-4-4 4-4M21 13v2a4 4 0 01-4 4H3',
   Gift:          'M20 12v10H4V12M2 7h20v5H2zM12 22V7M12 7H7.5a2.5 2.5 0 010-5C11 2 12 7 12 7zM12 7h4.5a2.5 2.5 0 000-5C13 2 12 7 12 7z',
   Image:         'M21 5v14a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h14a2 2 0 012 2zM8.5 11a1.5 1.5 0 100-3 1.5 1.5 0 000 3zM21 15l-5-5L5 21',
   ToggleRight:   'M16 16H8a4 4 0 010-8h8a4 4 0 010 8zM16 12a2 2 0 11-4 0 2 2 0 014 0z',
@@ -3935,6 +3936,12 @@ const LeadDetailModal = ({ leadId, onClose, onUpdate }) => {
                 <Button onClick={sendEmail} variant="success" icon="Send" disabled={sending || !lead.owner_email || lead.status === 'sent'}>
                   {sending ? <Spinner /> : lead.status === 'sent' ? 'Already Sent' : 'Send Email'}
                 </Button>
+                <Button onClick={() => api.post('/sequence/enroll', { lead_id: lead.id })
+                  .then(r => showToast(r.enrolled ? 'Enrolled in 3-touch sequence' : (r.results?.[0]?.error || 'Failed'), r.enrolled ? 'success' : 'error'))
+                  .catch(e => showToast('Failed: ' + e.message, 'error'))}
+                  variant="secondary" icon="Repeat" disabled={!lead.owner_email}>
+                  Enroll 3-Touch
+                </Button>
                 <Button onClick={approve} variant="primary" icon="Check">Approve</Button>
                 <Button onClick={reject} variant="danger" icon="XCircle">Reject</Button>
               </div>
@@ -3955,15 +3962,18 @@ const OutreachPage = () => {
   const [selectedLead, setSelectedLead] = useState(null);
   const [outreachLog, setOutreachLog] = useState([]);
   const [view, setView] = useState('ready');
+  const [seqData, setSeqData] = useState(null);
 
   const refresh = () => {
     setLoading(true);
     Promise.all([
       api.get('/leads').catch(() => ({ leads: [] })),
-      api.get('/outreach').catch(() => ({ log: [] }))
-    ]).then(([l, o]) => {
+      api.get('/outreach').catch(() => ({ log: [] })),
+      api.get('/sequences').catch(() => null)
+    ]).then(([l, o, q]) => {
       setLeads(l.leads || []);
       setOutreachLog(o.log || []);
+      setSeqData(q);
       setLoading(false);
     });
   };
@@ -3979,6 +3989,36 @@ const OutreachPage = () => {
 
   return (
     <div className="space-y-6 fade-in">
+      {seqData && seqData.enrollments && seqData.enrollments.length > 0 && (
+        <Card>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="font-semibold flex items-center gap-2"><Icon name="Repeat" /> Follow-up Sequences</h3>
+            <span className="text-xs text-slate-500">
+              {seqData.enrollments.filter(e => e.status === 'active').length} active ·
+              {' '}{seqData.enrollments.filter(e => e.status === 'completed').length} completed
+            </span>
+          </div>
+          <div className="space-y-1.5 max-h-56 overflow-y-auto scrollbar-thin">
+            {seqData.enrollments.slice(0, 12).map(e => (
+              <div key={e.id} className="flex items-center justify-between text-xs bg-slate-50 dark:bg-slate-800 rounded-lg px-3 py-2">
+                <span className="font-medium truncate">{e.business}</span>
+                <span className="flex items-center gap-2">
+                  {e.status === 'active'
+                    ? <Badge variant="info">Step {e.step}/3 · next {e.next_send || 'soon'}</Badge>
+                    : <Badge variant={e.status === 'completed' ? 'success' : 'warning'}>{e.status}</Badge>}
+                  {e.status === 'active' && (
+                    <button className="text-slate-400 hover:text-red-500" title="Stop sequence"
+                      onClick={() => api.post('/sequence/stop', { lead_id: e.lead_id }).then(refresh)}>✕</button>
+                  )}
+                </span>
+              </div>
+            ))}
+          </div>
+          <p className="text-[11px] text-slate-400 mt-2">
+            Day 0 initial → Day 3 nudge → Day 8 final. Stops automatically on reply, unsubscribe, or bounce.
+          </p>
+        </Card>
+      )}
       <div>
         <h1 className="text-2xl font-bold">Outreach</h1>
         <p className="text-sm text-slate-500 mt-1">Review and send personalized emails</p>
