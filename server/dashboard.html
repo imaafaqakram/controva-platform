@@ -171,6 +171,7 @@ const ICONS = {
   Shield:        'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z',
   ShieldCheck:   'M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1 1 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1zM9 12l2 2 4-4',
   Repeat:        'M17 1l4 4-4 4M3 11V9a4 4 0 014-4h14M7 23l-4-4 4-4M21 13v2a4 4 0 01-4 4H3',
+  DollarSign:    'M12 1v22M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6',
   Gift:          'M20 12v10H4V12M2 7h20v5H2zM12 22V7M12 7H7.5a2.5 2.5 0 010-5C11 2 12 7 12 7zM12 7h4.5a2.5 2.5 0 000-5C13 2 12 7 12 7z',
   Image:         'M21 5v14a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h14a2 2 0 012 2zM8.5 11a1.5 1.5 0 100-3 1.5 1.5 0 000 3zM21 15l-5-5L5 21',
   ToggleRight:   'M16 16H8a4 4 0 010-8h8a4 4 0 010 8zM16 12a2 2 0 11-4 0 2 2 0 014 0z',
@@ -393,10 +394,12 @@ const DashboardPage = ({ setPage }) => {
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [recent, setRecent] = useState([]);
+  const [costs, setCosts] = useState(null);
 
   useEffect(() => {
-    Promise.all([api.get('/stats').catch(() => null), api.get('/leads').catch(() => ({ leads: [] }))])
-      .then(([s, l]) => { setStats(s); setRecent((l.leads || []).slice(0, 6)); setLoading(false); });
+    Promise.all([api.get('/stats').catch(() => null), api.get('/leads').catch(() => ({ leads: [] })),
+                 api.get('/cost-stats').catch(() => null)])
+      .then(([s, l, c]) => { setStats(s); setRecent((l.leads || []).slice(0, 6)); setCosts(c); setLoading(false); });
   }, []);
 
   return (
@@ -411,6 +414,34 @@ const DashboardPage = ({ setPage }) => {
         <StatCard icon="Mail" label="With Email" value={loading ? '...' : (stats?.with_email || 0)} color="green" />
         <StatCard icon="MapPin" label="Cities" value={loading ? '...' : (stats?.cities || 0)} color="amber" />
       </div>
+
+      {/* M5: API spend this month */}
+      {costs && (
+        <Card className={costs.budget_warning ? 'border-2 border-red-400' : ''}>
+          <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+            <h3 className="font-semibold flex items-center gap-2"><Icon name="DollarSign" /> API Spend — this month</h3>
+            {costs.budget_warning && <Badge variant="danger">⚠ {costs.budget_pct}% of ${costs.budget} budget</Badge>}
+          </div>
+          <div className="flex items-baseline gap-4 mb-2">
+            <span className="text-3xl font-bold">${costs.month.toFixed(2)}</span>
+            <span className="text-sm text-slate-500">of ${costs.budget} budget</span>
+            <span className="text-sm text-slate-500 ml-auto">Today: ${costs.today.toFixed(3)} · Per lead: ${costs.cost_per_lead.toFixed(4)}</span>
+          </div>
+          <div className="h-2 bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden">
+            <div className={'h-full rounded-full ' + (costs.budget_warning ? 'bg-red-500' : 'bg-accent-500')}
+                 style={{ width: Math.min(costs.budget_pct, 100) + '%' }}></div>
+          </div>
+          {costs.by_provider && costs.by_provider.length > 0 && (
+            <div className="flex gap-3 flex-wrap mt-3">
+              {costs.by_provider.slice(0, 6).map(p => (
+                <span key={p.provider} className="text-xs bg-slate-50 dark:bg-slate-800 rounded-full px-3 py-1">
+                  {p.provider}: <b>${p.month.toFixed(2)}</b>
+                </span>
+              ))}
+            </div>
+          )}
+        </Card>
+      )}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <Card className="lg:col-span-2">
           <div className="flex items-center justify-between mb-4">

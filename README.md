@@ -394,7 +394,7 @@ auto_image      — generate mockup images automatically (default: OFF)
 Browser
    │
    ▼
-dashboard.html  (React + Tailwind, single file, ~135 KB)
+dashboard.html  (React + Tailwind, single file — the frontend)
    │
    │ REST/JSON over HTTP port 8080
    ▼

@@ -94,6 +94,8 @@ CONFIG = {
     # M4 sequences — automatic multi-touch follow-ups
     'sequences_enabled': True,
     'sequence_interval_minutes': 10,
+    # M5: monthly API budget (USD) — dashboard alert at 80%
+    'cost_budget_monthly': 50,
 }
 
 # Map enrichment_strategy → providers list for enrich_lead()
@@ -523,6 +525,7 @@ def research_result_to_csv(result):
 _GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-flash-latest', 'gemini-2.0-flash', 'gemini-1.5-flash']
 
 def gemini_call(prompt, max_tokens=300):
+    log_api_usage('gemini', 'gemini_call')
     """Call Gemini, trying a few model names so a deprecated/renamed model
     or a per-model quota limit doesn't silently break query parsing.
     Quota (429) and unknown-model (404) errors are model-specific on the
@@ -1110,6 +1113,7 @@ _PLACES_LAST_ERROR  = None   # set by _places_text_post on non-retryable failure
 
 
 def _places_text_post(body, tries=3):
+    log_api_usage('google_places', 'text_search_new')
     """POST to Places Text Search (New) with retry/backoff.
     Captures both HTTP errors and JSON-embedded errors (Google returns some
     errors as 200 OK with {error:{code,message}} in the body)."""
@@ -1148,6 +1152,7 @@ def _places_text_post(body, tries=3):
 
 
 def _classic_text_search(text_query, lat, lng, radius_m, max_pages=3):
+    log_api_usage('google_places', 'text_search_classic')
     """Classic Places Text Search (maps.googleapis.com) — works with any Maps key,
     no billing tier needed beyond basic Maps. Falls back from the New API on 403."""
     params = {'query': text_query, 'key': GOOGLE_API_KEY}
@@ -1744,10 +1749,12 @@ def _serper_request(url, body, timeout, label, retries=2):
     return {}
 
 def serper_search(query, num=10):
+    log_api_usage('serper', 'search', meta=query[:200])
     body = json.dumps({'q': query, 'num': num}).encode()
     return _serper_request('https://google.serper.dev/search', body, 15, 'Serper')
 
 def oxylabs_scrape(url, output='markdown'):
+    log_api_usage('oxylabs', 'scrape')
     if not OXYLABS: return None
     try:
         result = OXYLABS.scrape(url=url, output_format=output, render_javascript=False)
@@ -3196,6 +3203,7 @@ def product_hunt(category, country='us', count=8):
 #  IMAGE GENERATION (Optional + Toggleable)
 # ──────────────────────────────────────────────────────────────
 def generate_mockup_replicate(business_name, niche, city, custom_prompt=None):
+    log_api_usage('replicate', 'mockup')
     """Use Replicate FLUX (existing)."""
     prompt = custom_prompt or f"Professional modern website homepage screenshot mockup for '{business_name}', a {niche} business in {city}. Clean hero section, white navigation bar, green CTA button, photorealistic UI mockup, desktop browser viewport"
     try:
@@ -3218,6 +3226,7 @@ def generate_mockup_replicate(business_name, niche, city, custom_prompt=None):
     return None
 
 def generate_mockup_imagine_art(business_name, niche, city, custom_prompt=None):
+    log_api_usage('imagine_art', 'mockup')
     """Use imagine.art API. Returns URL of generated image."""
     if not IMAGINE_ART_KEY:
         return None
@@ -3387,7 +3396,9 @@ Respond ONLY with valid JSON:
         data = json.loads(resp.read().decode())
         text = data['content'][0]['text']
         m = re.search(r'\{[\s\S]*\}', text)
-        if m: return json.loads(m.group())
+        if m:
+            log_api_usage('claude', 'email_copy')
+            return json.loads(m.group())
     except Exception as e:
         print(f'Claude error: {e}')
     return None
@@ -3413,7 +3424,9 @@ Respond ONLY with JSON: {{"score":<1-10>,"reason":"<1 sentence>","best_channel":
     if text:
         try:
             m = re.search(r'\{[\s\S]*\}', text)
-            if m: return json.loads(m.group())
+            if m:
+                log_api_usage('claude', 'score_fallback')
+                return json.loads(m.group())
         except: pass
     return {'score': 5, 'reason': 'Default', 'best_channel': 'Phone'}
 
@@ -4119,6 +4132,7 @@ def verify_email(email, probe_catch_all=True):
     return result
 
 def _millionverifier_check(email):
+    log_api_usage('millionverifier', 'verify', meta=email[:200])
     """Optional external verification via MillionVerifier (~$1/1000 checks).
     Returns {'status': deliverable|risky|undeliverable|unknown, 'raw': code}
     or None when unconfigured/unreachable. API result codes:
@@ -4307,6 +4321,7 @@ def intent_search_dorks(query, direction, location=''):
     return []
 
 def serper_search_with_recency(query, num=10, recency_days=30):
+    log_api_usage('serper', 'intent_search', meta=query[:200])
     """Serper search with Google date filter (qdr param)."""
     if   recency_days <= 1:   tbs = 'qdr:d'
     elif recency_days <= 7:   tbs = 'qdr:w'
@@ -5597,10 +5612,46 @@ Respond ONLY with valid JSON:
         resp = urllib.request.urlopen(req, timeout=30)
         text = json.loads(resp.read().decode())['content'][0]['text']
         m = re.search(r'\{[\s\S]*\}', text)
-        if m: return json.loads(m.group())
+        if m:
+            log_api_usage('claude', 'email_copy')
+            return json.loads(m.group())
     except Exception as e:
         print(f'[sequence] claude {kind} failed: {e}')
     return None
+
+# ──────────────────────────────────────────────────────────────
+#  M5: COST TRACKING — every paid API call logged with an estimate
+# ──────────────────────────────────────────────────────────────
+COST_PER_CALL = {
+    'serper': 0.001, 'gemini': 0.0002, 'claude': 0.03,
+    'google_places': 0.032, 'oxylabs': 0.002, 'replicate': 0.003,
+    'imagine_art': 0.005, 'resend': 0.0005, 'millionverifier': 0.001,
+}
+
+def ensure_m5_tables():
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS api_usage (
+            id          BIGSERIAL PRIMARY KEY,
+            provider    VARCHAR(60) NOT NULL,
+            endpoint    VARCHAR(120),
+            cost        NUMERIC(10,6) NOT NULL DEFAULT 0,
+            meta        TEXT,
+            created_at  TIMESTAMPTZ DEFAULT NOW()
+        )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_api_usage_time ON api_usage(created_at DESC)")
+    conn.commit(); cur.close(); conn.close()
+
+def log_api_usage(provider, endpoint='', cost=None, meta=''):
+    """Fire-and-forget cost logging. NEVER raises into the caller."""
+    try:
+        c = COST_PER_CALL.get(provider, 0) if cost is None else cost
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("INSERT INTO api_usage (provider, endpoint, cost, meta) VALUES (%s,%s,%s,%s)",
+                    (provider, endpoint[:120], c, (meta or '')[:300]))
+        conn.commit(); cur.close(); conn.close()
+    except Exception:
+        pass
 
 def enroll_lead_in_default(lead_id):
     """Enroll a lead into the default 3-touch sequence (step 1 sends on the next tick)."""
@@ -6124,6 +6175,7 @@ def send_email_via_resend(to_email, subject, body_text, body_html=None, from_ema
         )
         resp = urllib.request.urlopen(req, timeout=20)
         data = json.loads(resp.read().decode())
+        log_api_usage('resend', 'send')
         return {"success": True, "message_id": data.get("id"), "data": data}
     except urllib.error.HTTPError as e:
         err = e.read().decode()
@@ -6567,6 +6619,34 @@ class Handler(BaseHTTPRequestHandler):
                 cur.close(); conn.close()
                 self.send_json(200, {'sequences': seqs, 'enrollments': enrls,
                                      'enabled': bool(CONFIG.get('sequences_enabled', True))})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p == '/cost-stats':
+            try:
+                conn = db_conn(); cur = conn.cursor()
+                cur.execute("""SELECT provider, SUM(cost),
+                               SUM(cost) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours') as today
+                               FROM api_usage WHERE created_at > NOW() - INTERVAL '30 days'
+                               GROUP BY provider ORDER BY SUM(cost) DESC""")
+                by_provider = [{'provider': r[0], 'month': float(r[1] or 0), 'today': float(r[2] or 0)}
+                               for r in cur.fetchall()]
+                cur.execute("SELECT COALESCE(SUM(cost),0) FROM api_usage WHERE created_at > NOW() - INTERVAL '24 hours'")
+                today = float(cur.fetchone()[0])
+                cur.execute("SELECT COALESCE(SUM(cost),0) FROM api_usage WHERE created_at >= date_trunc('month', NOW())")
+                month = float(cur.fetchone()[0])
+                cur.execute("SELECT COUNT(*) FROM leads WHERE lead_type IS NULL")
+                nleads = cur.fetchone()[0]
+                cur.close(); conn.close()
+                budget = float(CONFIG.get('cost_budget_monthly', 50))
+                self.send_json(200, {
+                    'today': round(today, 4), 'month': round(month, 4),
+                    'by_provider': by_provider,
+                    'cost_per_lead': round(month / nleads, 4) if nleads else 0,
+                    'budget': budget,
+                    'budget_pct': int(month / budget * 100) if budget else 0,
+                    'budget_warning': month >= budget * 0.8,
+                })
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
@@ -7439,6 +7519,7 @@ if __name__ == '__main__':
         ensure_email_verification_columns()
         ensure_m3_tables()
         ensure_m4_tables()
+        ensure_m5_tables()
         print('Schema migration: OK')
     except Exception as e:
         print(f'Schema migration warning (non-fatal): {e}')

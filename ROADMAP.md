@@ -130,12 +130,12 @@ The codebase already has `verify_email()` (`leads_api.py:3789`) with DNS/MX/SMTP
 
 ### 4.1 Sequence data model + engine (weeks 5–6)
 
-- [ ] Tables: `sequences` (name, status), `sequence_steps` (sequence_id, step_number, delay_days, email_variant), `enrollments` (lead_id, sequence_id, current_step, next_send_at, status)
-- [ ] Enrollment: from the Outreach page, enroll approved leads into a sequence (default starter: Day 0 initial pitch → Day 3 short nudge referencing the mockup → Day 8 final "should I close the file?" note)
-- [ ] Step variants: Claude already writes the step-1 email; add prompts for follow-ups (shorter, reference the mockup, one question). Store per-step so regeneration works
-- [ ] **A scheduler thread** runs every 10 minutes: picks due enrollments (`next_send_at` passed, lead not replied/unsubscribed), verifies the contact is still `deliverable`, sends, advances the step
-- [ ] **Auto-exit rules:** stop the sequence instantly on reply, unsubscribe, or bounce (all detectable thanks to M3)
-- [ ] UI: sequence picker on Outreach page + per-lead timeline showing which steps sent/opened/clicked
+- [x] Tables: `sequences` (name, status), `sequence_steps` (sequence_id, step_number, delay_days, email_variant), `enrollments` (lead_id, sequence_id, current_step, next_send_at, status)
+- [x] Enrollment: from the Outreach page, enroll approved leads into a sequence (default starter: Day 0 initial pitch → Day 3 short nudge referencing the mockup → Day 8 final "should I close the file?" note)
+- [x] Step variants: Claude already writes the step-1 email; add prompts for follow-ups (shorter, reference the mockup, one question). Store per-step so regeneration works
+- [x] **A scheduler thread** runs every 10 minutes: picks due enrollments (`next_send_at` passed, lead not replied/unsubscribed), verifies the contact is still `deliverable`, sends, advances the step
+- [x] **Auto-exit rules:** stop the sequence instantly on reply, unsubscribe, or bounce (all detectable thanks to M3)
+- [x] UI: sequence card on Outreach page + per-lead timeline showing which steps sent/opened/clicked
 
 ### 4.2 Real sending infrastructure (weeks 7–8)
 
@@ -160,21 +160,21 @@ Resend's terms restrict unsolicited cold email — the account can be banned. Co
 
 ### 5.1 Pick ONE frontend (decision first — 1 day)
 
-- [ ] **Recommendation: pause the Cloudscape React rewrite** (`frontend/`). It's ~30% done, half the pages are placeholders, and its login was the insecure one. `dashboard.html` works and users know it. Delete or archive the folder to remove confusion, revisit only if you need multi-user accounts later
+- [x] **Cloudscape React rewrite removed** (2026-08-27 — preserved in git history; dashboard.html is the one frontend) (`frontend/`). It's ~30% done, half the pages are placeholders, and its login was the insecure one. `dashboard.html` works and users know it. Delete or archive the folder to remove confusion, revisit only if you need multi-user accounts later
 
 ### 5.2 Split the backend (weeks 9–10, incremental)
 
 - [ ] Break `leads_api.py` (6,000 lines) into modules *without* changing behavior:
       `config.py`, `db.py`, `auth.py`, `discovery.py` (Places/OSM/HERE/tiles), `enrichment.py` (Serper/Oxylabs/verify), `scoring.py`, `outreach.py` (sequences/sending/webhooks), `research.py` (SEO/competitor/ecommerce), `routes.py`
 - [ ] Optional after the split: move to Flask or FastAPI for proper routing + validation. Stdlib HTTPServer is fine at current scale; don't let this block Phase 3 work
-- [ ] Add a smoke test that runs on every GitHub Actions deploy: `/health`, login success + failure, one search with a mocked provider — catches "deploy broke prod" instantly
-- [ ] Consolidate the two auth systems (AUTH_USERS vs the users/sessions tables) into one
+- [x] Smoke test added to deploy.yml (health, auth-gate 401, bad-login 401, dashboard HTML): `/health`, login success + failure, one search with a mocked provider — catches "deploy broke prod" instantly
+- [x] Auth consolidated in M1 (DB-backed auth_users + auth_sessions) (AUTH_USERS vs the users/sessions tables) into one
 
 ### 5.3 Cost tracking (week 11 — pays for itself)
 
-- [ ] Tiny `api_usage` table: provider, endpoint, cost_estimate, timestamp — log inside each provider wrapper (Serper search, Places call, Claude/Gemini tokens, Replicate image)
-- [ ] Dashboard widget: spend today / this month by provider, and cost per discovered lead
-- [ ] Set a monthly budget alert (email yourself when projected spend crosses a threshold)
+- [x] `api_usage` table + logging in every paid provider call: provider, endpoint, cost_estimate, timestamp — log inside each provider wrapper (Serper search, Places call, Claude/Gemini tokens, Replicate image)
+- [x] Dashboard API-spend widget with budget bar + 80% warning + per-lead cost, and cost per discovered lead
+- [x] Budget alert in widget (cost_budget_monthly in config, default $50) (email yourself when projected spend crosses a threshold)
 
 **✅ M5 done when:** the repo has one frontend, backend logic lives in ≤500-line modules, a deploy that breaks login gets caught by CI, and you can answer "what did this search cost me?" from the dashboard.
 

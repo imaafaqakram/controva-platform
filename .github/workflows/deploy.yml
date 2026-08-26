@@ -108,6 +108,36 @@ jobs:
             fi
             curl -s http://localhost:8080/health | head -c 100
 
+      # ── Smoke test: catches "deploy broke prod" instantly ──
+      - name: Smoke test
+        if: steps.changes.outputs.api == 'true' || steps.changes.outputs.ui == 'true'
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SERVER_USER }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          script: |
+            sleep 3
+            FAIL=0
+            # 1. health endpoint
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health)
+            [ "$CODE" = "200" ] && echo "health: OK" || { echo "health: FAIL ($CODE)"; FAIL=1; }
+            # 2. unauthenticated API access must be rejected
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/leads)
+            [ "$CODE" = "401" ] && echo "auth gate: OK" || { echo "auth gate: FAIL ($CODE — expected 401)"; FAIL=1; }
+            # 3. bad credentials must be rejected
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:8080/auth/login \
+                    -H "Content-Type: application/json" -d '{"username":"ci","password":"ci-smoke"}')
+            [ "$CODE" = "401" ] && echo "bad-login rejection: OK" || { echo "bad-login rejection: FAIL ($CODE)"; FAIL=1; }
+            # 4. dashboard HTML serves
+            BODY=$(curl -s http://localhost:8080/ | head -c 2000)
+            echo "$BODY" | grep -qi "ontrova" && echo "dashboard: OK" || { echo "dashboard: FAIL"; FAIL=1; }
+            if [ "$FAIL" = "1" ]; then
+              echo "::error::Smoke test failed — see steps above"
+              journalctl -u leadgen-api -n 30 --no-pager
+              exit 1
+            fi
+
       # ── Summary ─────────────────────────────────────────────
       - name: Deployment summary
         run: |
