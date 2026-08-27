@@ -1,6 +1,20 @@
 # Controva Intelligence Platform
 
-> AI-powered B2B lead generation platform — find businesses, verify their digital presence, enrich contacts, and send personalized outreach. All from one self-hosted dashboard.
+> **AI lead prospecting & qualification platform.** Define your ideal customer profile —
+> Controva autonomously discovers matching companies, identifies decision makers, verifies
+> and enriches their data, AI-researches each company to detect pain points and buying
+> signals, scores fit × need, writes personalised outreach, and pushes the best
+> opportunities into your CRM. Self-hosted, compliance-first, cost-tracked.
+
+**Capabilities:** ICP-driven discovery (Google Places, OSM, HERE, live intent sources) ·
+decision-maker identification · SMTP-verified email enrichment · AI research with
+pain-point detection · composite lead scoring · personalised multi-touch sequences ·
+unsubscribe/bounce/throttle compliance · open & reply tracking · CRM push (Pipedrive /
+HubSpot / webhook) · live API cost dashboard.
+
+**Program:** M1–M5 shipped (security hardening, verification pipeline, compliance &
+tracking, follow-up sequences, cost telemetry). M6–M10 in progress — see
+[`docs/CLIENT_MVP_PLAN.md`](docs/CLIENT_MVP_PLAN.md) for the current program plan.
 
 ---
 
@@ -27,8 +41,12 @@
 
 Controva is a full B2B lead generation pipeline, self-hosted on your own VPS:
 
-| Step | What happens |
+| Stage | What happens |
 |---|---|
+| **ICP** *(M6)* | Define your ideal customer once — autonomous discovery keeps finding matching companies |
+| **Research** *(M7)* | AI reads the company's web presence, reviews, tech, hiring signals → pain points + recommended pitch angle |
+| **Qualify** *(M8)* | Composite scoring: ICP fit × detected need × intent, with full breakdown |
+| **CRM** *(M9)* | Qualified opportunities pushed to Pipedrive/HubSpot/webhook automatically |
 | **Search** | Type "pest control companies in New Jersey" — AI parses it, searches 4 sources simultaneously |
 | **Discover** | Finds businesses via Google Places, OpenStreetMap, and HERE Maps |
 | **Verify** | Checks whether each business actually has a live website |
