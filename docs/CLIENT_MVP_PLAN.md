@@ -4,7 +4,7 @@
 > without removing anything from the current system. Every existing capability stays;
 > each milestone adds a new subsystem on top.
 >
-> Created: 2026-08-27 · Status: in progress · Owner: Controva LLC
+> Created: 2026-08-27 · Status: M6 shipped, M7 next · Owner: Controva LLC
 
 ---
 
@@ -31,7 +31,7 @@ cost tracking) is retained as the foundation these milestones build on.
 
 | # | Milestone | Client requirement it closes | Depends on |
 |---|-----------|------------------------------|------------|
-| M6 | ICP Engine + Autonomous Discovery | "client defines ICP, system finds companies automatically" | existing discovery |
+| M6 | ICP Engine + Autonomous Discovery ✅ **shipped** | "client defines ICP, system finds companies automatically" | existing discovery |
 | M7 | AI Research & Pain Detection | "researches the company, detects needs/pain points" | M6 |
 | M8 | Pain-Aware Scoring & Messaging | "scores the leads", "personalised message generation" | M7 |
 | M9 | CRM Integration | "sends best opportunities into a CRM" | M8 |

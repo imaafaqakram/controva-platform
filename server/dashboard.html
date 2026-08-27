@@ -144,6 +144,7 @@ const ICONS = {
   Workflow:      'M3 3h6v6H3zM15 3h6v6h-6zM9 15h6v6H9zM6 9v3a3 3 0 003 3M18 9v3a3 3 0 01-3 3M12 9v6',
   TrendingUp:    'M23 6l-9.5 9.5-5-5L1 18M17 6h6v6',
   Target:        'M22 12a10 10 0 11-20 0 10 10 0 0120 0zM18 12a6 6 0 11-12 0 6 6 0 0112 0zM14 12a2 2 0 11-4 0 2 2 0 014 0z',
+  Play:          'M5 3l14 9-14 9V3z',
   Share2:        'M16 6a3 3 0 11-6 0 3 3 0 016 0zM16 18a3 3 0 11-6 0 3 3 0 016 0zM6 12a3 3 0 11-6 0 3 3 0 016 0z M8.59 13.51l6.83 3.98M15.41 6.51l-6.82 3.98',
   ShoppingBag:   'M6 2L3 6v14a2 2 0 002 2h14a2 2 0 002-2V6l-3-4zM3 6h18M16 10a4 4 0 11-8 0',
   Settings:      'M12 1v6m0 6v6M4.22 4.22l4.24 4.24m7.08 7.08l4.24 4.24M1 12h6m6 0h6M4.22 19.78l4.24-4.24m7.08-7.08l4.24-4.24',
@@ -3985,6 +3986,178 @@ const LeadDetailModal = ({ leadId, onClose, onUpdate }) => {
 };
 
 // ─────────────────────────────────────────────────
+//  ICP Page - Autonomous ideal-customer prospecting (M6)
+// ─────────────────────────────────────────────────
+const ICPPage = ({ setPage }) => {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [editing, setEditing] = useState(null);   // null | {} | profile
+  const [runJob, setRunJob] = useState(null);
+  const { showToast } = useToast();
+
+  const refresh = () => {
+    setLoading(true);
+    api.get('/icp').then(d => { setData(d); setLoading(false); }).catch(() => setLoading(false));
+  };
+  useEffect(refresh, []);
+
+  useEffect(() => {
+    if (!runJob) return;
+    const t = setInterval(() => {
+      api.get('/job-status?job_id=' + runJob.job_id).then(j => {
+        setRunJob(j);
+        if (j.status === 'completed' || j.status === 'failed') { clearInterval(t); refresh(); }
+      }).catch(() => {});
+    }, 2500);
+    return () => clearInterval(t);
+  }, [runJob && runJob.job_id]);
+
+  const save = async () => {
+    const r = await api.post('/icp/save', editing);
+    if (r.success !== false && !r.error) { showToast('ICP saved'); setEditing(null); refresh(); }
+    else showToast('Save failed: ' + (r.error || ''), 'error');
+  };
+  const del = async (p) => {
+    if (!confirm('Delete ICP "' + p.name + '"? Leads stay, only the profile is removed.')) return;
+    await api.post('/icp/delete', { id: p.id }); refresh();
+  };
+  const run = async (p) => {
+    const r = await api.post('/icp/run', { id: p.id });
+    if (r.job_id) { setRunJob({ job_id: r.job_id, status: 'running', progress: 0, log: [] }); showToast('ICP run started'); }
+  };
+
+  const p = editing || {};
+  const setF = (k, v) => setEditing({ ...p, [k]: v });
+
+  return (
+    <div className="space-y-6 fade-in">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div>
+          <h1 className="text-2xl font-bold">Ideal Customer Profiles</h1>
+          <p className="text-sm text-slate-500 mt-1">
+            Define once — Controva discovers, pipelines and scores matching companies automatically every day
+            {data && data.scheduler_enabled ? ' · scheduler ON' : ' · scheduler OFF (Settings)'}
+          </p>
+        </div>
+        <Button variant="primary" icon="Plus" onClick={() => setEditing({ name: '', industries: '', geos: '', keywords: '', exclusions: '', source_mix: 'all', min_lead_score: 60, push_to_crm: false, is_active: true })}>
+          New ICP
+        </Button>
+      </div>
+
+      {runJob && (runJob.status === 'running' || runJob.log?.length > 0) && (
+        <Card className="border-2 border-amber-300">
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="font-semibold text-sm flex items-center gap-2"><Spinner /> ICP run in progress</h3>
+            <span className="text-xs text-slate-500">{runJob.progress || 0}%</span>
+          </div>
+          <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden mb-2">
+            <div className="h-full bg-amber-400 rounded-full transition-all" style={{ width: (runJob.progress || 0) + '%' }}></div>
+          </div>
+          <div className="text-xs font-mono space-y-0.5 max-h-40 overflow-y-auto">
+            {(runJob.log || []).slice(-8).map((l, i) => <div key={i} className="text-slate-500">{l}</div>)}
+          </div>
+        </Card>
+      )}
+
+      {loading ? (
+        <div className="py-16 text-center"><Spinner size="w-6 h-6" /></div>
+      ) : (data?.profiles || []).length === 0 ? (
+        <Card><div className="py-12 text-center text-slate-500">
+          <Icon name="Target" className="w-12 h-12 mx-auto mb-3 opacity-30" />
+          <p className="font-medium">No ICPs yet</p>
+          <p className="text-sm mt-1">Create one: "Dental clinics — Dubai, Abu Dhabi" and watch leads arrive daily.</p>
+          <Button variant="primary" className="mt-4" onClick={() => setEditing({ name: '', industries: '', geos: '', keywords: '', exclusions: '', source_mix: 'all', min_lead_score: 60, push_to_crm: false, is_active: true })}>Create your first ICP</Button>
+        </div></Card>
+      ) : (
+        <div className="grid gap-4 md:grid-cols-2">
+          {data.profiles.map(pr => (
+            <Card key={pr.id} className={pr.is_active ? '' : 'opacity-60'}>
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <h3 className="font-semibold truncate">{pr.name}</h3>
+                  <p className="text-xs text-slate-500 mt-0.5 truncate">
+                    {pr.industries} · {pr.geos}
+                  </p>
+                </div>
+                <Badge variant={pr.is_active ? 'success' : 'grey'}>{pr.is_active ? 'Active' : 'Paused'}</Badge>
+              </div>
+              <div className="grid grid-cols-3 gap-2 mt-3 text-center">
+                <div className="bg-slate-50 dark:bg-slate-800 rounded-lg p-2">
+                  <div className="text-lg font-bold">{pr.lead_count}</div>
+                  <div className="text-[10px] text-slate-500 uppercase">Leads</div>
+                </div>
+                <div className="bg-slate-50 dark:bg-slate-800 rounded-lg p-2">
+                  <div className="text-lg font-bold text-green-600">{pr.qualified_count}</div>
+                  <div className="text-[10px] text-slate-500 uppercase">Scored 7+</div>
+                </div>
+                <div className="bg-slate-50 dark:bg-slate-800 rounded-lg p-2">
+                  <div className="text-[11px] font-mono pt-1.5">{pr.last_run || 'never'}</div>
+                  <div className="text-[10px] text-slate-500 uppercase">Last run</div>
+                </div>
+              </div>
+              <div className="flex gap-2 mt-3">
+                <Button size="sm" variant="primary" icon="Play" onClick={() => run(pr)} disabled={runJob?.status === 'running'}>Run Now</Button>
+                <Button size="sm" variant="secondary" icon="Edit3" onClick={() => setEditing(pr)}>Edit</Button>
+                <Button size="sm" variant="ghost" icon="Users" onClick={() => setPage('leads')}>Leads</Button>
+                <Button size="sm" variant="ghost" className="ml-auto text-red-500" icon="XCircle" onClick={() => del(pr)}> </Button>
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
+
+      {(data?.recent_runs || []).length > 0 && (
+        <Card>
+          <h3 className="font-semibold mb-2 text-sm">Recent runs</h3>
+          <div className="text-xs space-y-1">
+            {data.recent_runs.slice(0, 8).map((r, i) => (
+              <div key={i} className="flex justify-between bg-slate-50 dark:bg-slate-800 rounded px-3 py-1.5">
+                <span>ICP #{r.icp_id} · {r.started}</span>
+                <span>{r.status === 'completed'
+                  ? `${r.new} new / ${r.found} found`
+                  : <Badge variant={r.status === 'failed' ? 'danger' : 'info'}>{r.status}</Badge>}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      {editing && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={() => setEditing(null)}>
+          <Card className="w-full max-w-lg max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <h3 className="font-semibold mb-4">{p.id ? 'Edit ICP' : 'New ICP'}</h3>
+            <div className="space-y-3">
+              <div><label className="text-xs font-medium text-slate-500 block mb-1">Profile name</label>
+                <Input value={p.name || ''} onChange={v => setF('name', v)} placeholder="Dental clinics — UAE" /></div>
+              <div><label className="text-xs font-medium text-slate-500 block mb-1">Industries (comma separated)</label>
+                <Input value={p.industries || ''} onChange={v => setF('industries', v)} placeholder="dental clinics, vet clinics" /></div>
+              <div><label className="text-xs font-medium text-slate-500 block mb-1">Locations ("City CC" comma separated)</label>
+                <Input value={p.geos || ''} onChange={v => setF('geos', v)} placeholder="Dubai AE, Abu Dhabi AE, London GB" /></div>
+              <div><label className="text-xs font-medium text-slate-500 block mb-1">Extra keywords (optional)</label>
+                <Input value={p.keywords || ''} onChange={v => setF('keywords', v)} placeholder="implants, cosmetic" /></div>
+              <div><label className="text-xs font-medium text-slate-500 block mb-1">Exclusions (optional)</label>
+                <Input value={p.exclusions || ''} onChange={v => setF('exclusions', v)} placeholder="-franchise, -chain" /></div>
+              <div className="flex items-center gap-4">
+                <label className="flex items-center gap-2 text-sm">
+                  <input type="checkbox" checked={p.is_active} onChange={e => setF('is_active', e.target.checked)} /> Active (scheduler runs daily)
+                </label>
+                <label className="flex items-center gap-2 text-sm">
+                  <input type="checkbox" checked={p.push_to_crm} onChange={e => setF('push_to_crm', e.target.checked)} /> Push qualified to CRM (M9)
+                </label>
+              </div>
+            </div>
+            <div className="flex gap-2 mt-5">
+              <Button variant="primary" onClick={save}>{p.id ? 'Save' : 'Create'}</Button>
+              <Button variant="ghost" onClick={() => setEditing(null)}>Cancel</Button>
+            </div>
+          </Card>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────
 //  Outreach Page - Ready-to-send queue
 // ─────────────────────────────────────────────────
 const OutreachPage = () => {
@@ -4300,6 +4473,7 @@ const App = () => {
   const nav = [
     { id: 'dashboard', label: 'Dashboard', icon: 'LayoutDashboard' },
     { id: 'search',    label: 'Search',    icon: 'Search' },
+    { id: 'icp',       label: 'ICP',        icon: 'Target' },
     { id: 'leads',     label: 'Leads',     icon: 'Users' },
     { id: 'pipeline',  label: 'Pipeline',  icon: 'Workflow' },
     { id: 'outreach',  label: 'Outreach',  icon: 'Send' },
@@ -4316,7 +4490,8 @@ const App = () => {
   ];
 
   let CurrentPage = DashboardPage;
-  if (page === 'search') CurrentPage = SearchPage;
+  if (page === 'icp') CurrentPage = ICPPage;
+  else if (page === 'search') CurrentPage = SearchPage;
   else if (page === 'leads') CurrentPage = LeadsPage;
   else if (page === 'pipeline') CurrentPage = PipelinePage;
   else if (page === 'seo') CurrentPage = SEOPage;

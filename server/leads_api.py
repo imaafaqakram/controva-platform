@@ -96,6 +96,9 @@ CONFIG = {
     'sequence_interval_minutes': 10,
     # M5: monthly API budget (USD) — dashboard alert at 80%
     'cost_budget_monthly': 50,
+    # M6: autonomous ICP prospecting
+    'icp_scheduler_enabled': True,
+    'icp_daily_cap': 40,          # max discovery searches per ICP run
 }
 
 # Map enrichment_strategy → providers list for enrich_lead()
@@ -5620,6 +5623,166 @@ Respond ONLY with valid JSON:
     return None
 
 # ──────────────────────────────────────────────────────────────
+#  M6: ICP ENGINE — autonomous ideal-customer-profile prospecting
+# ──────────────────────────────────────────────────────────────
+def ensure_icp_tables():
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS icp_id INT")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS icp_profiles (
+            id             SERIAL PRIMARY KEY,
+            name           VARCHAR(200) NOT NULL,
+            industries     TEXT NOT NULL DEFAULT '',
+            geos           TEXT NOT NULL DEFAULT '',
+            keywords       TEXT NOT NULL DEFAULT '',
+            exclusions     TEXT NOT NULL DEFAULT '',
+            source_mix     VARCHAR(30) NOT NULL DEFAULT 'all',
+            min_lead_score SMALLINT NOT NULL DEFAULT 60,
+            push_to_crm    BOOLEAN NOT NULL DEFAULT FALSE,
+            is_active      BOOLEAN NOT NULL DEFAULT TRUE,
+            last_run_at    TIMESTAMPTZ,
+            created_at     TIMESTAMPTZ DEFAULT NOW()
+        )""")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS icp_runs (
+            id             SERIAL PRIMARY KEY,
+            icp_id         INT REFERENCES icp_profiles(id) ON DELETE CASCADE,
+            started_at     TIMESTAMPTZ DEFAULT NOW(),
+            finished_at    TIMESTAMPTZ,
+            leads_found    INT DEFAULT 0,
+            leads_new      INT DEFAULT 0,
+            status         VARCHAR(30) DEFAULT 'running',
+            log            TEXT
+        )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_leads_icp ON leads(icp_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_icp_runs_icp ON icp_runs(icp_id, started_at DESC)")
+    conn.commit(); cur.close(); conn.close()
+
+def _split_list(text):
+    return [t.strip() for t in (text or '').replace('\n', ',').split(',') if t.strip()]
+
+def _parse_geo(geo):
+    """'Dubai AE' -> ('Dubai', 'AE'); 'London' -> ('London', '')"""
+    parts = geo.strip().rsplit(' ', 1)
+    if len(parts) == 2 and len(parts[1]) == 2 and parts[1].isalpha():
+        return parts[0], parts[1].upper()
+    return geo.strip(), ''
+
+def run_icp_bg(job_id, icp_id):
+    """One ICP prospecting run: discovery for every industry × geo combination,
+    then auto-pipeline (scoring respects existing CONFIG.auto_score)."""
+    run_row_id = None
+    log_lines = []
+    def log(msg):
+        log_lines.append(str(msg))
+        if job_id in JOBS:
+            JOBS[job_id]['log'] = (JOBS[job_id]['log'][-40:] + [str(msg)])
+            JOBS[job_id]['progress'] = min(int(len(log_lines) / max(total_steps, 1) * 100), 95)
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("""SELECT name, industries, geos, keywords, exclusions, source_mix
+                       FROM icp_profiles WHERE id=%s""", (icp_id,))
+        row = cur.fetchone()
+        if not row:
+            JOBS[job_id]['status'] = 'failed'; JOBS[job_id]['error'] = 'ICP not found'
+            return
+        name, industries, geos, keywords, exclusions, source_mix = row
+        industries_l = _split_list(industries)
+        geos_l = _split_list(geos)
+        combos = [(ind, g) for ind in industries_l for g in geos_l][:int(CONFIG.get('icp_daily_cap', 40))]
+        total_steps = max(len(combos), 1)
+        cur.execute("INSERT INTO icp_runs (icp_id) VALUES (%s) RETURNING id", (icp_id,))
+        run_row_id = cur.fetchone()[0]
+        cur.execute("UPDATE icp_profiles SET last_run_at=NOW() WHERE id=%s", (icp_id,))
+        conn.commit(); cur.close(); conn.close()
+
+        log(f'ICP "{name}": {len(combos)} search combinations')
+        found_total = new_total = 0
+        for i, (industry, geo) in enumerate(combos):
+            city, country = _parse_geo(geo)
+            q = industry + (' ' + keywords if keywords else '') + (' ' + exclusions if exclusions else '')
+            try:
+                before = _count_leads()
+                r = discover_leads_smart(niche=industry, city=city, country=country,
+                                         original_query=q, filter_mode='all',
+                                         density='standard', find_more=False, job_id=None)
+                after = _count_leads()
+                new_leads = max(after - before, 0)
+                # Tag freshly discovered leads with this ICP
+                tag_leads_for_icp(industry, city, icp_id)
+                found = (r if isinstance(r, int) else len(r)) if r else new_leads
+                found_total += found; new_total += new_leads
+                log(f'[{i+1}/{len(combos)}] {industry} · {city}: {new_leads} new')
+            except Exception as e:
+                log(f'[{i+1}/{len(combos)}] {industry} · {city}: ERROR {str(e)[:80]}')
+            if job_id in JOBS and JOBS[job_id].get('cancelled'):
+                log('Run cancelled'); break
+
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("""UPDATE icp_runs SET finished_at=NOW(), status='completed',
+                       leads_found=%s, leads_new=%s, log=%s WHERE id=%s""",
+                    (found_total, new_total, '\n'.join(log_lines[-100:]), run_row_id))
+        conn.commit(); cur.close(); conn.close()
+        if job_id in JOBS:
+            JOBS[job_id]['status'] = 'completed'; JOBS[job_id]['progress'] = 100
+            JOBS[job_id]['results'] = {'found': found_total, 'new': new_total}
+        log(f'Done — {found_total} found, {new_total} new')
+    except Exception as e:
+        try:
+            conn = db_conn(); cur = conn.cursor()
+            cur.execute("UPDATE icp_runs SET finished_at=NOW(), status='failed', log=%s WHERE id=%s",
+                        ('\n'.join(log_lines[-100:]) + f'\nFATAL: {e}', run_row_id))
+            conn.commit(); cur.close(); conn.close()
+        except Exception:
+            pass
+        if job_id in JOBS:
+            JOBS[job_id]['status'] = 'failed'; JOBS[job_id]['error'] = str(e)
+
+def _count_leads():
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM leads WHERE lead_type IS NULL")
+        n = cur.fetchone()[0]; cur.close(); conn.close(); return n
+    except Exception:
+        return 0
+
+def tag_leads_for_icp(industry, city, icp_id):
+    """Attach untagged, matching leads to this ICP (best-effort attribution)."""
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("""UPDATE leads SET icp_id=%s
+                       WHERE icp_id IS NULL AND lead_type IS NULL
+                         AND created_at > NOW() - INTERVAL '15 minutes'
+                         AND (LOWER(niche) LIKE LOWER(%s) OR LOWER(business_name) LIKE LOWER(%s))
+                         AND (city IS NULL OR LOWER(city) LIKE LOWER(%s))""",
+                    (icp_id, f'%{industry.lower()[:20]}%', f'%{industry.lower()[:20]}%',
+                     f'%{city.lower()}%'))
+        n = cur.rowcount; conn.commit(); cur.close(); conn.close()
+        return n
+    except Exception as e:
+        print(f'[icp] tag failed: {e}')
+        return 0
+
+def icp_scheduler_loop():
+    """Autonomous prospecting: every 30 min, run at most ONE active ICP whose
+    last run is older than 20 hours. Staggered by design to respect API caps."""
+    while True:
+        try:
+            if CONFIG.get('icp_scheduler_enabled', True):
+                conn = db_conn(); cur = conn.cursor()
+                cur.execute("""SELECT id FROM icp_profiles
+                               WHERE is_active AND (last_run_at IS NULL
+                                     OR last_run_at < NOW() - INTERVAL '20 hours')
+                               ORDER BY last_run_at NULLS FIRST LIMIT 1""")
+                row = cur.fetchone(); cur.close(); conn.close()
+                if row:
+                    print(f'[icp] scheduler: running ICP {row[0]}')
+                    run_icp_bg(f'icp_auto_{row[0]}_{int(time.time())}', row[0])
+        except Exception as e:
+            print(f'[icp] scheduler error: {e}')
+        time.sleep(1800)
+
+# ──────────────────────────────────────────────────────────────
 #  M5: COST TRACKING — every paid API call logged with an estimate
 # ──────────────────────────────────────────────────────────────
 COST_PER_CALL = {
@@ -6622,6 +6785,30 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
+        elif p == '/icp':
+            try:
+                conn = db_conn(); cur = conn.cursor()
+                cur.execute("""SELECT p.id, p.name, p.industries, p.geos, p.keywords, p.exclusions,
+                                      p.source_mix, p.min_lead_score, p.push_to_crm, p.is_active,
+                                      to_char(p.last_run_at,'YYYY-MM-DD HH24:MI'),
+                                      (SELECT COUNT(*) FROM leads l WHERE l.icp_id=p.id),
+                                      (SELECT COUNT(*) FROM leads l WHERE l.icp_id=p.id AND l.ai_score >= 7)
+                               FROM icp_profiles p ORDER BY p.id DESC""")
+                rows = cur.fetchall()
+                cur.execute("""SELECT r.icp_id, r.leads_found, r.leads_new, r.status,
+                                      to_char(r.started_at,'YYYY-MM-DD HH24:MI')
+                               FROM icp_runs r ORDER BY r.id DESC LIMIT 20""")
+                runs = cur.fetchall(); cur.close(); conn.close()
+                self.send_json(200, {
+                    'profiles': [dict(zip(['id','name','industries','geos','keywords','exclusions',
+                                           'source_mix','min_lead_score','push_to_crm','is_active',
+                                           'last_run','lead_count','qualified_count'], r)) for r in rows],
+                    'recent_runs': [dict(zip(['icp_id','found','new','status','started'], r)) for r in runs],
+                    'scheduler_enabled': bool(CONFIG.get('icp_scheduler_enabled', True)),
+                })
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
         elif p == '/cost-stats':
             try:
                 conn = db_conn(); cur = conn.cursor()
@@ -7078,6 +7265,49 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
+        elif p == '/icp/save':
+            try:
+                pid = body.get('id')
+                fields = {k: body.get(k) for k in ('name','industries','geos','keywords','exclusions',
+                                                   'source_mix','min_lead_score','push_to_crm','is_active')}
+                if not fields.get('name'):
+                    self.send_json(400, {'error': 'name required'}); return
+                conn = db_conn(); cur = conn.cursor()
+                if pid:
+                    sets = ', '.join(f"{k}=%s" for k in fields)
+                    cur.execute(f"UPDATE icp_profiles SET {sets} WHERE id=%s",
+                                (*fields.values(), pid))
+                else:
+                    cols = ', '.join(fields); vals = ', '.join(['%s']*len(fields))
+                    cur.execute(f"INSERT INTO icp_profiles ({cols}) VALUES ({vals}) RETURNING id",
+                                tuple(fields.values()))
+                    pid = cur.fetchone()[0]
+                conn.commit(); cur.close(); conn.close()
+                self.send_json(200, {'success': True, 'id': pid})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p == '/icp/delete':
+            try:
+                pid = body.get('id')
+                conn = db_conn(); cur = conn.cursor()
+                cur.execute("DELETE FROM icp_profiles WHERE id=%s", (pid,))
+                conn.commit(); cur.close(); conn.close()
+                self.send_json(200, {'success': True})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p == '/icp/run':
+            try:
+                pid = body.get('id')
+                job_id = f'job_{int(time.time() * 1000)}'
+                JOBS[job_id] = {'status': 'running', 'progress': 0, 'log': ['Starting ICP run…'], 'step': 'ICP Discovery'}
+                t = threading.Thread(target=run_icp_bg, args=(job_id, pid))
+                t.daemon = True; t.start()
+                self.send_json(200, {'job_id': job_id, 'status': 'started'})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
         elif p == '/sequence/enroll':
             try:
                 lead_ids = body.get('lead_ids') or ([body['lead_id']] if body.get('lead_id') else [])
@@ -7520,6 +7750,7 @@ if __name__ == '__main__':
         ensure_m3_tables()
         ensure_m4_tables()
         ensure_m5_tables()
+        ensure_icp_tables()
         print('Schema migration: OK')
     except Exception as e:
         print(f'Schema migration warning (non-fatal): {e}')
@@ -7534,6 +7765,11 @@ if __name__ == '__main__':
         t = threading.Thread(target=sequence_scheduler_loop, daemon=True)
         t.start()
         print('Sequences: scheduler running')
+    # M6: autonomous ICP prospecting scheduler
+    if CONFIG.get('icp_scheduler_enabled', True):
+        t2 = threading.Thread(target=icp_scheduler_loop, daemon=True)
+        t2.start()
+        print('ICP: scheduler running')
     server = ThreadingServer(('0.0.0.0', 8080), Handler)
     print('LeadGen v5 - Multi-Module Intelligence Platform')
     print('Modules: discover, enrich, score, assets, seo, competitor, ecommerce')
