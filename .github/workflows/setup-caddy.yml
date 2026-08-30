@@ -1,0 +1,65 @@
+name: Set Up Caddy (HTTPS reverse proxy)
+
+on:
+  push:
+    branches: [claude/jolly-dirac-7qhyvi]
+    paths:
+      - '.github/workflows/setup-caddy.yml'
+  workflow_dispatch:
+
+jobs:
+  setup-caddy:
+    runs-on: ubuntu-latest
+    environment: VM
+    steps:
+      - name: DNS check from the internet (this runner, not the VM)
+        run: |
+          echo "### does app.controvallc.com resolve? ###"
+          getent hosts app.controvallc.com || { echo "NOT RESOLVING YET — stopping, re-run once DNS propagates"; exit 1; }
+
+      - name: Install + configure Caddy on the VM
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          command_timeout: 5m
+          script: |
+            set -e
+            echo "### installing caddy (idempotent) ###"
+            if ! command -v caddy >/dev/null 2>&1; then
+              sudo apt-get update -qq
+              sudo apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl gnupg
+              curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+              curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+              sudo apt-get update -qq
+              sudo apt-get install -y -qq caddy
+            else
+              echo "caddy already installed: $(caddy version)"
+            fi
+
+            echo "### writing Caddyfile ###"
+            sudo tee /etc/caddy/Caddyfile > /dev/null <<'CADDYEOF'
+            app.controvallc.com {
+                reverse_proxy localhost:8080
+            }
+            CADDYEOF
+
+            echo "### validating config ###"
+            sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
+            echo "### starting caddy ###"
+            sudo systemctl enable caddy
+            sudo systemctl restart caddy
+            sleep 5
+            sudo systemctl status caddy --no-pager
+
+            echo "### local HTTPS check ###"
+            curl -sk -o /dev/null -w "Local: HTTP %{http_code}\n" https://localhost/health -H "Host: app.controvallc.com" || true
+
+      - name: External HTTPS check (this runner, real internet)
+        run: |
+          sleep 5
+          echo "### does the outside world see it over HTTPS? ###"
+          curl -s -o /dev/null -w "https://app.controvallc.com/health -> HTTP %{http_code}\n" --max-time 15 https://app.controvallc.com/health
+          curl -s --max-time 15 https://app.controvallc.com/health
