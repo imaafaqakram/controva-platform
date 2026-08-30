@@ -83,3 +83,17 @@ jobs:
           echo
           echo "### does it match what SERVER_HOST resolves to? ###"
           getent hosts app.controvallc.com || true
+          echo
+          echo "### what else is configured on controvallc.com's DNS? (checking before any migration) ###"
+          echo "--- apex A/AAAA ---"
+          dig +short A controvallc.com || true
+          dig +short AAAA controvallc.com || true
+          echo "--- MX (email) ---"
+          dig +short MX controvallc.com || true
+          echo "--- TXT (SPF/DKIM/verification records) ---"
+          dig +short TXT controvallc.com || true
+          echo "--- common subdomains ---"
+          for sub in www mail api n8n vpn ftp cdn; do
+            echo -n "$sub.controvallc.com -> "
+            dig +short "$sub.controvallc.com" || echo "(none)"
+          done
