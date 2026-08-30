@@ -2023,7 +2023,9 @@ const PipelinePage = () => {
           <Button onClick={() => runStep('/enrich', 'Enrich', { provider })} variant="secondary" icon="UserPlus">Enrich New Leads</Button>
           <Button onClick={() => runStep('/score', 'Score')} variant="secondary" icon="Star">AI Score</Button>
           <Button onClick={() => runStep('/generate-assets', 'Assets')} variant="secondary" icon="Sparkles">Generate Copy</Button>
+          <Button onClick={() => runStep('/research/queue', 'AI Research', { min_score: 0 })} variant="secondary" icon="Search">AI Research (Pain Detection)</Button>
         </div>
+        <p className="text-xs text-slate-400 mt-2">Builds a research dossier per lead — web presence, reviews, tech stack, hiring signals, evidence-backed pain points.</p>
       </Card>
     </div>
   );
@@ -3669,6 +3671,94 @@ const IntentPage = () => {
   );
 };
 
+const CrmConnectionsEditor = () => {
+  const [connections, setConnections] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [adding, setAdding] = useState(false);
+  const [form, setForm] = useState({ type: 'pipedrive', name: '', config: {} });
+  const [pushing, setPushing] = useState(false);
+  const { showToast } = useToast();
+
+  const load = () => api.get('/crm/connections').then(d => { setConnections(d.connections || []); setLoading(false); }).catch(() => setLoading(false));
+  useEffect(() => { load(); }, []);
+
+  const save = async () => {
+    if (!form.name.trim()) { showToast('Name required', 'error'); return; }
+    try {
+      await api.post('/crm/connections/save', form);
+      showToast('CRM connection saved');
+      setAdding(false);
+      setForm({ type: 'pipedrive', name: '', config: {} });
+      load();
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+  };
+
+  const remove = async (id) => {
+    if (!confirm('Delete this CRM connection?')) return;
+    try { await api.post('/crm/connections/' + id + '/delete', {}); load(); }
+    catch (e) { showToast('Failed', 'error'); }
+  };
+
+  const pushQualified = async (connectionId) => {
+    setPushing(true);
+    try {
+      const r = await api.post('/crm/push', { connection_id: connectionId, min_score: 0 });
+      showToast(r.status === 'nothing_to_do' ? 'No leads to push' : `Pushing ${r.count} lead(s)…`, 'info');
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+    setPushing(false);
+  };
+
+  if (loading) return <div className="py-4 text-center"><Spinner /></div>;
+
+  return (
+    <div className="space-y-3">
+      {connections.map(c => (
+        <div key={c.id} className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg flex items-center justify-between gap-2">
+          <div className="min-w-0">
+            <div className="font-medium text-sm flex items-center gap-2">
+              <Badge variant={c.type === 'pipedrive' ? 'info' : 'default'}>{c.type}</Badge>
+              <span className="truncate">{c.name}</span>
+            </div>
+            <p className="text-xs text-slate-500 mt-0.5">{c.pushed_ok} pushed · {c.pushed_failed} failed</p>
+          </div>
+          <div className="flex gap-2 flex-shrink-0">
+            <Button size="sm" variant="secondary" onClick={() => pushQualified(c.id)} disabled={pushing}>Push Qualified</Button>
+            <Button size="sm" variant="ghost" icon="Trash2" onClick={() => remove(c.id)} />
+          </div>
+        </div>
+      ))}
+      {!adding ? (
+        <Button size="sm" variant="secondary" icon="Plus" onClick={() => setAdding(true)}>Add CRM Connection</Button>
+      ) : (
+        <div className="p-3 border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-lg space-y-2">
+          <select value={form.type} onChange={e => setForm({ ...form, type: e.target.value, config: {} })}
+            className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-2 text-sm">
+            <option value="pipedrive">Pipedrive</option>
+            <option value="webhook">Generic Webhook (Zapier/n8n/GoHighLevel/custom)</option>
+          </select>
+          <Input value={form.name} onChange={v => setForm({ ...form, name: v })} placeholder="Connection name (e.g. 'Main Pipedrive')" />
+          {form.type === 'pipedrive' ? (
+            <>
+              <Input value={form.config.api_token || ''} onChange={v => setForm({ ...form, config: { ...form.config, api_token: v } })} placeholder="Pipedrive API token" />
+              <Input value={form.config.pipeline_id || ''} onChange={v => setForm({ ...form, config: { ...form.config, pipeline_id: v } })} placeholder="Pipeline ID (optional)" />
+              <Input value={form.config.stage_id || ''} onChange={v => setForm({ ...form, config: { ...form.config, stage_id: v } })} placeholder="Stage ID (optional)" />
+            </>
+          ) : (
+            <>
+              <Input value={form.config.webhook_url || ''} onChange={v => setForm({ ...form, config: { ...form.config, webhook_url: v } })} placeholder="Webhook URL" />
+              <Input value={form.config.webhook_secret || ''} onChange={v => setForm({ ...form, config: { ...form.config, webhook_secret: v } })} placeholder="Signing secret (optional)" />
+            </>
+          )}
+          <div className="flex gap-2">
+            <Button size="sm" onClick={save}>Save</Button>
+            <Button size="sm" variant="ghost" onClick={() => setAdding(false)}>Cancel</Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 const SettingsPage = () => {
   const [config, setConfig] = useState(null);
   const { showToast } = useToast();
@@ -3736,6 +3826,44 @@ const SettingsPage = () => {
       </Card>
 
       <Card>
+        <h3 className="font-semibold mb-3 flex items-center gap-2"><Icon name="Link2" /> CRM Connections</h3>
+        <p className="text-xs text-slate-500 mb-3">Push qualified leads — with their full research dossier — into Pipedrive or any webhook-compatible system (Zapier, n8n, GoHighLevel).</p>
+        <CrmConnectionsEditor />
+      </Card>
+
+      <Card>
+        <h3 className="font-semibold mb-3 flex items-center gap-2"><Icon name="Link2" /> Meeting Booking</h3>
+        <p className="text-xs text-slate-500 mb-3">When set, follow-up messages include a scheduling link, and Calendly's webhook (point it at <code className="text-[11px]">/webhook/calendly</code>) marks leads as meeting-booked automatically.</p>
+        <Input value={config.calendly_url || ''} onChange={v => update('calendly_url', v)} placeholder="https://calendly.com/your-link" />
+      </Card>
+
+      <Card>
+        <h3 className="font-semibold mb-3 flex items-center gap-2"><Icon name="Sparkles" /> White-Label</h3>
+        <p className="text-xs text-slate-500 mb-3">Your brand across the dashboard header and outgoing email footer.</p>
+        <div className="space-y-2">
+          <Input value={config.client_brand_name || ''} onChange={v => update('client_brand_name', v)} placeholder="Brand name (blank = Controva)" />
+          <div className="flex items-center gap-2">
+            <input type="color" value={config.client_brand_color || '#2563eb'} onChange={e => update('client_brand_color', e.target.value)}
+              className="w-10 h-9 rounded border border-slate-200 dark:border-slate-800 cursor-pointer" />
+            <Input value={config.client_brand_color || ''} onChange={v => update('client_brand_color', v)} placeholder="Brand accent color (hex)" />
+          </div>
+          <Input value={config.client_footer_text || ''} onChange={v => update('client_footer_text', v)} placeholder="Extra footer line for outreach emails (optional)" />
+        </div>
+      </Card>
+
+      <Card>
+        <h3 className="font-semibold mb-3 flex items-center gap-2"><Icon name="Mail" /> Daily Digest</h3>
+        <label className="flex items-start gap-3 p-3 bg-slate-50 dark:bg-slate-800 rounded-lg cursor-pointer mb-2">
+          <input type="checkbox" checked={!!config.daily_digest_enabled} onChange={e => update('daily_digest_enabled', e.target.checked)} className="mt-1 w-4 h-4" />
+          <div>
+            <div className="font-medium text-sm">Send daily digest email (~08:00 UTC)</div>
+            <div className="text-xs text-slate-500 mt-0.5">New leads, research highlights, and API spend from the last 24h</div>
+          </div>
+        </label>
+        <Input value={config.digest_recipient_email || ''} onChange={v => update('digest_recipient_email', v)} placeholder="Recipient email" />
+      </Card>
+
+      <Card>
         <h3 className="font-semibold mb-3 flex items-center gap-2"><Icon name="ToggleRight" /> Automation</h3>
         <div className="space-y-2">
           {[
@@ -3772,6 +3900,7 @@ const LeadDetailModal = ({ leadId, onClose, onUpdate }) => {
   const [generatingMockup, setGeneratingMockup] = useState(false);
   const [mockupPrompt, setMockupPrompt] = useState('');
   const [mockupUrl, setMockupUrl] = useState(null);
+  const [researching, setResearching] = useState(false);
   const { showToast } = useToast();
 
   useEffect(() => {
@@ -3817,6 +3946,36 @@ const LeadDetailModal = ({ leadId, onClose, onUpdate }) => {
     setGeneratingMockup(false);
   };
 
+  const [researchJobId, setResearchJobId] = useState(null);
+  const runResearch = async () => {
+    setResearching(true);
+    try {
+      const r = await api.post('/lead/' + leadId + '/research', {});
+      setResearchJobId(r.job_id);
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); setResearching(false); }
+  };
+  useEffect(() => {
+    if (!researchJobId) return;
+    const poll = setInterval(async () => {
+      try {
+        const j = await api.get('/job/' + researchJobId);
+        if (j.status === 'completed' || j.status === 'failed') {
+          clearInterval(poll);
+          setResearching(false);
+          setResearchJobId(null);
+          if (j.status === 'completed') {
+            const d = await api.get('/lead/' + leadId);
+            setLead(d);
+            showToast('Research complete', 'success');
+          } else {
+            showToast('Research failed: ' + (j.error || 'unknown error'), 'error');
+          }
+        }
+      } catch (e) { clearInterval(poll); setResearching(false); }
+    }, 2000);
+    return () => clearInterval(poll);
+  }, [researchJobId]);
+
   const approve = async () => {
     try { await api.post('/lead/' + leadId + '/approve', {}); showToast('Approved'); if (onUpdate) onUpdate(); }
     catch (e) { showToast('Failed', 'error'); }
@@ -3851,7 +4010,7 @@ const LeadDetailModal = ({ leadId, onClose, onUpdate }) => {
             <div className="sticky top-0 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 p-5 flex items-center justify-between">
               <div className="min-w-0 flex-1">
                 <h2 className="text-lg font-bold truncate">{lead.business_name}</h2>
-                <p className="text-xs text-slate-500">{lead.niche} • {lead.city}, {lead.country} • Status: <Badge variant="info">{lead.status}</Badge></p>
+                <p className="text-xs text-slate-500">{lead.niche} • {lead.city}, {lead.country} • Status: <Badge variant="info">{lead.status}</Badge>{lead.meeting_booked && <> <Badge variant="purple">Meeting booked</Badge></>}</p>
               </div>
               <button onClick={onClose} className="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg">
                 <Icon name="X" className="w-5 h-5" />
@@ -3875,6 +4034,17 @@ const LeadDetailModal = ({ leadId, onClose, onUpdate }) => {
                 <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
                   <p className="text-xs text-slate-500">AI Score</p>
                   <p className="text-sm font-bold">{lead.ai_score ? lead.ai_score + '/10' : '—'}</p>
+                </div>
+                <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg col-span-2" title="ICP fit + pain severity + intent signals + business quality">
+                  <p className="text-xs text-slate-500">Pain-Aware Score (M8)</p>
+                  {lead.icp_score != null ? (
+                    <>
+                      <p className="text-sm font-bold">{lead.icp_score}/100</p>
+                      <p className="text-xs text-slate-400 mt-0.5">
+                        fit {lead.score_breakdown?.icp_fit ?? 0} · pain {lead.score_breakdown?.pain_severity ?? 0} · intent {lead.score_breakdown?.intent_signals ?? 0} · quality {lead.score_breakdown?.quality ?? 0}
+                      </p>
+                    </>
+                  ) : <p className="text-sm text-slate-400">Run research to compute</p>}
                 </div>
               </div>
               {lead.address && (
@@ -3912,6 +4082,57 @@ const LeadDetailModal = ({ leadId, onClose, onUpdate }) => {
                     <Badge variant={lead.status === 'ready' ? 'success' : lead.status === 'sent' ? 'purple' : lead.status === 'enriched' ? 'info' : 'default'}>{lead.status}</Badge>
                   </div>
                 </div>
+              </div>
+
+              {/* AI Research */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <p className="text-xs text-slate-500 uppercase font-medium">AI Research</p>
+                  <Button size="sm" variant="ghost" icon={researching ? null : 'Search'} onClick={runResearch} disabled={researching}>
+                    {researching ? <><Spinner /><span className="ml-2">Researching…</span></> :
+                      (lead.research?.status === 'completed' ? 'Re-Research' : 'Research This Lead')}
+                  </Button>
+                </div>
+                {lead.research?.status !== 'completed' ? (
+                  <div className="bg-slate-50 dark:bg-slate-800 rounded-lg p-3 text-sm text-slate-500">
+                    Not researched yet — click "Research This Lead" to build an AI dossier
+                    (web presence, reviews, tech stack, hiring signals, pain points).
+                  </div>
+                ) : (
+                  <div className="space-y-2 bg-slate-50 dark:bg-slate-800 rounded-lg p-3">
+                    {lead.research.needs_summary && (
+                      <p className="text-sm">{lead.research.needs_summary}</p>
+                    )}
+                    {lead.research.pain_points.length > 0 ? (
+                      <div className="space-y-1.5">
+                        {lead.research.pain_points.map((p, i) => (
+                          <div key={i} className="flex items-start gap-2 text-xs bg-white dark:bg-slate-900 rounded p-2 border border-slate-200 dark:border-slate-700">
+                            <Badge variant={p.severity >= 4 ? 'danger' : p.severity >= 3 ? 'warning' : 'default'}>
+                              {'●'.repeat(p.severity || 1)}
+                            </Badge>
+                            <div className="flex-1">
+                              <p className="font-medium">{p.pain}</p>
+                              {p.evidence && <p className="text-slate-500 mt-0.5">"{p.evidence}"</p>}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-xs text-slate-400">No specific pain points found from available evidence.</p>
+                    )}
+                    {lead.research.recommended_angle && (
+                      <div className="text-xs bg-accent-50 dark:bg-accent-900/20 rounded p-2 mt-2">
+                        <span className="font-medium">Recommended angle: </span>{lead.research.recommended_angle}
+                      </div>
+                    )}
+                    {lead.research.tech_stack.length > 0 && (
+                      <p className="text-xs text-slate-400">Tech: {lead.research.tech_stack.join(', ')}</p>
+                    )}
+                    {lead.research.researched_at && (
+                      <p className="text-xs text-slate-400">Researched {lead.research.researched_at}</p>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* Mockup */}
@@ -4167,6 +4388,7 @@ const OutreachPage = () => {
   const [outreachLog, setOutreachLog] = useState([]);
   const [view, setView] = useState('ready');
   const [seqData, setSeqData] = useState(null);
+  const [replyFilter, setReplyFilter] = useState('');
 
   const refresh = () => {
     setLoading(true);
@@ -4265,21 +4487,41 @@ const OutreachPage = () => {
         <Card><div className="py-12 text-center"><Spinner size="w-6 h-6" /></div></Card>
       ) : view === 'sent' ? (
         <Card>
-          <h3 className="font-semibold mb-3">Sent Emails</h3>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="font-semibold">Sent Emails</h3>
+            <select value={replyFilter} onChange={e => setReplyFilter(e.target.value)}
+              className="text-xs bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg px-2 py-1">
+              <option value="">All replies</option>
+              <option value="interested">Interested</option>
+              <option value="objection">Objection</option>
+              <option value="not_interested">Not interested</option>
+              <option value="ooo">Out of office</option>
+              <option value="unsubscribe_intent">Unsubscribe intent</option>
+            </select>
+          </div>
           {outreachLog.length === 0 ? (
             <p className="text-sm text-slate-500 py-8 text-center">No emails sent yet</p>
           ) : (
             <div className="space-y-2">
-              {outreachLog.map((o, i) => (
+              {outreachLog.filter(o => !replyFilter || o.reply_classification === replyFilter).map((o, i) => (
                 <div key={i} className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
                   <div className="flex items-center justify-between">
                     <div className="min-w-0 flex-1">
                       <p className="font-medium text-sm">{o.business_name}</p>
                       <p className="text-xs text-slate-500 truncate">{o.email_subject}</p>
                       <p className="text-xs font-mono text-cyan-600 truncate">{o.email_to}</p>
+                      {o.reply_digest && <p className="text-xs text-slate-500 mt-1 italic">"{o.reply_digest}"</p>}
                     </div>
-                    <div className="ml-2 text-right text-xs">
+                    <div className="ml-2 text-right text-xs space-y-1">
                       <Badge variant={o.status === 'sent' ? 'success' : 'info'}>{o.status}</Badge>
+                      {o.reply_classification && (
+                        <Badge variant={o.reply_classification === 'interested' ? 'success' :
+                                       o.reply_classification === 'unsubscribe_intent' ? 'danger' :
+                                       o.reply_classification === 'objection' ? 'warning' : 'default'}>
+                          {o.reply_classification.replace('_', ' ')}
+                        </Badge>
+                      )}
+                      {o.meeting_booked && <Badge variant="purple">Meeting booked</Badge>}
                       <p className="text-slate-500 mt-1">{o.sent_at ? new Date(o.sent_at).toLocaleString() : ''}</p>
                     </div>
                   </div>
@@ -4469,6 +4711,15 @@ const App = () => {
   const [theme, toggleTheme] = useTheme();
   const [page, setPage] = useState('dashboard');
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [brand, setBrand] = useState({ name: 'Controva', color: '' });
+
+  useEffect(() => {
+    api.get('/config').then(c => {
+      if (c.client_brand_name || c.client_brand_color) {
+        setBrand({ name: c.client_brand_name || 'Controva', color: c.client_brand_color || '' });
+      }
+    }).catch(() => {});
+  }, []);
 
   const nav = [
     { id: 'dashboard', label: 'Dashboard', icon: 'LayoutDashboard' },
@@ -4509,9 +4760,12 @@ const App = () => {
       <aside className={(sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0') + ' fixed lg:sticky top-0 z-40 w-64 h-screen bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-800 transition-transform flex flex-col'}>
         <div className="p-5 border-b border-slate-200 dark:border-slate-800">
           <div className="flex items-center gap-2">
-            <div className="w-9 h-9 bg-gradient-to-br from-accent-500 to-accent-700 rounded-lg flex items-center justify-center text-white font-bold shadow-lg pulse-glow">C</div>
+            <div className={'w-9 h-9 rounded-lg flex items-center justify-center text-white font-bold shadow-lg pulse-glow' + (brand.color ? '' : ' bg-gradient-to-br from-accent-500 to-accent-700')}
+              style={brand.color ? { backgroundColor: brand.color } : undefined}>
+              {brand.name.charAt(0).toUpperCase()}
+            </div>
             <div>
-              <p className="font-bold text-sm leading-tight">Controva</p>
+              <p className="font-bold text-sm leading-tight" style={brand.color ? { color: brand.color } : {}}>{brand.name}</p>
               <p className="text-xs text-slate-500">Intelligence Platform</p>
             </div>
           </div>

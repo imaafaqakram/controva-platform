@@ -18,7 +18,7 @@ Key Improvements:
   - Free alternatives for Apollo/Hunter
 """
 import json, csv, io, re, time, urllib.request, urllib.parse, psycopg2
-import threading, os, hashlib, smtplib, socket
+import threading, os, hashlib, hmac, smtplib, socket
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 
@@ -99,6 +99,14 @@ CONFIG = {
     # M6: autonomous ICP prospecting
     'icp_scheduler_enabled': True,
     'icp_daily_cap': 40,          # max discovery searches per ICP run
+    # M10: phase-2 suite + white-label
+    'calendly_url': '',                # meeting-booking CTA link; blank = CTA hidden
+    'client_brand_name': '',           # white-label: blank = falls back to "Controva"
+    'client_brand_color': '',          # white-label: blank = falls back to default accent
+    'client_footer_text': '',          # white-label: extra line in outreach compliance footer
+    'daily_digest_enabled': False,
+    'digest_recipient_email': '',      # where the daily digest is sent
+    'multi_decision_maker_capture': True,  # store extra find_people() contacts during research
 }
 
 # Map enrichment_strategy → providers list for enrich_lead()
@@ -3356,7 +3364,24 @@ def delete_leads_bulk(lead_ids):
 # ──────────────────────────────────────────────────────────────
 #  CLAUDE EMAIL COPYWRITING
 # ──────────────────────────────────────────────────────────────
-def generate_email_copy(business_name, niche, city, owner_name=None):
+def _pain_context_block(research, max_pains=2):
+    """M8: shared helper — turns a lead's research dossier into a short prompt
+    block referencing up to `max_pains` specific pains. Returns '' when there's
+    no usable research, so callers can fall back to the original angle untouched."""
+    if not research:
+        return ''
+    pains = (research.get('pain_points') or [])[:max_pains]
+    if not pains:
+        return ''
+    lines = [f"- {p.get('pain')}: {p.get('evidence')}" for p in pains if p.get('pain')]
+    if not lines:
+        return ''
+    block = "Specific researched pain points for this business (reference up to 2 of these instead of the generic no-website angle):\n" + '\n'.join(lines)
+    if research.get('recommended_angle'):
+        block += f"\nRecommended pitch angle: {research['recommended_angle']}"
+    return block
+
+def generate_email_copy(business_name, niche, city, owner_name=None, research=None):
     if not CONFIG.get('auto_email_copy', True):
         print('[claude] skipped: auto_email_copy disabled in settings')
         return None
@@ -3364,18 +3389,20 @@ def generate_email_copy(business_name, niche, city, owner_name=None):
         print('[claude] skipped: no CLAUDE_KEY configured')
         return None
     name_part = owner_name if owner_name else 'there'
+    pain_block = _pain_context_block(research)
+    context_line = pain_block if pain_block else "Context: They have NO WEBSITE. I want to offer to build them a free mockup."
     prompt = f"""Write a 120-word personalized cold outreach message for a small business owner.
 
 Business: {business_name}
 Type: {niche}
 City: {city}
 Owner: {name_part}
-Context: They have NO WEBSITE. I want to offer to build them a free mockup.
+{context_line}
 
 Requirements:
 - Subject line: max 7 words, curiosity-driven
 - Body: 100-130 words
-- Mention we built a free website mockup for them
+- {"Reference the specific pain point(s) above, naturally, as if you noticed them researching the business" if pain_block else "Mention we built a free website mockup for them"}
 - Reference their specific niche
 - Direct, friendly tone (NOT salesy)
 - End with ONE clear question
@@ -3477,7 +3504,7 @@ def generate_assets_for_top_leads(min_score=5):
                     cur.execute("INSERT INTO assets(lead_id,asset_type,content,model_used) VALUES(%s,'mockup_image',%s,%s)",
                                (lead_id, mockup_url, CONFIG['image_provider']))
             if CONFIG['auto_email_copy']:
-                email = generate_email_copy(bname, niche, city, owner)
+                email = generate_email_copy(bname, niche, city, owner, research=get_lead_research(lead_id))
                 if email:
                     cur.execute("INSERT INTO assets(lead_id,asset_type,content,model_used) VALUES(%s,'email_subject',%s,'claude')",
                                (lead_id, email.get('subject', '')))
@@ -4890,8 +4917,11 @@ def get_leads():
                CASE WHEN l.has_website THEN 'Has Website' ELSE 'NO WEBSITE - HOT LEAD' END as lead_type,
                l.has_website,
                l.website_verified,
-               COALESCE(l.search_batch_id,'') as search_batch_id
+               COALESCE(l.search_batch_id,'') as search_batch_id,
+               l.icp_score,
+               COALESCE(rs.status = 'completed', FALSE) as researched
         FROM leads l
+        LEFT JOIN lead_research rs ON rs.lead_id = l.id
         LEFT JOIN LATERAL (
             SELECT full_name, email, email_status, linkedin_url, job_title FROM contacts
             WHERE lead_id = l.id
@@ -5579,18 +5609,24 @@ def ensure_m4_tables():
                         (seq_id, st['step'], st['delay_days'], st['kind']))
     conn.commit(); cur.close(); conn.close()
 
-def generate_followup_copy(business_name, niche, city, owner_name, kind, prev_subject=''):
+def generate_followup_copy(business_name, niche, city, owner_name, kind, prev_subject='', research=None):
     """Claude-generated follow-up emails (sequence steps 2 and 3)."""
     if not CLAUDE_KEY:
         return None
+    pain_block = _pain_context_block(research, max_pains=1)
+    cta = meeting_booking_cta()
     if kind == 'nudge':
-        spec = ("This is follow-up #2 of 3 (they got an initial email 3 days ago offering a free "
-                "website mockup). Keep it under 70 words. Reference the mockup we made for them. "
-                "One soft question. Friendly, zero pressure. DON'T apologize for emailing again.")
+        spec = ("This is follow-up #2 of 3 (they got an initial email 3 days ago). "
+                "Keep it under 70 words. "
+                + ("Reference the specific pain point below instead of the generic mockup angle."
+                   if pain_block else "Reference the mockup we made for them.") +
+                " One soft question. Friendly, zero pressure. DON'T apologize for emailing again."
+                + (f" Include this scheduling option naturally: {cta}" if cta else ""))
     else:
         spec = ("This is follow-up #3 of 3, the final message (initial + one nudge already sent). "
                 "Under 50 words. Politely signal this is the last email — e.g. asking whether to "
-                "close their file. Leave the door open. No guilt-tripping.")
+                "close their file. Leave the door open. No guilt-tripping."
+                + (f" Include this scheduling option naturally: {cta}" if cta else ""))
     name_part = owner_name if owner_name else 'there'
     prompt = f"""Write a cold-outreach follow-up email for a small business owner.
 
@@ -5599,6 +5635,7 @@ Type: {niche}
 City: {city}
 Owner: {name_part}
 Previous email subject: {prev_subject or '(initial offer of a free website mockup)'}
+{pain_block}
 {spec}
 
 Respond ONLY with valid JSON:
@@ -5621,6 +5658,628 @@ Respond ONLY with valid JSON:
     except Exception as e:
         print(f'[sequence] claude {kind} failed: {e}')
     return None
+
+# ──────────────────────────────────────────────────────────────
+#  M7: AI RESEARCH & PAIN DETECTION
+# ──────────────────────────────────────────────────────────────
+def ensure_research_tables():
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS lead_research (
+            lead_id           UUID PRIMARY KEY REFERENCES leads(id) ON DELETE CASCADE,
+            status            VARCHAR(30) NOT NULL DEFAULT 'pending',
+            web_findings      JSONB,
+            reviews_summary   TEXT,
+            tech_stack        TEXT[],
+            hiring_signals    TEXT[],
+            social_presence   JSONB,
+            pain_points       JSONB,
+            needs_summary     TEXT,
+            recommended_angle TEXT,
+            sources           JSONB,
+            error             TEXT,
+            researched_at     TIMESTAMPTZ
+        )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_lead_research_status ON lead_research(status)")
+    conn.commit(); cur.close(); conn.close()
+
+def _review_mine(business_name, city):
+    """Search '<name> reviews' and have Gemini summarize recurring themes.
+    No dedicated review-content source exists elsewhere in this codebase —
+    this is the one genuinely new data-gathering step M7 needs."""
+    try:
+        data = serper_search(f'"{business_name}" {city} reviews', 8)
+        snippets = [item.get('snippet', '') for item in data.get('organic', [])[:6] if item.get('snippet')]
+        if not snippets:
+            return '', []
+        joined = '\n'.join(f'- {s}' for s in snippets)
+        prompt = f"""Search result snippets mentioning "{business_name}" ({city}):
+{joined}
+
+If these look like genuine customer reviews or complaints, summarize recurring themes in
+2-3 sentences. If they don't look like real reviews, return an empty string.
+Respond ONLY with valid JSON: {{"summary": "<2-3 sentences or empty string>"}}"""
+        raw = gemini_call(prompt, max_tokens=200)
+        if raw:
+            m = re.search(r'\{[\s\S]*\}', raw)
+            if m:
+                return json.loads(m.group()).get('summary', ''), snippets
+    except Exception as e:
+        print(f'[research] review mining failed for {business_name}: {e}')
+    return '', []
+
+def research_lead(lead_id):
+    """M7: build a structured AI research dossier for one lead. Reuses existing
+    subsystems (smart_scrape, domain_intel, social_scout, get_intent_leads) per
+    docs/CLIENT_MVP_PLAN.md; review mining is the one new data-gathering step."""
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("SELECT business_name, city, niche, website FROM leads WHERE id=%s", (lead_id,))
+    row = cur.fetchone()
+    if not row:
+        cur.close(); conn.close()
+        return {'error': 'lead not found'}
+    business_name, city, niche, website = row
+    cur.execute("""INSERT INTO lead_research (lead_id, status) VALUES (%s, 'running')
+                   ON CONFLICT (lead_id) DO UPDATE SET status='running', error=NULL""", (lead_id,))
+    conn.commit(); cur.close(); conn.close()
+
+    sources = []
+    web_findings = {}
+    tech_stack = []
+    hiring_signals = []
+    social_presence = {}
+    reviews_summary = ''
+
+    try:
+        if website:
+            domain = website.split('//')[-1].split('/')[0].replace('www.', '')
+            text = smart_scrape(website)
+            if text:
+                web_findings['homepage_excerpt'] = text[:2000]
+                sources.append(website)
+            intel = domain_intel(domain)
+            tech_stack = intel.get('tech_hints', [])
+            web_findings['has_https'] = intel.get('has_https', False)
+            web_findings['title'] = intel.get('title', '')
+    except Exception as e:
+        print(f'[research] web presence failed for {business_name}: {e}')
+
+    try:
+        reviews_summary, review_snippets = _review_mine(business_name, city)
+        if review_snippets: sources.append('review search snippets')
+    except Exception as e:
+        print(f'[research] review mining error: {e}')
+
+    try:
+        # Cheap: matches against already-collected intent_signals, no new API spend
+        matches = get_intent_leads(query_filter=business_name, limit=5)
+        hiring_signals = [m['snippet'][:150] for m in matches if m.get('snippet')]
+        if matches: sources.append('intent engine (Reddit/Craigslist/Freelancer)')
+    except Exception as e:
+        print(f'[research] intent lookup failed: {e}')
+
+    try:
+        social = social_scout(business_name, location=city)
+        social_presence = {k: v for k, v in social.get('profiles', {}).items() if v}
+        if social_presence: sources.append('social search')
+    except Exception as e:
+        print(f'[research] social scout failed: {e}')
+
+    try:
+        n_added = capture_decision_makers(lead_id, business_name, city)
+        if n_added: sources.append(f'find_people ({n_added} additional contact(s))')
+    except Exception as e:
+        print(f'[research] decision-maker capture failed: {e}')
+
+    pain_points, needs_summary, recommended_angle = [], '', ''
+    try:
+        context = f"""Business: {business_name} ({niche}, {city})
+Website findings: {json.dumps(web_findings)[:1500]}
+Tech stack detected: {', '.join(tech_stack) or 'none detected'}
+Review summary: {reviews_summary or 'no reviews found'}
+Hiring/intent signals: {'; '.join(hiring_signals) or 'none found'}
+Social presence: {', '.join(social_presence.keys()) or 'none found'}
+
+Based only on the above, identify likely business pain points, with evidence drawn
+directly from the findings above. Respond ONLY with valid JSON:
+{{"pain_points": [{{"pain": "<short label>", "evidence": "<quote or fact from above>", "severity": <1-5>}}],
+ "needs_summary": "<1-2 sentence summary of what this business likely needs>",
+ "recommended_angle": "<one specific pitch angle to lead with>"}}
+If there is not enough evidence for a pain point, return an empty pain_points array —
+never invent one."""
+        raw = gemini_call(context, max_tokens=500)
+        if raw:
+            m = re.search(r'\{[\s\S]*\}', raw)
+            if m:
+                parsed = json.loads(m.group())
+                pain_points = parsed.get('pain_points', [])
+                needs_summary = parsed.get('needs_summary', '')
+                recommended_angle = parsed.get('recommended_angle', '')
+    except Exception as e:
+        print(f'[research] synthesis failed for {business_name}: {e}')
+
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("""
+        UPDATE lead_research SET status='completed', web_findings=%s, reviews_summary=%s,
+               tech_stack=%s, hiring_signals=%s, social_presence=%s, pain_points=%s,
+               needs_summary=%s, recommended_angle=%s, sources=%s, researched_at=NOW()
+        WHERE lead_id=%s""",
+        (json.dumps(web_findings), reviews_summary, tech_stack, hiring_signals,
+         json.dumps(social_presence), json.dumps(pain_points), needs_summary,
+         recommended_angle, json.dumps(sources), lead_id))
+    conn.commit(); cur.close(); conn.close()
+
+    try:
+        compute_icp_score(lead_id)   # M8: score now that pain data exists
+    except Exception as e:
+        print(f'[research] scoring v2 failed for {business_name}: {e}')
+
+    return {'pain_points': pain_points, 'needs_summary': needs_summary,
+            'recommended_angle': recommended_angle}
+
+def run_research_bg(job_id, lead_ids):
+    """Background job: research_lead() over a batch, per-lead progress (run_reenrich_bg pattern)."""
+    try:
+        total = len(lead_ids)
+        JOBS[job_id]['log'].append(f'Researching {total} lead(s)…')
+        done = 0; with_pain = 0
+        for lid in lead_ids:
+            if JOBS[job_id].get('cancelled'):
+                break
+            try:
+                result = research_lead(lid)
+                done += 1
+                n_pains = len(result.get('pain_points', []))
+                if n_pains: with_pain += 1
+                JOBS[job_id]['log'].append(f'[{done}/{total}] researched — {n_pains} pain point(s) found')
+                JOBS[job_id]['progress'] = int(done / total * 100)
+            except Exception as e:
+                done += 1
+                JOBS[job_id]['log'].append(f'[{done}/{total}] Error: {str(e)[:80]}')
+                JOBS[job_id]['progress'] = int(done / total * 100)
+        JOBS[job_id]['status'] = 'completed'
+        JOBS[job_id]['progress'] = 100
+        JOBS[job_id]['log'].append(f'Done — {done} researched, {with_pain} with pain points found.')
+        JOBS[job_id]['results'] = {'processed': done, 'with_pain_points': with_pain}
+    except Exception as e:
+        JOBS[job_id]['status'] = 'failed'
+        JOBS[job_id]['error'] = str(e)
+        JOBS[job_id]['log'].append(f'Error: {e}')
+
+# ──────────────────────────────────────────────────────────────
+#  M8: PAIN-AWARE SCORING v2 — score = ICP fit × detected need
+#  (adds icp_score/score_breakdown; legacy ai_score is never modified)
+# ──────────────────────────────────────────────────────────────
+def ensure_scoring_columns():
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS icp_score SMALLINT")
+    cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS score_breakdown JSONB")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_leads_icp_score ON leads(icp_score DESC NULLS LAST)")
+    conn.commit(); cur.close(); conn.close()
+
+def get_lead_research(lead_id):
+    """Lightweight fetch for messaging call sites that don't already have a
+    full get_lead_detail() dict. Returns None when there's no completed research
+    (callers already treat None as 'fall back to the original angle')."""
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("""SELECT pain_points, recommended_angle FROM lead_research
+                   WHERE lead_id=%s AND status='completed'""", (lead_id,))
+    row = cur.fetchone(); cur.close(); conn.close()
+    if not row:
+        return None
+    return {'pain_points': row[0] or [], 'recommended_angle': row[1] or ''}
+
+def compute_icp_score(lead_id):
+    """0-100 composite: ICP fit + pain severity + intent signals + business quality,
+    with a stored breakdown. Safe to call with or without research/ICP present —
+    each component degrades to a smaller baseline rather than erroring."""
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("""SELECT l.icp_id, COALESCE(l.google_rating,0), COALESCE(l.review_count,0), l.lead_type,
+                          rs.pain_points, rs.hiring_signals
+                   FROM leads l LEFT JOIN lead_research rs ON rs.lead_id = l.id
+                   WHERE l.id = %s""", (lead_id,))
+    row = cur.fetchone()
+    if not row:
+        cur.close(); conn.close()
+        return None
+    icp_id, rating, review_count, lead_type, pain_points, hiring_signals = row
+    cur.close(); conn.close()
+    pain_points = pain_points or []
+    hiring_signals = hiring_signals or []
+
+    # ICP fit (0-30): leads discovered by an active ICP profile match it by
+    # construction; leads without one (manual/legacy discovery) get a smaller
+    # fixed baseline since fit can't be verified against a defined profile.
+    icp_fit = 30 if icp_id else 15
+
+    # Pain severity (0-30): sum of per-pain severity (1-5), capped
+    pain_severity = min(30, sum(int(p.get('severity', 1)) for p in pain_points) * 2) if pain_points else 0
+
+    # Intent signals (0-20): hiring/demand signals found for this specific company
+    intent = 20 if (hiring_signals or lead_type in ('demand', 'supply')) else 0
+
+    # Business quality (0-20): Google rating + review volume as a size/quality proxy
+    quality = min(20, round((float(rating) / 5) * 10) + min(int(review_count), 50) // 5)
+
+    total = min(100, icp_fit + pain_severity + intent + quality)
+    breakdown = {'icp_fit': icp_fit, 'pain_severity': pain_severity,
+                 'intent_signals': intent, 'quality': quality, 'total': total}
+
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("UPDATE leads SET icp_score=%s, score_breakdown=%s WHERE id=%s",
+                (total, json.dumps(breakdown), lead_id))
+    conn.commit(); cur.close(); conn.close()
+    return breakdown
+
+# ──────────────────────────────────────────────────────────────
+#  M9: CRM INTEGRATION — Pipedrive + generic signed webhook
+# ──────────────────────────────────────────────────────────────
+def ensure_crm_tables():
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS crm_connections (
+            id          SERIAL PRIMARY KEY,
+            type        VARCHAR(30) NOT NULL,
+            name        VARCHAR(200) NOT NULL DEFAULT '',
+            config      JSONB NOT NULL DEFAULT '{}',
+            is_active   BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at  TIMESTAMPTZ DEFAULT NOW()
+        )""")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS crm_push_log (
+            id             SERIAL PRIMARY KEY,
+            lead_id        UUID REFERENCES leads(id) ON DELETE CASCADE,
+            connection_id  INT REFERENCES crm_connections(id) ON DELETE CASCADE,
+            status         VARCHAR(20) NOT NULL DEFAULT 'queued',
+            external_id    VARCHAR(200),
+            response       JSONB,
+            error          TEXT,
+            pushed_at      TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE(lead_id, connection_id)
+        )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_crm_push_log_lead ON crm_push_log(lead_id)")
+    conn.commit(); cur.close(); conn.close()
+
+def _research_note_text(detail):
+    research = detail.get('research') or {}
+    lines = [f"Controva lead — AI score {detail.get('ai_score', '—')}, "
+             f"pain-aware score {detail.get('icp_score', '—')}/100"]
+    if research.get('needs_summary'):
+        lines.append(f"Needs: {research['needs_summary']}")
+    for p in (research.get('pain_points') or [])[:5]:
+        lines.append(f"Pain: {p.get('pain')} — {p.get('evidence', '')}")
+    if research.get('recommended_angle'):
+        lines.append(f"Recommended angle: {research['recommended_angle']}")
+    return '\n'.join(lines)
+
+def pipedrive_push(detail, config):
+    """org -> person -> deal, note with research dossier. Returns (ok, external_id, response_or_error)."""
+    token = config.get('api_token', '')
+    if not token:
+        return False, None, {'error': 'no api_token configured'}
+    base = 'https://api.pipedrive.com/v1'
+
+    def _post(path, payload):
+        req = urllib.request.Request(f'{base}{path}?api_token={token}', data=json.dumps(payload).encode(),
+                                     method='POST', headers={'Content-Type': 'application/json'})
+        resp = urllib.request.urlopen(req, timeout=15)
+        return json.loads(resp.read().decode())
+
+    try:
+        org_resp = _post('/organizations', {'name': detail['business_name']})
+        org_id = org_resp.get('data', {}).get('id')
+
+        person_payload = {'name': detail.get('owner_name') or detail['business_name'], 'org_id': org_id}
+        if detail.get('owner_email'):
+            person_payload['email'] = [{'value': detail['owner_email'], 'primary': True}]
+        if detail.get('phone'):
+            person_payload['phone'] = [{'value': detail['phone'], 'primary': True}]
+        person_resp = _post('/persons', person_payload)
+        person_id = person_resp.get('data', {}).get('id')
+
+        deal_payload = {'title': f"{detail['business_name']} — {detail.get('niche', '')}",
+                        'org_id': org_id, 'person_id': person_id}
+        if config.get('pipeline_id'): deal_payload['pipeline_id'] = config['pipeline_id']
+        if config.get('stage_id'): deal_payload['stage_id'] = config['stage_id']
+        deal_resp = _post('/deals', deal_payload)
+        deal_id = deal_resp.get('data', {}).get('id')
+
+        _post('/notes', {'content': _research_note_text(detail), 'deal_id': deal_id})
+        return True, str(deal_id), {'org_id': org_id, 'person_id': person_id, 'deal_id': deal_id}
+    except urllib.error.HTTPError as e:
+        try: err_body = e.read().decode()[:300]
+        except Exception: err_body = ''
+        return False, None, {'error': f'{e.code} {e.reason}: {err_body}'}
+    except Exception as e:
+        return False, None, {'error': str(e)}
+
+def webhook_push(detail, config):
+    """Generic signed JSON payload — works with Zapier/n8n/GoHighLevel/any custom endpoint."""
+    url = config.get('webhook_url', '')
+    if not url:
+        return False, None, {'error': 'no webhook_url configured'}
+    try:
+        payload = {
+            'lead_id': detail['id'], 'business_name': detail['business_name'],
+            'niche': detail.get('niche'), 'city': detail.get('city'), 'country': detail.get('country'),
+            'phone': detail.get('phone'), 'owner_name': detail.get('owner_name'),
+            'owner_email': detail.get('owner_email'), 'ai_score': detail.get('ai_score'),
+            'icp_score': detail.get('icp_score'), 'research': detail.get('research'),
+        }
+        body = json.dumps(payload).encode()
+        headers = {'Content-Type': 'application/json'}
+        secret = config.get('webhook_secret', '')
+        if secret:
+            headers['X-Controva-Signature'] = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+        req = urllib.request.Request(url, data=body, method='POST', headers=headers)
+        resp = urllib.request.urlopen(req, timeout=15)
+        return True, None, {'status_code': resp.status}
+    except urllib.error.HTTPError as e:
+        return False, None, {'error': f'{e.code} {e.reason}'}
+    except Exception as e:
+        return False, None, {'error': str(e)}
+
+def crm_push_lead(lead_id, connection_id):
+    detail = get_lead_detail(lead_id)
+    if not detail:
+        return False, None, {'error': 'lead not found'}
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("SELECT type, config FROM crm_connections WHERE id=%s AND is_active=TRUE", (connection_id,))
+    row = cur.fetchone(); cur.close(); conn.close()
+    if not row:
+        return False, None, {'error': 'connection not found or inactive'}
+    ctype, config = row
+    config = config or {}
+    if ctype == 'pipedrive':
+        ok, ext_id, resp = pipedrive_push(detail, config)
+    elif ctype == 'webhook':
+        ok, ext_id, resp = webhook_push(detail, config)
+    else:
+        ok, ext_id, resp = False, None, {'error': f'unsupported CRM type: {ctype}'}
+
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO crm_push_log (lead_id, connection_id, status, external_id, response, error, pushed_at)
+        VALUES (%s,%s,%s,%s,%s,%s,NOW())
+        ON CONFLICT (lead_id, connection_id) DO UPDATE SET
+          status=EXCLUDED.status, external_id=EXCLUDED.external_id,
+          response=EXCLUDED.response, error=EXCLUDED.error, pushed_at=NOW()""",
+        (lead_id, connection_id, 'ok' if ok else 'failed', ext_id,
+         json.dumps(resp) if ok else None, None if ok else json.dumps(resp)))
+    conn.commit(); cur.close(); conn.close()
+    return ok, ext_id, resp
+
+def run_crm_push_bg(job_id, lead_ids, connection_id):
+    """Background job: crm_push_lead() over a batch, per-lead progress (run_reenrich_bg pattern)."""
+    try:
+        total = len(lead_ids)
+        JOBS[job_id]['log'].append(f'Pushing {total} lead(s) to CRM…')
+        done = 0; ok_count = 0
+        for lid in lead_ids:
+            if JOBS[job_id].get('cancelled'):
+                break
+            try:
+                ok, ext_id, resp = crm_push_lead(lid, connection_id)
+                done += 1
+                if ok: ok_count += 1
+                JOBS[job_id]['log'].append(f'[{done}/{total}] {"OK" if ok else "FAILED: " + str(resp)[:80]}')
+                JOBS[job_id]['progress'] = int(done / total * 100)
+            except Exception as e:
+                done += 1
+                JOBS[job_id]['log'].append(f'[{done}/{total}] Error: {str(e)[:80]}')
+                JOBS[job_id]['progress'] = int(done / total * 100)
+        JOBS[job_id]['status'] = 'completed'
+        JOBS[job_id]['progress'] = 100
+        JOBS[job_id]['log'].append(f'Done — {ok_count}/{done} pushed successfully.')
+        JOBS[job_id]['results'] = {'processed': done, 'succeeded': ok_count}
+    except Exception as e:
+        JOBS[job_id]['status'] = 'failed'
+        JOBS[job_id]['error'] = str(e)
+        JOBS[job_id]['log'].append(f'Error: {e}')
+
+def run_crm_retry_bg():
+    """Scheduler pass: retry failed pushes for still-active connections (M9 plan: 'retry queue')."""
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("""
+            SELECT pl.lead_id, pl.connection_id FROM crm_push_log pl
+            JOIN crm_connections c ON c.id = pl.connection_id AND c.is_active = TRUE
+            WHERE pl.status = 'failed'
+            LIMIT 100
+        """)
+        rows = cur.fetchall(); cur.close(); conn.close()
+        for lead_id, connection_id in rows:
+            try: crm_push_lead(lead_id, connection_id)
+            except Exception as e: print(f'[crm retry] failed for {lead_id}: {e}')
+    except Exception as e:
+        print(f'[crm retry] pass failed: {e}')
+
+def crm_auto_push_for_icp(icp_id):
+    """M6 tie-in: auto-push qualified, not-yet-pushed leads for an ICP profile
+    that has push_to_crm enabled, to the first active CRM connection."""
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("SELECT push_to_crm, min_lead_score FROM icp_profiles WHERE id=%s", (icp_id,))
+        row = cur.fetchone()
+        if not row or not row[0]:
+            cur.close(); conn.close()
+            return
+        min_score = row[1] or 0
+        cur.execute("SELECT id FROM crm_connections WHERE is_active=TRUE ORDER BY id LIMIT 1")
+        conn_row = cur.fetchone()
+        if not conn_row:
+            cur.close(); conn.close()
+            return
+        connection_id = conn_row[0]
+        cur.execute("""
+            SELECT l.id FROM leads l
+            LEFT JOIN crm_push_log pl ON pl.lead_id = l.id AND pl.connection_id = %s AND pl.status = 'ok'
+            WHERE l.icp_id = %s AND pl.id IS NULL
+              AND COALESCE(l.icp_score, l.ai_score * 10, 0) >= %s
+            LIMIT 200
+        """, (connection_id, icp_id, min_score))
+        lead_ids = [r[0] for r in cur.fetchall()]
+        cur.close(); conn.close()
+        for lid in lead_ids:
+            try: crm_push_lead(lid, connection_id)
+            except Exception as e: print(f'[crm auto-push] failed for {lid}: {e}')
+    except Exception as e:
+        print(f'[crm auto-push] failed: {e}')
+
+# ──────────────────────────────────────────────────────────────
+#  M10: PHASE-2 SUITE — reply classification, meeting booking,
+#  multi-decision-maker capture, white-label, daily digest
+# ──────────────────────────────────────────────────────────────
+def ensure_phase2_columns():
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("ALTER TABLE outreach_log ADD COLUMN IF NOT EXISTS reply_classification VARCHAR(30)")
+    cur.execute("ALTER TABLE outreach_log ADD COLUMN IF NOT EXISTS reply_digest TEXT")
+    cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS meeting_booked BOOLEAN DEFAULT FALSE")
+    cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS meeting_booked_at TIMESTAMPTZ")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_outreach_reply_class ON outreach_log(reply_classification)")
+    conn.commit(); cur.close(); conn.close()
+
+# ── Reply classification ────────────────────────────────────────
+_REPLY_CLASSES = ('interested', 'objection', 'not_interested', 'ooo', 'unsubscribe_intent', 'unclear')
+
+def classify_reply(body_text):
+    """Gemini classifies a reply into one of _REPLY_CLASSES + a one-line digest.
+    Falls back to 'unclear' on any failure — never blocks reply processing."""
+    try:
+        prompt = f"""Classify this email reply to a cold outreach message.
+
+Reply text:
+{(body_text or '')[:1500]}
+
+Categories: interested, objection, not_interested, ooo (out of office / auto-reply),
+unsubscribe_intent (asking to stop emailing).
+Respond ONLY with valid JSON:
+{{"classification": "<one of: interested, objection, not_interested, ooo, unsubscribe_intent>",
+ "digest": "<one short sentence summarizing the reply>"}}"""
+        raw = gemini_call(prompt, max_tokens=150)
+        if raw:
+            m = re.search(r'\{[\s\S]*\}', raw)
+            if m:
+                parsed = json.loads(m.group())
+                c = parsed.get('classification', 'unclear')
+                return (c if c in _REPLY_CLASSES else 'unclear'), parsed.get('digest', '')
+    except Exception as e:
+        print(f'[reply-classify] failed: {e}')
+    return 'unclear', ''
+
+# ── Meeting booking (Calendly) ──────────────────────────────────
+def meeting_booking_cta():
+    """CTA line to append to sequence steps when a Calendly link is configured.
+    Empty string when not configured — callers already handle '' as no-op."""
+    url = CONFIG.get('calendly_url', '')
+    return f"If it's easier, grab a time directly: {url}" if url else ''
+
+def handle_calendly_webhook(raw_body):
+    """Calendly 'invitee.created' webhook — matches the invitee email against
+    outreach_log/contacts and marks the lead meeting_booked. No signature
+    verification here since Calendly's payload has no shared secret by default
+    (same trust model as the existing unauthenticated /webhook/resend route)."""
+    try:
+        data = json.loads(raw_body.decode())
+        email = ((data.get('payload') or {}).get('invitee') or {}).get('email', '').lower()
+        if not email:
+            return {'ok': False, 'error': 'no invitee email in payload'}
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("""SELECT DISTINCT lead_id FROM outreach_log WHERE LOWER(email_to) = %s
+                       UNION
+                       SELECT DISTINCT lead_id FROM contacts WHERE LOWER(email) = %s""", (email, email))
+        rows = cur.fetchall()
+        for (lead_id,) in rows:
+            cur.execute("UPDATE leads SET meeting_booked=TRUE, meeting_booked_at=NOW() WHERE id=%s", (lead_id,))
+        conn.commit(); cur.close(); conn.close()
+        return {'ok': True, 'matched': len(rows)}
+    except Exception as e:
+        return {'ok': False, 'error': str(e)}
+
+# ── Multi-decision-maker capture ────────────────────────────────
+def capture_decision_makers(lead_id, business_name, city):
+    """Store find_people() results as additional title-aware contacts.
+    Outreach still targets the single best-verified contact (existing
+    ORDER BY has-email/confidence logic is untouched) — these are retained
+    for visibility and future multi-threading, per the plan."""
+    if not CONFIG.get('multi_decision_maker_capture', True):
+        return 0
+    try:
+        result = find_people(business_name, location=city)
+        people = (result.get('people') or [])[:5]
+        if not people:
+            return 0
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("SELECT LOWER(COALESCE(linkedin_url,'')), LOWER(COALESCE(full_name,'')) FROM contacts WHERE lead_id=%s",
+                    (lead_id,))
+        existing = set(cur.fetchall())
+        added = 0
+        for p in people:
+            key = (p.get('linkedin_url', '').lower(), p.get('name', '').lower())
+            if key in existing or not p.get('name'):
+                continue
+            cur.execute("""INSERT INTO contacts (lead_id, full_name, job_title, linkedin_url, source, confidence)
+                           VALUES (%s,%s,%s,%s,'find_people',40)""",
+                        (lead_id, p.get('name', ''), p.get('title', ''), p.get('linkedin_url', '')))
+            added += 1
+        conn.commit(); cur.close(); conn.close()
+        return added
+    except Exception as e:
+        print(f'[decision-makers] failed for {business_name}: {e}')
+        return 0
+
+# ── Daily digest ─────────────────────────────────────────────────
+_last_digest_date = None
+
+def run_daily_digest():
+    """Morning summary: new qualified leads, research highlights, cost — reuses
+    the M5 api_usage cost query. No-op when disabled or no recipient set."""
+    if not CONFIG.get('daily_digest_enabled') or not CONFIG.get('digest_recipient_email'):
+        return
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("""SELECT COUNT(*) FROM leads
+                       WHERE created_at > NOW() - INTERVAL '24 hours' AND lead_type IS NULL""")
+        new_leads = cur.fetchone()[0]
+        cur.execute("""SELECT COUNT(*) FROM leads
+                       WHERE created_at > NOW() - INTERVAL '24 hours'
+                         AND COALESCE(icp_score, ai_score*10, 0) >= 60""")
+        qualified = cur.fetchone()[0]
+        cur.execute("""SELECT business_name, pain_points FROM leads l JOIN lead_research r ON r.lead_id=l.id
+                       WHERE r.researched_at > NOW() - INTERVAL '24 hours'
+                         AND jsonb_array_length(COALESCE(r.pain_points,'[]'::jsonb)) > 0
+                       ORDER BY r.researched_at DESC LIMIT 3""")
+        highlights = cur.fetchall()
+        cur.execute("SELECT COALESCE(SUM(cost),0) FROM api_usage WHERE created_at > NOW() - INTERVAL '24 hours'")
+        cost_today = float(cur.fetchone()[0])
+        cur.close(); conn.close()
+
+        lines = [f"New leads (24h): {new_leads}", f"Qualified (score >= 60): {qualified}",
+                 f"API spend (24h): ${cost_today:.2f}", '']
+        if highlights:
+            lines.append('Research highlights:')
+            for name, pains in highlights:
+                top_pain = (pains or [{}])[0].get('pain', '')
+                lines.append(f"  - {name}: {top_pain}")
+        brand = CONFIG.get('client_brand_name') or 'Controva'
+        send_email_via_resend(CONFIG['digest_recipient_email'], f'{brand} daily digest',
+                              '\n'.join(lines), skip_footer=True)
+    except Exception as e:
+        print(f'[digest] failed: {e}')
+
+def digest_scheduler_loop():
+    """Fires run_daily_digest() once per calendar day, around 08:00 UTC."""
+    global _last_digest_date
+    while True:
+        try:
+            now = time.gmtime()
+            today = time.strftime('%Y-%m-%d', now)
+            if now.tm_hour == 8 and _last_digest_date != today:
+                run_daily_digest()
+                _last_digest_date = today
+        except Exception as e:
+            print(f'[digest] scheduler error: {e}')
+        time.sleep(1800)
 
 # ──────────────────────────────────────────────────────────────
 #  M6: ICP ENGINE — autonomous ideal-customer-profile prospecting
@@ -5723,6 +6382,10 @@ def run_icp_bg(job_id, icp_id):
                        leads_found=%s, leads_new=%s, log=%s WHERE id=%s""",
                     (found_total, new_total, '\n'.join(log_lines[-100:]), run_row_id))
         conn.commit(); cur.close(); conn.close()
+        try:
+            crm_auto_push_for_icp(icp_id)   # M9 tie-in: push qualified leads if configured
+        except Exception as e:
+            log(f'CRM auto-push skipped: {str(e)[:80]}')
         if job_id in JOBS:
             JOBS[job_id]['status'] = 'completed'; JOBS[job_id]['progress'] = 100
             JOBS[job_id]['results'] = {'found': found_total, 'new': new_total}
@@ -5778,6 +6441,7 @@ def icp_scheduler_loop():
                 if row:
                     print(f'[icp] scheduler: running ICP {row[0]}')
                     run_icp_bg(f'icp_auto_{row[0]}_{int(time.time())}', row[0])
+            run_crm_retry_bg()   # M9: retry failed CRM pushes every pass
         except Exception as e:
             print(f'[icp] scheduler error: {e}')
         time.sleep(1800)
@@ -5861,7 +6525,8 @@ def get_sequence_step_assets(lead_id, step, kind, detail):
         return row[0], row[1]
     copy = generate_followup_copy(detail['business_name'], detail['niche'], detail['city'],
                                   detail.get('owner_name'), kind,
-                                  prev_subject=detail.get('email_subject') or '')
+                                  prev_subject=detail.get('email_subject') or '',
+                                  research=detail.get('research'))
     if not copy:
         return None, None
     conn = db_conn(); cur = conn.cursor()
@@ -6227,12 +6892,17 @@ def run_check_replies_bg(job_id):
                                 break
                     else:
                         body_preview = (msg.get_payload(decode=True) or b'')[:2000].decode('utf-8', 'ignore')
+                    reply_class, reply_digest = classify_reply(body_preview)
                     cur.execute("""UPDATE outreach_log SET replied_at=NOW(), status='replied',
-                                   reply_content=%s WHERE id=%s""", (body_preview, row[0]))
+                                   reply_content=%s, reply_classification=%s, reply_digest=%s
+                                   WHERE id=%s""", (body_preview, reply_class, reply_digest, row[0]))
                     cur.execute("UPDATE leads SET status='replied' WHERE id=%s", (row[1],))
                     stop_enrollment(row[1], 'replied', 'reply detected via IMAP')
+                    if reply_class == 'unsubscribe_intent':
+                        try: add_suppression(sender, 'unsubscribe', row[1], 'reply asked to stop')
+                        except Exception as e: print(f'[replies] suppression failed: {e}')
                     conn.commit(); matched += 1
-                    JOBS[job_id]['log'].append(f'Reply matched: {sender}')
+                    JOBS[job_id]['log'].append(f'Reply matched: {sender} [{reply_class}]')
                 cur.close(); conn.close()
             except Exception as e:
                 print(f'[replies] {sender}: {e}')
@@ -6289,16 +6959,20 @@ def handle_unsubscribe(token):
 
 def build_compliance_footer(unsub_url=None):
     """CAN-SPAM/GDPR footer: unsubscribe mechanism + company name + postal address.
-    Every commercial email must carry these — non-negotiable."""
+    Every commercial email must carry these — non-negotiable. White-label (M10):
+    client_brand_name overrides the sender name shown when set."""
+    brand = CONFIG.get('client_brand_name') or COMPANY_NAME
     lines = ['—']
     if unsub_url:
         lines.append(f'Don\'t want emails from us? <a href="{unsub_url}" style="color:#888;">Unsubscribe</a>')
     else:
         lines.append(f'Don\'t want emails from us? Reply with "unsubscribe" and we\'ll remove you immediately.')
     if COMPANY_ADDRESS:
-        lines.append(f'{COMPANY_NAME} · {COMPANY_ADDRESS}')
-    elif COMPANY_NAME:
-        lines.append(COMPANY_NAME)
+        lines.append(f'{brand} · {COMPANY_ADDRESS}')
+    elif brand:
+        lines.append(brand)
+    if CONFIG.get('client_footer_text'):
+        lines.append(CONFIG['client_footer_text'])
     return '\n'.join(lines)
 
 def send_email_via_resend(to_email, subject, body_text, body_html=None, from_email=None,
@@ -6435,7 +7109,11 @@ def get_lead_detail(lead_id):
                c.full_name, c.email, c.email_status, c.linkedin_url, c.job_title,
                (SELECT content FROM assets WHERE lead_id=l.id AND asset_type='mockup_image' LIMIT 1) as mockup,
                (SELECT content FROM assets WHERE lead_id=l.id AND asset_type='email_subject' LIMIT 1) as subj,
-               (SELECT content FROM assets WHERE lead_id=l.id AND asset_type='email_body' LIMIT 1) as body
+               (SELECT content FROM assets WHERE lead_id=l.id AND asset_type='email_body' LIMIT 1) as body,
+               rs.status, rs.pain_points, rs.needs_summary, rs.recommended_angle,
+               rs.reviews_summary, rs.tech_stack, rs.sources,
+               to_char(rs.researched_at,'YYYY-MM-DD HH24:MI') as researched_at,
+               l.icp_score, l.score_breakdown, l.meeting_booked
         FROM leads l
         LEFT JOIN LATERAL (
             SELECT full_name, email, email_status, linkedin_url, job_title FROM contacts
@@ -6443,6 +7121,7 @@ def get_lead_detail(lead_id):
             ORDER BY (COALESCE(email,'') != '') DESC, confidence DESC NULLS LAST, created_at DESC
             LIMIT 1
         ) c ON TRUE
+        LEFT JOIN lead_research rs ON rs.lead_id = l.id
         WHERE l.id = %s
     """, (lead_id,))
     r = cur.fetchone()
@@ -6459,7 +7138,20 @@ def get_lead_detail(lead_id):
         "owner_name": r[13] or "", "owner_email": r[14] or "",
         "email_status": r[15] or "",
         "linkedin_url": r[16] or "", "job_title": r[17] or "",
-        "mockup_url": r[18] or "", "email_subject": r[19] or "", "email_body": r[20] or ""
+        "mockup_url": r[18] or "", "email_subject": r[19] or "", "email_body": r[20] or "",
+        "research": {
+            "status": r[21] or "not_researched",
+            "pain_points": r[22] or [],
+            "needs_summary": r[23] or "",
+            "recommended_angle": r[24] or "",
+            "reviews_summary": r[25] or "",
+            "tech_stack": r[26] or [],
+            "sources": r[27] or [],
+            "researched_at": r[28]
+        },
+        "icp_score": r[29],
+        "score_breakdown": r[30] or {},
+        "meeting_booked": bool(r[31])
     }
 
 def regenerate_email_for_lead(lead_id, extra_instructions=""):
@@ -6472,7 +7164,8 @@ def regenerate_email_for_lead(lead_id, extra_instructions=""):
         detail["business_name"],
         detail["niche"],
         detail["city"],
-        detail["owner_name"]
+        detail["owner_name"],
+        research=detail.get("research")
     )
 
     if not email:
@@ -6496,7 +7189,8 @@ def get_outreach_log(limit=100):
     conn = db_conn(); cur = conn.cursor()
     cur.execute("""
         SELECT o.id, o.lead_id, l.business_name, o.email_to, o.email_subject,
-               o.sent_at, o.opened_at, o.replied_at, o.status, o.resend_message_id
+               o.sent_at, o.opened_at, o.replied_at, o.status, o.resend_message_id,
+               o.reply_classification, o.reply_digest, l.meeting_booked
         FROM outreach_log o LEFT JOIN leads l ON l.id = o.lead_id
         ORDER BY o.sent_at DESC NULLS LAST LIMIT %s
     """, (limit,))
@@ -6508,7 +7202,9 @@ def get_outreach_log(limit=100):
         "sent_at": r[5].isoformat() if r[5] else None,
         "opened_at": r[6].isoformat() if r[6] else None,
         "replied_at": r[7].isoformat() if r[7] else None,
-        "status": r[8], "message_id": r[9]
+        "status": r[8], "message_id": r[9],
+        "reply_classification": r[10] or "", "reply_digest": r[11] or "",
+        "meeting_booked": bool(r[12])
     } for r in rows]
 
 def get_chart_stats():
@@ -6785,6 +7481,28 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
+        elif p == '/crm/connections':
+            try:
+                conn = db_conn(); cur = conn.cursor()
+                cur.execute("""SELECT id, type, name, config, is_active, created_at,
+                                      (SELECT COUNT(*) FROM crm_push_log WHERE connection_id=c.id AND status='ok'),
+                                      (SELECT COUNT(*) FROM crm_push_log WHERE connection_id=c.id AND status='failed')
+                               FROM crm_connections c ORDER BY id DESC""")
+                rows = cur.fetchall(); cur.close(); conn.close()
+                conns = []
+                for cid, ctype, name, config, active, created, ok_n, fail_n in rows:
+                    config = dict(config or {})
+                    # Mask secrets — never echo tokens/webhook secrets back to the client
+                    for k in ('api_token', 'webhook_secret'):
+                        if config.get(k):
+                            config[k] = '••••' + config[k][-4:] if len(config[k]) > 4 else '••••'
+                    conns.append({'id': cid, 'type': ctype, 'name': name, 'config': config,
+                                  'is_active': active, 'created_at': created.isoformat() if created else None,
+                                  'pushed_ok': ok_n, 'pushed_failed': fail_n})
+                self.send_json(200, {'connections': conns})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
         elif p == '/icp':
             try:
                 conn = db_conn(); cur = conn.cursor()
@@ -7029,6 +7747,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(500, {'error': str(e)})
             return
 
+        if p == '/webhook/calendly':
+            try:
+                result = handle_calendly_webhook(raw_body)
+                self.send_json(200 if result.get('ok') else 400, result)
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+            return
+
         if not self.require_auth():
             return
 
@@ -7262,6 +7988,72 @@ class Handler(BaseHTTPRequestHandler):
                 t = threading.Thread(target=run_verify_websites_bg, args=(job_id, lead_ids))
                 t.daemon = True; t.start()
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p == '/crm/connections/save':
+            try:
+                cid = body.get('id')
+                ctype = body.get('type', '')
+                if ctype not in ('pipedrive', 'webhook'):
+                    self.send_json(400, {'error': 'type must be pipedrive or webhook'}); return
+                name = body.get('name', '') or ctype
+                config = dict(body.get('config') or {})
+                is_active = bool(body.get('is_active', True))
+                conn = db_conn(); cur = conn.cursor()
+                if cid:
+                    # A masked value round-tripped from GET must not clobber the real secret
+                    cur.execute("SELECT config FROM crm_connections WHERE id=%s", (cid,))
+                    existing_row = cur.fetchone()
+                    existing_config = (existing_row[0] if existing_row else {}) or {}
+                    for k in ('api_token', 'webhook_secret'):
+                        if isinstance(config.get(k), str) and config[k].startswith('••••'):
+                            config[k] = existing_config.get(k, '')
+                    cur.execute("UPDATE crm_connections SET type=%s, name=%s, config=%s, is_active=%s WHERE id=%s",
+                                (ctype, name, json.dumps(config), is_active, cid))
+                else:
+                    cur.execute("""INSERT INTO crm_connections (type, name, config, is_active)
+                                   VALUES (%s,%s,%s,%s) RETURNING id""",
+                                (ctype, name, json.dumps(config), is_active))
+                    cid = cur.fetchone()[0]
+                conn.commit(); cur.close(); conn.close()
+                self.send_json(200, {'success': True, 'id': cid})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p.startswith('/crm/connections/') and p.endswith('/delete'):
+            try:
+                cid = p.split('/')[3]
+                conn = db_conn(); cur = conn.cursor()
+                cur.execute("DELETE FROM crm_connections WHERE id=%s", (cid,))
+                conn.commit(); cur.close(); conn.close()
+                self.send_json(200, {'success': True})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p == '/crm/push':
+            try:
+                connection_id = body.get('connection_id')
+                if not connection_id:
+                    self.send_json(400, {'error': 'connection_id required'}); return
+                lead_ids = body.get('lead_ids')
+                if not lead_ids:
+                    min_score = int(body.get('min_score', 0) or 0)
+                    conn = db_conn(); cur = conn.cursor()
+                    cur.execute("""SELECT id FROM leads WHERE COALESCE(icp_score, ai_score*10, 0) >= %s
+                                   ORDER BY COALESCE(icp_score, ai_score*10, 0) DESC LIMIT 500""", (min_score,))
+                    lead_ids = [str(r[0]) for r in cur.fetchall()]
+                    cur.close(); conn.close()
+                if not lead_ids:
+                    self.send_json(200, {'job_id': None, 'status': 'nothing_to_do',
+                                         'message': 'No leads matched.'})
+                    return
+                job_id = f'job_{int(time.time() * 1000)}'
+                JOBS[job_id] = {'status': 'running', 'progress': 0,
+                                'log': [f'Pushing {len(lead_ids)} lead(s)…'], 'step': 'CRM Push'}
+                t = threading.Thread(target=run_crm_push_bg, args=(job_id, lead_ids, connection_id))
+                t.daemon = True; t.start()
+                self.send_json(200, {'job_id': job_id, 'status': 'started', 'count': len(lead_ids)})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
@@ -7716,6 +8508,45 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
+        elif p.startswith('/lead/') and p.endswith('/research'):
+            try:
+                lead_id = p.split('/')[2]
+                job_id = f'job_{int(time.time() * 1000)}'
+                JOBS[job_id] = {'status': 'running', 'progress': 0,
+                                'log': ['Starting research…'], 'step': 'AI Research'}
+                t = threading.Thread(target=run_research_bg, args=(job_id, [lead_id]))
+                t.daemon = True; t.start()
+                self.send_json(200, {'job_id': job_id, 'status': 'started'})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p == '/research/queue':
+            try:
+                min_score = int(body.get('min_score', 0) or 0)
+                conn = db_conn(); cur = conn.cursor()
+                cur.execute("""
+                    SELECT l.id FROM leads l
+                    LEFT JOIN lead_research rs ON rs.lead_id = l.id
+                    WHERE (rs.lead_id IS NULL OR rs.status != 'completed')
+                      AND l.ai_score >= %s
+                    ORDER BY l.ai_score DESC NULLS LAST
+                    LIMIT 500
+                """, (min_score,))
+                lead_ids = [str(r[0]) for r in cur.fetchall()]
+                cur.close(); conn.close()
+                if not lead_ids:
+                    self.send_json(200, {'job_id': None, 'status': 'nothing_to_do',
+                                         'message': 'No un-researched leads at or above that score.'})
+                    return
+                job_id = f'job_{int(time.time() * 1000)}'
+                JOBS[job_id] = {'status': 'running', 'progress': 0,
+                                'log': [f'Queued {len(lead_ids)} lead(s) for research…'], 'step': 'AI Research'}
+                t = threading.Thread(target=run_research_bg, args=(job_id, lead_ids))
+                t.daemon = True; t.start()
+                self.send_json(200, {'job_id': job_id, 'status': 'started', 'count': len(lead_ids)})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
         elif p.startswith('/batch/') and p.endswith('/delete'):
             try:
                 batch_id = p.split('/')[2]
@@ -7751,6 +8582,10 @@ if __name__ == '__main__':
         ensure_m4_tables()
         ensure_m5_tables()
         ensure_icp_tables()
+        ensure_research_tables()
+        ensure_scoring_columns()
+        ensure_crm_tables()
+        ensure_phase2_columns()
         print('Schema migration: OK')
     except Exception as e:
         print(f'Schema migration warning (non-fatal): {e}')
@@ -7770,6 +8605,9 @@ if __name__ == '__main__':
         t2 = threading.Thread(target=icp_scheduler_loop, daemon=True)
         t2.start()
         print('ICP: scheduler running')
+    # M10: daily digest scheduler (checks hourly, fires once per day)
+    t3 = threading.Thread(target=digest_scheduler_loop, daemon=True)
+    t3.start()
     server = ThreadingServer(('0.0.0.0', 8080), Handler)
     print('LeadGen v5 - Multi-Module Intelligence Platform')
     print('Modules: discover, enrich, score, assets, seo, competitor, ecommerce')
