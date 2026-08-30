@@ -46,6 +46,19 @@ jobs:
             echo "--- is leads_api.py on disk actually the new version? (grep for an M7-only string) ---"
             grep -c "AI RESEARCH & PAIN DETECTION" /opt/leadgen/leads_api.py 2>&1 || echo "0 (old version still on disk!)"
             echo
+            echo "### file is new but process never restarted last run — forcing it now ###"
+            sudo systemctl restart leadgen-api
+            sleep 5
+            echo "Restart result: $(systemctl is-active leadgen-api)"
+            systemctl show leadgen-api --property=ActiveEnterTimestamp --no-pager
+            echo "--- health check post-restart ---"
+            curl -s http://localhost:8080/health || true
+            echo
+            echo "--- client account now seeded? ---"
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -t -c "SELECT username, role FROM auth_users;" 2>&1 || true
+            echo "--- fresh startup log ---"
+            journalctl -u leadgen-api --since "1 minute ago" --no-pager | grep -E "Schema migration|Auth:|Client role account|WARNING" || echo "(nothing yet)"
+            echo
             echo "### disk / memory ###"
             df -h /
             free -h
