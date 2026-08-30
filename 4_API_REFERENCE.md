@@ -1,11 +1,11 @@
 # API Reference — Controva Intelligence Platform
 
-Complete documentation of all 35+ endpoints.
+Complete documentation of all 45+ endpoints.
 
 **Base URL:** `http://YOUR_SERVER_IP:8080`
 **Authentication:** Most endpoints are open. For production, add a reverse proxy with HTTP basic auth, or use the `/auth/login` token.
 **Content-Type:** `application/json` for all POST requests.
-**Version:** 7.0
+**Version:** 8.0
 
 ---
 
@@ -105,7 +105,7 @@ List all leads in database.
 curl http://localhost:8080/leads
 ```
 
-Response includes `id`, `business_name`, `niche`, `city`, `country`, `phone`, `address`, `website`, `ai_score`, `status`, `owner_name`, `owner_email`, `linkedin_url`, `mockup_url`, `email_subject`, `email_body`, `date_found`, `lead_type`.
+Response includes `id`, `business_name`, `niche`, `city`, `country`, `phone`, `address`, `website`, `ai_score`, `icp_score` *(M8)*, `status`, `owner_name`, `owner_email`, `linkedin_url`, `mockup_url`, `email_subject`, `email_body`, `date_found`, `lead_type`.
 
 ### GET /leads.csv
 Download all leads as CSV.
@@ -115,7 +115,9 @@ curl -O http://localhost:8080/leads.csv
 ```
 
 ### GET /lead/{id}
-Get full details of a specific lead.
+Get full details of a specific lead — includes `icp_score`/`score_breakdown` *(M8)*,
+`meeting_booked` *(M10)*, and a `research` object *(M7)*: `{status, pain_points,
+needs_summary, recommended_angle, reviews_summary, tech_stack, sources, researched_at}`.
 
 ```bash
 curl http://localhost:8080/lead/61ad7541-684f-47cd-a8da-e1fd2bdbc7c2
@@ -294,6 +296,88 @@ Verify email deliverability (SMTP RCPT TO).
 ```
 
 Response includes `syntax_valid`, `domain_resolves`, `has_mx`, `mailbox_exists`, `risk_level`, `details[]`.
+
+---
+
+## AI Research & Pain Detection (M7)
+
+### POST /lead/{id}/research
+Build (or rebuild) the AI research dossier for one lead. Background job — poll `/job/{job_id}`.
+
+```bash
+curl -X POST http://localhost:8080/lead/UUID_HERE/research -d '{}'
+```
+
+### POST /research/queue
+Bulk-research every lead at or above `min_score` that hasn't been researched yet (up to 500).
+
+```json
+{"min_score": 0}
+```
+
+Research results (pain_points, needs_summary, recommended_angle, tech_stack, sources) are
+returned as a `research` object inside `GET /lead/{id}`.
+
+---
+
+## Pain-Aware Scoring v2 (M8)
+
+No dedicated endpoint — `icp_score` and `score_breakdown` are computed automatically at the
+end of `/lead/{id}/research` and appear in `GET /lead/{id}` and `GET /leads` alongside the
+legacy `ai_score`.
+
+---
+
+## CRM Integration (M9)
+
+### GET /crm/connections
+List configured CRM connections (secrets masked).
+
+### POST /crm/connections/save
+Create or update a connection. Omit `id` to create.
+
+```json
+{"type": "pipedrive", "name": "Main Pipedrive",
+ "config": {"api_token": "...", "pipeline_id": "1", "stage_id": "2"}, "is_active": true}
+```
+
+```json
+{"type": "webhook", "name": "Zapier",
+ "config": {"webhook_url": "https://hooks.zapier.com/...", "webhook_secret": "optional"}}
+```
+
+### POST /crm/connections/{id}/delete
+Remove a connection.
+
+### POST /crm/push
+Push leads to a connection. Omit `lead_ids` to push everything at or above `min_score`.
+
+```json
+{"connection_id": 1, "lead_ids": ["uuid1", "uuid2"]}
+```
+```json
+{"connection_id": 1, "min_score": 60}
+```
+
+Returns a `job_id` — poll `/job/{job_id}`.
+
+---
+
+## Phase-2 Suite (M10)
+
+### POST /webhook/calendly
+Point your Calendly webhook subscription here. Unauthenticated (same trust model as
+`/webhook/resend`). Matches the invitee email against `outreach_log`/`contacts` and sets
+`leads.meeting_booked`.
+
+Reply classification has no dedicated endpoint — it runs automatically inside the existing
+**Check for Replies** (IMAP) job and appears as `reply_classification`/`reply_digest` on
+`GET /outreach`.
+
+White-label and daily-digest settings (`client_brand_name`, `client_brand_color`,
+`client_footer_text`, `calendly_url`, `daily_digest_enabled`, `digest_recipient_email`,
+`multi_decision_maker_capture`) are read/written via the existing `GET`/`POST /config` —
+see [Configuration](#configuration) below.
 
 ---
 
@@ -557,7 +641,9 @@ When you hit a limit, the API returns an error in the response body explaining w
 
 ## Versioning
 
-Current API version: **7.0**
+Current API version: **8.0** — adds AI research (M7), pain-aware scoring (M8), CRM push
+(M9), and the phase-2 suite (M10). Fully backwards-compatible with 7.0 clients — all new
+fields are additive.
 
 Check `/health` for the version your server is running.
 

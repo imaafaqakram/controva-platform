@@ -1,0 +1,107 @@
+name: VM Diagnostics
+# retry: re-check after secrets update
+
+on:
+  push:
+    branches: [claude/jolly-dirac-7qhyvi]
+    paths:
+      - '.github/workflows/diagnostics.yml'
+  workflow_dispatch:
+
+jobs:
+  diagnostics:
+    runs-on: ubuntu-latest
+    environment: VM
+    steps:
+      - name: Check VM services
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            echo "### leadgen-api ###"
+            systemctl status leadgen-api --no-pager || true
+            echo
+            echo "### docker ps ###"
+            docker ps || true
+            echo
+            echo "### xray (REALITY VPN) ###"
+            sudo systemctl status xray --no-pager || true
+            echo
+            echo "### openvpn-server@server2 ###"
+            sudo systemctl status openvpn-server@server2 --no-pager || true
+            echo
+            echo "### recent leadgen-api logs ###"
+            journalctl -u leadgen-api -n 50 --no-pager || true
+            echo
+            echo "### disk / memory ###"
+            df -h /
+            free -h
+            echo
+            echo "### health endpoint ###"
+            curl -s http://localhost:8080/health || true
+            echo
+            echo "### reverse proxy (caddy/nginx) ###"
+            systemctl is-active caddy 2>/dev/null && echo "caddy: active" || echo "caddy: not active/not installed"
+            systemctl is-active nginx 2>/dev/null && echo "nginx: active" || echo "nginx: not active/not installed"
+            echo "--- Caddyfile ---"
+            cat /etc/caddy/Caddyfile 2>/dev/null || echo "(no /etc/caddy/Caddyfile)"
+            echo "--- nginx sites-enabled ---"
+            ls /etc/nginx/sites-enabled/ 2>/dev/null && cat /etc/nginx/sites-enabled/* 2>/dev/null || echo "(no nginx sites-enabled)"
+            echo
+            echo "### firewall — is 8080 exposed publicly? ###"
+            sudo ufw status 2>/dev/null || echo "(ufw not active/installed)"
+            echo
+            echo "### public IP + domain check ###"
+            PUBIP=$(curl -s ifconfig.me || echo unknown)
+            echo "Public IP: $PUBIP"
+            echo "--- does app.controvallc.com resolve, and to what? ---"
+            getent hosts app.controvallc.com || echo "app.controvallc.com does not resolve"
+            echo "--- end-to-end HTTPS test from the VM itself ---"
+            curl -sk -o /dev/null -w "https://app.controvallc.com -> HTTP %{http_code}\n" --max-time 8 https://app.controvallc.com/health || echo "https://app.controvallc.com unreachable"
+            echo
+            echo "### caddy status + recent journal (did the cert actually get issued?) ###"
+            sudo systemctl status caddy --no-pager || true
+            echo "--- last 40 caddy log lines ---"
+            sudo journalctl -u caddy -n 40 --no-pager || true
+            echo "--- local :8443 check (now, not right after restart) ---"
+            curl -sk -o /dev/null -w "Local :8443 -> HTTP %{http_code}\n" https://localhost:8443/health -H "Host: app.controvallc.com" || true
+
+      - name: DNS deep-dive from the internet (this runner, not the VM)
+        run: |
+          echo "### nameservers for controvallc.com ###"
+          dig +short NS controvallc.com || nslookup -type=NS controvallc.com
+          echo
+          echo "### A/CNAME chain for app.controvallc.com ###"
+          dig app.controvallc.com ANY +noall +answer || true
+          dig +short A app.controvallc.com || true
+          dig +short CNAME app.controvallc.com || true
+          echo
+          echo "### raw curl -v to https://app.controvallc.com (bare, port 443) ###"
+          curl -vk --max-time 10 https://app.controvallc.com/health 2>&1 | head -40 || true
+          echo
+          echo "### does it match what SERVER_HOST resolves to? ###"
+          getent hosts app.controvallc.com || true
+          echo
+          echo "### what else is configured on controvallc.com's DNS? (checking before any migration) ###"
+          echo "--- apex A/AAAA ---"
+          dig +short A controvallc.com || true
+          dig +short AAAA controvallc.com || true
+          echo "--- MX (email) ---"
+          dig +short MX controvallc.com || true
+          echo "--- TXT (SPF/DKIM/verification records) ---"
+          dig +short TXT controvallc.com || true
+          echo "--- common subdomains ---"
+          for sub in www mail api n8n vpn ftp cdn; do
+            echo -n "$sub.controvallc.com -> "
+            dig +short "$sub.controvallc.com" || echo "(none)"
+          done
+          echo
+          echo "### fresh cert re-check right now (user reports 'not secure') ###"
+          echo "--- full cert chain, all certs in the chain ---"
+          echo | openssl s_client -connect app.controvallc.com:443 -servername app.controvallc.com -showcerts 2>&1 | grep -E "subject=|issuer=|Verify return code|BEGIN CERTIFICATE" | head -20
+          echo "--- curl verbose (matches what a real browser TLS negotiation sees) ---"
+          curl -vI --max-time 10 https://app.controvallc.com/ 2>&1 | grep -iE "subject:|issuer:|SSL certificate|TLSv|expire|start date" || true
+          echo "--- HTTP->HTTPS redirect working? ---"
+          curl -s -o /dev/null -w "http://app.controvallc.com -> HTTP %{http_code}, redirect to: %{redirect_url}\n" http://app.controvallc.com/ || true

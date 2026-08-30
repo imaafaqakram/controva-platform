@@ -1,0 +1,81 @@
+name: Set Up Caddy (HTTPS reverse proxy)
+
+on:
+  push:
+    branches: [claude/jolly-dirac-7qhyvi]
+    paths:
+      - '.github/workflows/setup-caddy.yml'
+  workflow_dispatch:
+
+jobs:
+  setup-caddy:
+    runs-on: ubuntu-latest
+    environment: VM
+    steps:
+      - name: DNS check from the internet (this runner, not the VM)
+        run: |
+          echo "### does app.controvallc.com resolve? ###"
+          getent hosts app.controvallc.com || { echo "NOT RESOLVING YET — stopping, re-run once DNS propagates"; exit 1; }
+
+      - name: Stop Xray, move Caddy to :443 (explicit user request — reversible with `systemctl enable --now xray`)
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          command_timeout: 5m
+          script: |
+            set -e
+            echo "### stopping + disabling xray (config untouched — restore with: sudo systemctl enable --now xray) ###"
+            sudo systemctl stop xray
+            sudo systemctl disable xray
+            sleep 2
+            echo "### confirming 443 is now free ###"
+            sudo ss -tlnp | grep ':443 ' || echo "443 is free"
+
+            echo "### installing caddy (idempotent) ###"
+            if ! command -v caddy >/dev/null 2>&1; then
+              sudo apt-get update -qq
+              sudo apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl gnupg
+              curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+              curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+              sudo apt-get update -qq
+              sudo apt-get install -y -qq caddy
+            else
+              echo "caddy already installed: $(caddy version)"
+            fi
+
+            echo "### writing Caddyfile (plain :443 now that it's free) ###"
+            sudo tee /etc/caddy/Caddyfile > /dev/null <<'CADDYEOF'
+            app.controvallc.com {
+                reverse_proxy localhost:8080
+            }
+            CADDYEOF
+
+            echo "### validating config ###"
+            sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
+            echo "### starting caddy ###"
+            sudo systemctl enable caddy
+            sudo systemctl restart caddy
+            sleep 5
+            sudo systemctl status caddy --no-pager
+
+            echo "### local HTTPS check on 443 ###"
+            curl -sk -o /dev/null -w "Local :443 -> HTTP %{http_code}\n" https://localhost/health -H "Host: app.controvallc.com" || true
+
+      - name: External reachability check (this runner, real internet — waits for cert issuance)
+        run: |
+          echo "### waiting up to 60s for caddy to obtain the cert and start serving on 443 ###"
+          for i in 1 2 3 4 5 6; do
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 https://app.controvallc.com/health || echo "000")
+            echo "attempt $i: HTTP $CODE"
+            if [ "$CODE" = "200" ]; then echo "SUCCESS"; break; fi
+            sleep 10
+          done
+          echo
+          echo "### final response body ###"
+          curl -s --max-time 10 https://app.controvallc.com/health || echo "still unreachable"
+          echo
+          echo "### full certificate chain check ###"
+          curl -vI --max-time 10 https://app.controvallc.com/ 2>&1 | grep -E "subject:|issuer:|SSL certificate verify" || true

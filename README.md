@@ -12,9 +12,13 @@ pain-point detection · composite lead scoring · personalised multi-touch seque
 unsubscribe/bounce/throttle compliance · open & reply tracking · CRM push (Pipedrive /
 HubSpot / webhook) · live API cost dashboard.
 
-**Program:** M1–M5 shipped (security hardening, verification pipeline, compliance &
-tracking, follow-up sequences, cost telemetry). M6–M10 in progress — see
-[`docs/CLIENT_MVP_PLAN.md`](docs/CLIENT_MVP_PLAN.md) for the current program plan.
+**Program:** M1–M10 shipped — security hardening, verification pipeline, compliance &
+tracking, follow-up sequences, cost telemetry, autonomous ICP discovery, AI research &
+pain detection, pain-aware scoring, CRM push, and the phase-2 suite (reply classification,
+meeting booking, white-label, daily digest). See
+[`docs/CLIENT_MVP_PLAN.md`](docs/CLIENT_MVP_PLAN.md) for what shipped as spec'd vs. scoped
+down, and PR #15 for the M7–M10 diff — not yet live-tested against production Postgres or
+real Pipedrive/Calendly accounts.
 
 ---
 
@@ -27,13 +31,18 @@ tracking, follow-up sequences, cost telemetry). M6–M10 in progress — see
 5. [Lead Discovery](#lead-discovery)
 6. [Website Verification](#website-verification)
 7. [Enrichment Strategies](#enrichment-strategies)
-8. [Deployment & CI/CD](#deployment--cicd)
-9. [Configuration & API Keys](#configuration--api-keys)
-10. [Architecture](#architecture)
-11. [Database Schema](#database-schema)
-12. [Troubleshooting](#troubleshooting)
-13. [Security Checklist](#security-checklist)
-14. [Changelog](#changelog)
+8. [AI Research & Pain Detection (M7)](#ai-research--pain-detection-m7)
+9. [Pain-Aware Scoring v2 (M8)](#pain-aware-scoring-v2-m8)
+10. [CRM Integration (M9)](#crm-integration-m9)
+11. [Phase-2 Suite & White-Label (M10)](#phase-2-suite--white-label-m10)
+12. [Deployment & CI/CD](#deployment--cicd)
+13. [Configuration & API Keys](#configuration--api-keys)
+14. [Architecture](#architecture)
+15. [Database Schema](#database-schema)
+16. [Troubleshooting](#troubleshooting)
+17. [User Roles](#user-roles)
+18. [Security Checklist](#security-checklist)
+19. [Changelog](#changelog)
 
 ---
 
@@ -46,7 +55,8 @@ Controva is a full B2B lead generation pipeline, self-hosted on your own VPS:
 | **ICP** *(M6)* | Define your ideal customer once — autonomous discovery keeps finding matching companies |
 | **Research** *(M7)* | AI reads the company's web presence, reviews, tech, hiring signals → pain points + recommended pitch angle |
 | **Qualify** *(M8)* | Composite scoring: ICP fit × detected need × intent, with full breakdown |
-| **CRM** *(M9)* | Qualified opportunities pushed to Pipedrive/HubSpot/webhook automatically |
+| **CRM** *(M9)* | Qualified opportunities pushed to Pipedrive or any signed webhook (Zapier/n8n/GoHighLevel) automatically |
+| **Phase 2** *(M10)* | Replies classified by AI, meeting booking via Calendly, extra decision-makers captured, white-label branding, daily digest email |
 | **Search** | Type "pest control companies in New Jersey" — AI parses it, searches 4 sources simultaneously |
 | **Discover** | Finds businesses via Google Places, OpenStreetMap, and HERE Maps |
 | **Verify** | Checks whether each business actually has a live website |
@@ -146,15 +156,15 @@ Login: `admin` / `CHANGE_ME_BEFORE_DEPLOY` ← **change this immediately**
 | **Dashboard** | Overview — total leads, pipeline stage counts, recent leads, reply rates |
 | **Search** | Natural-language search with live progress, coverage density, website filter |
 | **Leads** | Full table with sort / filter / multi-select / CSV download / Verify Websites |
-| **Pipeline** | Enrich → Score → Generate; choose enrichment strategy per run |
-| **Outreach** | Review email + mockup before sending; approve/reject/regenerate |
+| **Pipeline** | Enrich → Score → Generate → AI Research (pain detection); choose enrichment strategy per run |
+| **Outreach** | Review email + mockup before sending; approve/reject/regenerate; reply-classification badges + filter, meeting-booked flag |
 | **Analytics** | Charts: leads per day, status breakdown, niche & city breakdown, score distribution |
 | **SEO** | Keyword research, SERP analysis, Google Trends |
 | **Competitors** | Tech stack, social profiles, backlinks, Wayback snapshots |
 | **People** | Decision-maker finder (free Apollo.io alternative) |
 | **Social** | Social media scout across Instagram, TikTok, YouTube |
 | **E-commerce** | Amazon/eBay product/niche research |
-| **Settings** | API keys, enrichment strategy, image provider, automation toggles |
+| **Settings** | API keys, enrichment strategy, image provider, automation toggles, CRM connections (M9), meeting booking / white-label / daily digest (M10) |
 
 ---
 
@@ -320,6 +330,86 @@ The strategy saved in Settings is the default for all automatic enrichment. You 
 
 ---
 
+## AI Research & Pain Detection (M7)
+
+Builds a structured research dossier per lead — reuses existing subsystems (`smart_scrape`,
+tech-stack detection, social scout, stored intent signals) plus one new step, review mining.
+
+### Running it
+
+- **Single lead:** Lead detail modal → **Research This Lead**
+- **Bulk:** Pipeline page → **AI Research (Pain Detection)** — queues every lead at or above
+  a score threshold that hasn't been researched yet
+
+### What it produces
+
+| Field | Source |
+|---|---|
+| Web findings | Homepage scrape (`smart_scrape`) + tech stack (`domain_intel`) |
+| Reviews summary | New: Serper search for "`<name>` reviews" → Gemini summarizes recurring themes |
+| Hiring/intent signals | Existing intent-signal table (Reddit/Craigslist/Freelancer) — no new API spend |
+| Social presence | Existing social scout, keyed on business name |
+| Pain points | Gemini synthesis of all of the above — each pain has evidence + a 1–5 severity, never invented without evidence |
+| Needs summary / recommended angle | Gemini synthesis, one sentence + one pitch angle |
+
+Research also captures additional decision-makers (M10, below) and triggers pain-aware
+scoring (M8, below) automatically once it completes.
+
+---
+
+## Pain-Aware Scoring v2 (M8)
+
+A second, additive score — `icp_score` (0–100, with a stored breakdown) — computed
+automatically the moment research finishes. The original `ai_score` (Gemini 1–10) is never
+touched; both are shown side by side in the lead detail modal.
+
+**Composition:** ICP fit (0–30) + pain severity (0–30) + intent signals (0–20) + business
+quality — rating/reviews (0–20).
+
+**Messaging v2:** email and follow-up generation (`generate_email_copy`,
+`generate_followup_copy`) now reference up to 2 specific researched pains, with the exact
+evidence quote, instead of the generic "you have no website" angle — automatically, whenever
+research exists for that lead. No research yet? Falls back to the original angle untouched.
+
+---
+
+## CRM Integration (M9)
+
+Push qualified leads — with their full research dossier — into an external CRM.
+
+**Configure:** Settings → **CRM Connections** → Add CRM Connection.
+
+| Type | What it does |
+|---|---|
+| **Pipedrive** | Creates organization → person → deal, plus a note with the research dossier (pains, needs summary, recommended angle, scores) |
+| **Generic webhook** | Signed JSON POST (HMAC-SHA256 in `X-Controva-Signature` if a secret is set) — works with Zapier, n8n, GoHighLevel, or any custom endpoint |
+
+**Pushing leads:** click **Push Qualified** next to a connection in Settings, or let it
+happen automatically — an ICP profile with `push_to_crm` enabled auto-pushes newly
+qualified leads (at or above its `min_lead_score`) after every autonomous run. Failed
+pushes retry automatically on the next scheduler pass (every 30 min).
+
+> HubSpot is not built yet — same architecture as Pipedrive, add a `hubspot_push()`
+> function alongside `pipedrive_push()` in `leads_api.py` when needed. The generic webhook
+> covers the same integration need in the meantime.
+
+---
+
+## Phase-2 Suite & White-Label (M10)
+
+| Capability | Configure | What happens |
+|---|---|---|
+| **Reply classification** | Nothing — automatic | When **Check for Replies** (IMAP) matches a reply, Gemini classifies it (interested / objection / not_interested / ooo / unsubscribe_intent) with a one-line digest. `unsubscribe_intent` auto-suppresses the address. Filter by classification on the Outreach page. |
+| **Meeting booking** | Settings → Meeting Booking → paste your Calendly URL | Follow-up messages include the scheduling link. Point Calendly's webhook at `https://your-domain/webhook/calendly` — it marks the lead `meeting_booked` automatically. |
+| **Multi-decision-maker capture** | Settings → toggle (`multi_decision_maker_capture`, on by default) | During research, up to 5 additional contacts from `find_people()` are stored per lead (title-aware). Outreach still targets your single best-verified contact — these are extra visibility, not a behavior change. |
+| **White-label** | Settings → White-Label → brand name / accent color / footer line | Applied to the dashboard sidebar and the outreach compliance footer. |
+| **Daily digest** | Settings → Daily Digest → toggle + recipient email | One email (~08:00 UTC) with new leads, qualified count, research highlights, and 24h API spend. |
+
+Not built: a webhook-events subscription feed on the public API (`controva_api.py`) — bigger
+scope than the rest of this milestone, tracked as a follow-up in `docs/CLIENT_MVP_PLAN.md`.
+
+---
+
 ## Deployment & CI/CD
 
 ### Auto-deploy (GitHub Actions)
@@ -454,7 +544,13 @@ controva-platform/
     ├── dashboard.html           ← Entire frontend (~135 KB)
     ├── docker-compose.yml       ← PostgreSQL + Redis + Crawl4AI
     ├── init.sql                 ← DB schema
-    ├── migrations/              ← DB migrations (applied on startup)
+    ├── migrations/              ← DB migrations (idempotent, auto-applied on startup)
+    │   ├── 006_icp.sql          ← M6: ICP profiles + autonomous discovery
+    │   ├── 007_research.sql     ← M7: AI research dossier
+    │   ├── 008_scoring.sql      ← M8: pain-aware scoring v2
+    │   ├── 009_crm.sql          ← M9: CRM connections + push log
+    │   └── 010_phase2.sql       ← M10: reply classification, meeting booking
+    ├── controva_api.py          ← Separate public REST API (port 8081, X-API-Key auth)
     ├── leadgen-api.service      ← Systemd unit
     └── setup.sh                 ← One-click installer
 ```
@@ -466,12 +562,15 @@ controva-platform/
 | Table | Purpose |
 |---|---|
 | `leads` | Every discovered business — name, city, niche, phone, address, website, has_website, website_verified, ai_score, status |
-| `contacts` | Owner per lead — full_name, email, linkedin_url, job_title |
+| `contacts` | Contacts per lead — full_name, email, linkedin_url, job_title, confidence (best-verified contact plus, since M10, additional decision-makers from `find_people()`) |
 | `assets` | Generated content — mockup images, email subject, email body |
-| `outreach_log` | Every email sent — recipient, timestamps, open/reply |
+| `outreach_log` | Every email sent — recipient, timestamps, open/reply, reply_classification, reply_digest *(M10)* |
 | `processed_cache` | SHA hashes of past searches — prevents duplicate processing |
 | `discovery_state` | Round counter per (niche, city) — tracks which round each search is on |
 | `workflow_runs` | Background job log |
+| `icp_profiles` / `icp_runs` *(M6)* | Saved Ideal Customer Profiles + autonomous discovery run history |
+| `lead_research` *(M7)* | AI research dossier per lead — web_findings, reviews_summary, tech_stack, hiring_signals, social_presence, pain_points (evidence + severity), needs_summary, recommended_angle, sources |
+| `crm_connections` / `crm_push_log` *(M9)* | Configured CRM targets (Pipedrive / webhook) + per-lead push history and retry status |
 
 ### Key columns on `leads`
 
@@ -481,7 +580,10 @@ controva-platform/
 | `website_verified` | boolean / null | `TRUE` = verified by HTTP ping, `NULL` = not yet checked |
 | `phone_norm` | varchar | Last 10 digits of phone for dedup |
 | `domain` | varchar | Stripped domain for dedup |
-| `ai_score` | integer | Gemini score 1–10 |
+| `ai_score` | integer | Gemini score 1–10 (legacy, still used everywhere it always was) |
+| `icp_score` / `score_breakdown` | smallint / jsonb *(M8)* | 0–100 pain-aware composite score + its breakdown; additive, never overwrites `ai_score` |
+| `icp_id` | int *(M6)* | Which saved ICP profile discovered this lead, if any |
+| `meeting_booked` / `meeting_booked_at` | boolean / timestamptz *(M10)* | Set by the Calendly webhook |
 | `status` | varchar | discovered → enriched → scored → ready → approved → sent → replied |
 
 ---
@@ -523,6 +625,23 @@ docker exec leadgen_postgres pg_dump -U leadgen leadgen_db > backup_$(date +%Y%m
 
 ---
 
+## User Roles
+
+Two roles exist. Every login returns its real role from `auth_users.role` (previously
+hardcoded to `admin` for anyone).
+
+| Role | Access |
+|---|---|
+| `admin` | Everything, including Settings (API keys, CRM connection tokens, automation config) |
+| `client` | Every operational page — Search, ICP, Leads, Pipeline, Research, Outreach, CRM push, Analytics — with Settings entirely inaccessible, gated server-side (not just hidden in the UI) |
+
+A `client` account is auto-seeded on first boot (username `client`) for handing to a
+client/prospect for testing — ask whoever ran the deploy for the password, it's generated
+once and never committed to this repo. Change it via `POST /auth/change-password`, or add
+more accounts directly in `auth_users` (no admin UI for user management yet).
+
+---
+
 ## Security Checklist
 
 Before going to production:
@@ -539,7 +658,25 @@ Before going to production:
 
 ## Changelog
 
-### v7.0 — June 2026 (current)
+### v8.0 — August 2026 (M7–M10, pending merge)
+
+Closes the gap between the client proposal and the shipped product — see
+`docs/CLIENT_MVP_PLAN.md` for the full milestone breakdown and what was scoped down.
+Everything below is additive; nothing existing was removed or changed in behavior.
+Not yet live-tested against production Postgres or real Pipedrive/Calendly accounts.
+
+**New features**
+- **AI Research & Pain Detection (M7)** — per-lead dossier: web presence, review mining, tech stack, hiring/intent signals, social presence, evidence-backed pain points with severity, needs summary, recommended pitch angle. `POST /lead/{id}/research`, `POST /research/queue`, Research panel in lead detail, AI Research queue on Pipeline page.
+- **Pain-Aware Scoring v2 (M8)** — `icp_score` (0–100, ICP fit + pain severity + intent + quality, full breakdown), computed automatically after research. Email and follow-up copy now reference up to 2 specific researched pains when available.
+- **CRM Integration (M9)** — Pipedrive (org→person→deal + research note) and generic signed webhook (Zapier/n8n/GoHighLevel). Settings → CRM Connections. Auto-push from ICP profiles, retry queue for failures.
+- **Phase-2 Suite (M10)** — AI reply classification (interested/objection/not_interested/ooo/unsubscribe_intent) wired into the existing IMAP reply checker, with auto-suppression on unsubscribe intent; Calendly meeting booking (CTA + webhook); multi-decision-maker capture via existing People Finder; white-label branding (name/color/footer); daily digest email.
+- **Role-based access** — real `admin`/`client` roles (every login previously got hardcoded `admin`). A `client` account is auto-seeded with full operational access and Settings entirely blocked, server-side — see [User Roles](#user-roles).
+
+**Bug fixes**
+- `controva_api.py`'s `/leads` and `/leads/:id` referenced columns and a table that don't exist (`l.rating`, `contacts.title`, `email_copies`) and were broken on every call. Fixed to match the real schema (`google_rating`, `job_title`, the `assets` table), and extended with research/`icp_score`/`meeting_booked`.
+- `.github/workflows/deploy.yml` and the VM's `deploy.yml`-equivalent were failing silently for 3 pushes — the three server secrets (`SERVER_HOST`/`SERVER_USER`/`SERVER_SSH_KEY`) were saved under a GitHub **Environment** named "VM" rather than as plain repository secrets, which a workflow job can only read if it declares `environment: VM`. Both workflows now do.
+
+### v7.0 — June 2026
 
 **New features**
 - **Website Verification** — HTTP ping + Serper search confirms which leads truly have no website. Shows `NO SITE` / `✓` / `?` badges. New "✓ No Website (verified)" filter shows only confirmed hot leads.
@@ -584,10 +721,10 @@ Before going to production:
 
 ---
 
-**Platform:** Controva Intelligence Platform v7.0  
+**Platform:** Controva Intelligence Platform v8.0  
 **Built for:** Controva LLC (Support@controvallc.com)  
 **License:** Proprietary — Controva LLC  
-**Last updated:** June 2026
+**Last updated:** August 2026
 
 
 TO run this platform on local : 

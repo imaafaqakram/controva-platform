@@ -400,8 +400,8 @@ class H(BaseHTTPRequestHandler):
 
             cur.execute(f"""
                 SELECT l.id, l.business_name, l.phone, l.website, l.address,
-                       l.city, l.niche, l.rating, l.review_count, l.has_website,
-                       l.ai_score, l.status, l.source, l.created_at,
+                       l.city, l.niche, l.google_rating AS rating, l.review_count, l.has_website,
+                       l.ai_score, l.icp_score, l.meeting_booked, l.status, l.source, l.created_at,
                        (SELECT c.email FROM contacts c
                         WHERE c.lead_id=l.id AND COALESCE(c.email,'')!='' LIMIT 1) AS email
                 FROM leads l
@@ -427,9 +427,9 @@ class H(BaseHTTPRequestHandler):
             c = db(); cur = c.cursor()
             cur.execute("""
                 SELECT l.id, l.business_name, l.phone, l.website, l.address,
-                       l.city, l.country, l.niche, l.rating, l.review_count,
-                       l.has_website, l.ai_score, l.score_reason, l.status,
-                       l.source, l.lat, l.lng, l.created_at
+                       l.city, l.country, l.niche, l.google_rating AS rating, l.review_count,
+                       l.has_website, l.ai_score, l.icp_score, l.score_breakdown, l.score_reason,
+                       l.meeting_booked, l.status, l.source, l.latitude, l.longitude, l.created_at
                 FROM leads l WHERE l.id=%s
             """, (lead_id,))
             row = cur.fetchone()
@@ -440,18 +440,32 @@ class H(BaseHTTPRequestHandler):
             lead = dict(zip(cols, row))
 
             cur.execute(
-                "SELECT email, phone, linkedin_url, title, source FROM contacts WHERE lead_id=%s",
+                "SELECT email, phone, linkedin_url, job_title AS title, source FROM contacts WHERE lead_id=%s",
                 (lead_id,))
             cols2 = [d[0] for d in cur.description]
             lead['contacts'] = [dict(zip(cols2, r)) for r in cur.fetchall()]
 
             cur.execute("""
-                SELECT subject, body_html, status FROM email_copies
-                WHERE lead_id=%s ORDER BY created_at DESC LIMIT 1
+                SELECT status, pain_points, needs_summary, recommended_angle, researched_at
+                FROM lead_research WHERE lead_id=%s
             """, (lead_id,))
-            er = cur.fetchone()
-            if er:
-                lead['email_copy'] = {'subject': er[0], 'body': er[1], 'status': er[2]}
+            rr = cur.fetchone()
+            if rr:
+                lead['research'] = {'status': rr[0], 'pain_points': rr[1] or [],
+                                    'needs_summary': rr[2] or '', 'recommended_angle': rr[3] or '',
+                                    'researched_at': rr[4].isoformat() if rr[4] else None}
+
+            cur.execute("""
+                SELECT content FROM assets WHERE lead_id=%s AND asset_type='email_subject' LIMIT 1
+            """, (lead_id,))
+            subj_row = cur.fetchone()
+            cur.execute("""
+                SELECT content FROM assets WHERE lead_id=%s AND asset_type='email_body' LIMIT 1
+            """, (lead_id,))
+            body_row = cur.fetchone()
+            if subj_row or body_row:
+                lead['email_copy'] = {'subject': subj_row[0] if subj_row else '',
+                                      'body': body_row[0] if body_row else ''}
 
             cur.close(); c.close()
             return self.ok({'data': lead})

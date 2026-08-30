@@ -4,7 +4,7 @@
 > without removing anything from the current system. Every existing capability stays;
 > each milestone adds a new subsystem on top.
 >
-> Created: 2026-08-27 · Status: M6 shipped, M7 next · Owner: Controva LLC
+> Created: 2026-08-27 · Status: M6-M10 shipped (PR #15, pending merge + live smoke test) · Owner: Controva LLC
 
 ---
 
@@ -32,10 +32,12 @@ cost tracking) is retained as the foundation these milestones build on.
 | # | Milestone | Client requirement it closes | Depends on |
 |---|-----------|------------------------------|------------|
 | M6 | ICP Engine + Autonomous Discovery ✅ **shipped** | "client defines ICP, system finds companies automatically" | existing discovery |
-| M7 | AI Research & Pain Detection | "researches the company, detects needs/pain points" | M6 |
-| M8 | Pain-Aware Scoring & Messaging | "scores the leads", "personalised message generation" | M7 |
-| M9 | CRM Integration | "sends best opportunities into a CRM" | M8 |
-| M10 | Phase-2 Suite + White-Label Polish | outreach / follow-ups / reply classification / booking (client's "later" list) | M8, M9 |
+| M7 | AI Research & Pain Detection ✅ **shipped** (PR #15) | "researches the company, detects needs/pain points" | M6 |
+| M8 | Pain-Aware Scoring & Messaging ✅ **shipped** (PR #15) | "scores the leads", "personalised message generation" | M7 |
+| M9 | CRM Integration ✅ **shipped** (PR #15, Pipedrive + generic webhook; HubSpot not built) | "sends best opportunities into a CRM" | M8 |
+| M10 | Phase-2 Suite + White-Label Polish ✅ **shipped** (PR #15) | outreach / follow-ups / reply classification / booking (client's "later" list) | M8, M9 |
+
+**Not yet done, tracked separately:** HubSpot as a second named CRM (webhook covers the same need generically today); `controva_api.py` webhook-events subscription feed (the plan's "webhook events" bullet — a pub/sub system is a bigger lift than the leads/research/scoring fields that shipped); live testing against a real Postgres instance and real Pipedrive/Calendly accounts (none were available in the session that built this — see PR #15's test plan).
 
 Each milestone ships: DB migration (idempotent, auto-applied at startup) → backend
 functions + endpoints → dashboard UI → local regression test → deploy + smoke test →
@@ -104,6 +106,9 @@ docs updated (README + API reference). No milestone removes or breaks existing f
 - 20 sample leads → ≥70% produce ≥1 pain point with evidence; research completes
   <90s/lead; old leads without research show "Not researched" cleanly.
 
+**Shipped as:** built per spec. Not yet run against real leads/live Postgres to confirm the
+≥70%-with-evidence acceptance number — needs a live smoke test after PR #15 merges.
+
 ---
 
 ## M8 — Pain-Aware Scoring & Messaging v2
@@ -125,6 +130,9 @@ docs updated (README + API reference). No milestone removes or breaks existing f
 ### Acceptance
 - Same lead, before/after: v2 email names a specific pain with evidence; scores
   differentiate (pain-heavy lead scores above equal-quality no-pain lead).
+
+**Shipped as:** built per spec, `icp_score` computed automatically right after `research_lead()`
+completes rather than as a separate manual step — one less click, same result.
 
 ---
 
@@ -157,6 +165,10 @@ docs updated (README + API reference). No milestone removes or breaks existing f
 - Push 10 qualified leads to a Pipedrive sandbox: org+person+deal+note created, re-push
   is a no-op, failure marks ✗ and retries next pass.
 
+**Shipped as:** Pipedrive + generic webhook built (client chose Pipedrive first over building
+all three CRMs at once). HubSpot not built — same architecture, add a `hubspot_push()`
+function alongside `pipedrive_push()` when needed. Untested against a real Pipedrive sandbox.
+
 ---
 
 ## M10 — Phase-2 Suite + White-Label Polish
@@ -181,6 +193,13 @@ docs updated (README + API reference). No milestone removes or breaks existing f
 ### Acceptance
 - End-to-end demo: ICP finds company → research finds pain → message references pain →
   reply classified "interested" → Calendly booked → CRM updated. Branded dashboard.
+
+**Shipped as:** items 1-5 built per spec (client provided no Calendly link yet — the CTA and
+webhook handler are live, waiting on the real URL in Settings → Meeting Booking). Item 6
+("Public API completion") scoped down: `controva_api.py`'s `/leads` and `/leads/:id` were
+found broken (referenced columns/tables that don't exist) and were fixed, then extended with
+research/icp_score/meeting_booked. A full webhook-events subscription feed was not built —
+bigger scope than the rest of this milestone; flagged as a follow-up, not started.
 
 ---
 
