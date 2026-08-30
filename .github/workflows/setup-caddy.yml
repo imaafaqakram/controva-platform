@@ -17,7 +17,7 @@ jobs:
           echo "### does app.controvallc.com resolve? ###"
           getent hosts app.controvallc.com || { echo "NOT RESOLVING YET — stopping, re-run once DNS propagates"; exit 1; }
 
-      - name: Install + configure Caddy on the VM (port 8443 — 443 is owned by Xray, not touching it)
+      - name: Stop Xray, move Caddy to :443 (explicit user request — reversible with `systemctl enable --now xray`)
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SERVER_HOST }}
@@ -26,8 +26,12 @@ jobs:
           command_timeout: 5m
           script: |
             set -e
-            echo "### what currently owns 80/443/8443? ###"
-            sudo ss -tlnp | grep -E ':80 |:443 |:8443 ' || echo "(none of 80/443/8443 currently bound)"
+            echo "### stopping + disabling xray (config untouched — restore with: sudo systemctl enable --now xray) ###"
+            sudo systemctl stop xray
+            sudo systemctl disable xray
+            sleep 2
+            echo "### confirming 443 is now free ###"
+            sudo ss -tlnp | grep ':443 ' || echo "443 is free"
 
             echo "### installing caddy (idempotent) ###"
             if ! command -v caddy >/dev/null 2>&1; then
@@ -41,12 +45,9 @@ jobs:
               echo "caddy already installed: $(caddy version)"
             fi
 
-            echo "### writing Caddyfile (serves on :8443, never touches :443) ###"
+            echo "### writing Caddyfile (plain :443 now that it's free) ###"
             sudo tee /etc/caddy/Caddyfile > /dev/null <<'CADDYEOF'
-            {
-                https_port 8443
-            }
-            app.controvallc.com:8443 {
+            app.controvallc.com {
                 reverse_proxy localhost:8080
             }
             CADDYEOF
@@ -60,24 +61,21 @@ jobs:
             sleep 5
             sudo systemctl status caddy --no-pager
 
-            echo "### local HTTPS check on 8443 ###"
-            curl -sk -o /dev/null -w "Local :8443 -> HTTP %{http_code}\n" https://localhost:8443/health -H "Host: app.controvallc.com" || true
-
-            echo "### is port 80 actually listening locally? ###"
-            sudo ss -tlnp | grep ':80 ' || echo "(nothing listening on :80 locally either)"
+            echo "### local HTTPS check on 443 ###"
+            curl -sk -o /dev/null -w "Local :443 -> HTTP %{http_code}\n" https://localhost/health -H "Host: app.controvallc.com" || true
 
       - name: External reachability check (this runner, real internet — waits for cert issuance)
         run: |
-          echo "### port 80 reachable from the internet? ###"
-          curl -s -o /dev/null -w "http://app.controvallc.com:80 -> HTTP %{http_code}\n" --max-time 10 http://app.controvallc.com/ || echo "port 80 UNREACHABLE from the internet"
-          echo
-          echo "### waiting up to 60s for caddy to obtain the cert and start serving on 8443 ###"
+          echo "### waiting up to 60s for caddy to obtain the cert and start serving on 443 ###"
           for i in 1 2 3 4 5 6; do
-            CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 https://app.controvallc.com:8443/health || echo "000")
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 https://app.controvallc.com/health || echo "000")
             echo "attempt $i: HTTP $CODE"
             if [ "$CODE" = "200" ]; then echo "SUCCESS"; break; fi
             sleep 10
           done
           echo
           echo "### final response body ###"
-          curl -s --max-time 10 https://app.controvallc.com:8443/health || echo "still unreachable"
+          curl -s --max-time 10 https://app.controvallc.com/health || echo "still unreachable"
+          echo
+          echo "### full certificate chain check ###"
+          curl -vI --max-time 10 https://app.controvallc.com/ 2>&1 | grep -E "subject:|issuer:|SSL certificate verify" || true
