@@ -97,3 +97,11 @@ jobs:
             echo -n "$sub.controvallc.com -> "
             dig +short "$sub.controvallc.com" || echo "(none)"
           done
+          echo
+          echo "### fresh cert re-check right now (user reports 'not secure') ###"
+          echo "--- full cert chain, all certs in the chain ---"
+          echo | openssl s_client -connect app.controvallc.com:443 -servername app.controvallc.com -showcerts 2>&1 | grep -E "subject=|issuer=|Verify return code|BEGIN CERTIFICATE" | head -20
+          echo "--- curl verbose (matches what a real browser TLS negotiation sees) ---"
+          curl -vI --max-time 10 https://app.controvallc.com/ 2>&1 | grep -iE "subject:|issuer:|SSL certificate|TLSv|expire|start date" || true
+          echo "--- HTTP->HTTPS redirect working? ---"
+          curl -s -o /dev/null -w "http://app.controvallc.com -> HTTP %{http_code}, redirect to: %{redirect_url}\n" http://app.controvallc.com/ || true
