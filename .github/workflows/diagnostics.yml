@@ -1,4 +1,5 @@
 name: VM Diagnostics
+# retry: re-check after secrets update
 
 on:
   push:
