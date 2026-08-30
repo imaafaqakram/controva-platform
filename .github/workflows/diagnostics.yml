@@ -11,6 +11,7 @@ on:
 jobs:
   diagnostics:
     runs-on: ubuntu-latest
+    environment: VM
     steps:
       - name: Check VM services
         uses: appleboy/ssh-action@v1.0.3
