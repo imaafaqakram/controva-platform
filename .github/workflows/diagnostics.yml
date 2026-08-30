@@ -35,10 +35,16 @@ jobs:
             echo "### recent leadgen-api logs ###"
             journalctl -u leadgen-api -n 50 --no-pager || true
             echo
-            echo "### did this deploy's schema migrations + auth seeding succeed? ###"
-            journalctl -u leadgen-api -n 300 --no-pager | grep -E "Schema migration|Auth:|WARNING: auth|Client role account|migration warning" || echo "(no migration log lines found in last 300)"
+            echo "### when did leadgen-api actually last (re)start? ###"
+            systemctl show leadgen-api --property=ActiveEnterTimestamp --no-pager
+            echo "### full startup log since last restart ###"
+            journalctl -u leadgen-api --since "30 minutes ago" --no-pager | grep -E "Schema migration|Auth:|WARNING: auth|Client role account|migration warning|Multi-Module|Listening on" || echo "(no migration/startup log lines found in the last 30 minutes)"
             echo "--- does the client role account actually exist in the DB? ---"
             docker exec leadgen_postgres psql -U leadgen -d leadgen_db -t -c "SELECT username, role FROM auth_users;" 2>&1 || echo "(could not query auth_users)"
+            echo "--- does the lead_research table exist (M7 migration)? ---"
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -t -c "\dt lead_research" 2>&1 || echo "(could not query)"
+            echo "--- is leads_api.py on disk actually the new version? (grep for an M7-only string) ---"
+            grep -c "AI RESEARCH & PAIN DETECTION" /opt/leadgen/leads_api.py 2>&1 || echo "0 (old version still on disk!)"
             echo
             echo "### disk / memory ###"
             df -h /
