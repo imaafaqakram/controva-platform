@@ -60,3 +60,10 @@ jobs:
             getent hosts app.controvallc.com || echo "app.controvallc.com does not resolve"
             echo "--- end-to-end HTTPS test from the VM itself ---"
             curl -sk -o /dev/null -w "https://app.controvallc.com -> HTTP %{http_code}\n" --max-time 8 https://app.controvallc.com/health || echo "https://app.controvallc.com unreachable"
+            echo
+            echo "### caddy status + recent journal (did the cert actually get issued?) ###"
+            sudo systemctl status caddy --no-pager || true
+            echo "--- last 40 caddy log lines ---"
+            sudo journalctl -u caddy -n 40 --no-pager || true
+            echo "--- local :8443 check (now, not right after restart) ---"
+            curl -sk -o /dev/null -w "Local :8443 -> HTTP %{http_code}\n" https://localhost:8443/health -H "Host: app.controvallc.com" || true
