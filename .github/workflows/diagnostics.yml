@@ -35,6 +35,30 @@ jobs:
             echo "### recent leadgen-api logs ###"
             journalctl -u leadgen-api -n 50 --no-pager || true
             echo
+            echo "### when did leadgen-api actually last (re)start? ###"
+            systemctl show leadgen-api --property=ActiveEnterTimestamp --no-pager
+            echo "### full startup log since last restart ###"
+            journalctl -u leadgen-api --since "30 minutes ago" --no-pager | grep -E "Schema migration|Auth:|WARNING: auth|Client role account|migration warning|Multi-Module|Listening on" || echo "(no migration/startup log lines found in the last 30 minutes)"
+            echo "--- does the client role account actually exist in the DB? ---"
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -t -c "SELECT username, role FROM auth_users;" 2>&1 || echo "(could not query auth_users)"
+            echo "--- does the lead_research table exist (M7 migration)? ---"
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -t -c "\dt lead_research" 2>&1 || echo "(could not query)"
+            echo "--- is leads_api.py on disk actually the new version? (grep for an M7-only string) ---"
+            grep -c "AI RESEARCH & PAIN DETECTION" /opt/leadgen/leads_api.py 2>&1 || echo "0 (old version still on disk!)"
+            echo
+            echo "### if the process is stale relative to the file on disk, force a real restart ###"
+            sudo systemctl restart leadgen-api
+            sleep 5
+            echo "Restart result: $(systemctl is-active leadgen-api)"
+            systemctl show leadgen-api --property=ActiveEnterTimestamp --no-pager
+            echo "--- health check post-restart ---"
+            curl -s http://localhost:8080/health || true
+            echo
+            echo "--- client account now seeded? ---"
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -t -c "SELECT username, role FROM auth_users;" 2>&1 || true
+            echo "--- fresh startup log ---"
+            journalctl -u leadgen-api --since "1 minute ago" --no-pager | grep -E "Schema migration|Auth:|Client role account|WARNING" || echo "(nothing yet)"
+            echo
             echo "### disk / memory ###"
             df -h /
             free -h
@@ -65,43 +89,21 @@ jobs:
             sudo systemctl status caddy --no-pager || true
             echo "--- last 40 caddy log lines ---"
             sudo journalctl -u caddy -n 40 --no-pager || true
-            echo "--- local :8443 check (now, not right after restart) ---"
-            curl -sk -o /dev/null -w "Local :8443 -> HTTP %{http_code}\n" https://localhost:8443/health -H "Host: app.controvallc.com" || true
 
-      - name: DNS deep-dive from the internet (this runner, not the VM)
+      - name: DNS + cert deep-dive from the internet (this runner, not the VM)
         run: |
           echo "### nameservers for controvallc.com ###"
           dig +short NS controvallc.com || nslookup -type=NS controvallc.com
           echo
           echo "### A/CNAME chain for app.controvallc.com ###"
-          dig app.controvallc.com ANY +noall +answer || true
           dig +short A app.controvallc.com || true
           dig +short CNAME app.controvallc.com || true
           echo
-          echo "### raw curl -v to https://app.controvallc.com (bare, port 443) ###"
-          curl -vk --max-time 10 https://app.controvallc.com/health 2>&1 | head -40 || true
-          echo
-          echo "### does it match what SERVER_HOST resolves to? ###"
-          getent hosts app.controvallc.com || true
-          echo
-          echo "### what else is configured on controvallc.com's DNS? (checking before any migration) ###"
-          echo "--- apex A/AAAA ---"
-          dig +short A controvallc.com || true
-          dig +short AAAA controvallc.com || true
-          echo "--- MX (email) ---"
-          dig +short MX controvallc.com || true
-          echo "--- TXT (SPF/DKIM/verification records) ---"
-          dig +short TXT controvallc.com || true
-          echo "--- common subdomains ---"
-          for sub in www mail api n8n vpn ftp cdn; do
-            echo -n "$sub.controvallc.com -> "
-            dig +short "$sub.controvallc.com" || echo "(none)"
-          done
-          echo
-          echo "### fresh cert re-check right now (user reports 'not secure') ###"
-          echo "--- full cert chain, all certs in the chain ---"
-          echo | openssl s_client -connect app.controvallc.com:443 -servername app.controvallc.com -showcerts 2>&1 | grep -E "subject=|issuer=|Verify return code|BEGIN CERTIFICATE" | head -20
-          echo "--- curl verbose (matches what a real browser TLS negotiation sees) ---"
-          curl -vI --max-time 10 https://app.controvallc.com/ 2>&1 | grep -iE "subject:|issuer:|SSL certificate|TLSv|expire|start date" || true
+          echo "### fresh cert chain check ###"
+          timeout 15 bash -c "echo | openssl s_client -connect app.controvallc.com:443 -servername app.controvallc.com -showcerts 2>&1" | grep -E "subject=|issuer=|Verify return code" | head -10 || echo "(openssl check timed out or failed)"
+          curl -vI --max-time 10 https://app.controvallc.com/ 2>&1 | grep -iE "subject:|issuer:|SSL certificate" || true
           echo "--- HTTP->HTTPS redirect working? ---"
           curl -s -o /dev/null -w "http://app.controvallc.com -> HTTP %{http_code}, redirect to: %{redirect_url}\n" http://app.controvallc.com/ || true
+          echo
+          echo "### final health check ###"
+          curl -s --max-time 10 https://app.controvallc.com/health || echo "unreachable"
