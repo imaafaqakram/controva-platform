@@ -63,9 +63,21 @@ jobs:
             echo "### local HTTPS check on 8443 ###"
             curl -sk -o /dev/null -w "Local :8443 -> HTTP %{http_code}\n" https://localhost:8443/health -H "Host: app.controvallc.com" || true
 
-      - name: External HTTPS check (this runner, real internet)
+            echo "### is port 80 actually listening locally? ###"
+            sudo ss -tlnp | grep ':80 ' || echo "(nothing listening on :80 locally either)"
+
+      - name: External reachability check (this runner, real internet — waits for cert issuance)
         run: |
-          sleep 5
-          echo "### does the outside world see it on :8443? ###"
-          curl -s -o /dev/null -w "https://app.controvallc.com:8443/health -> HTTP %{http_code}\n" --max-time 15 https://app.controvallc.com:8443/health || echo "UNREACHABLE — almost certainly the AWS security group doesn't have 8443 open yet"
-          curl -s --max-time 15 https://app.controvallc.com:8443/health || true
+          echo "### port 80 reachable from the internet? ###"
+          curl -s -o /dev/null -w "http://app.controvallc.com:80 -> HTTP %{http_code}\n" --max-time 10 http://app.controvallc.com/ || echo "port 80 UNREACHABLE from the internet"
+          echo
+          echo "### waiting up to 60s for caddy to obtain the cert and start serving on 8443 ###"
+          for i in 1 2 3 4 5 6; do
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 https://app.controvallc.com:8443/health || echo "000")
+            echo "attempt $i: HTTP $CODE"
+            if [ "$CODE" = "200" ]; then echo "SUCCESS"; break; fi
+            sleep 10
+          done
+          echo
+          echo "### final response body ###"
+          curl -s --max-time 10 https://app.controvallc.com:8443/health || echo "still unreachable"
