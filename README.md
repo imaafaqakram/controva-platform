@@ -40,8 +40,9 @@ real Pipedrive/Calendly accounts.
 14. [Architecture](#architecture)
 15. [Database Schema](#database-schema)
 16. [Troubleshooting](#troubleshooting)
-17. [Security Checklist](#security-checklist)
-18. [Changelog](#changelog)
+17. [User Roles](#user-roles)
+18. [Security Checklist](#security-checklist)
+19. [Changelog](#changelog)
 
 ---
 
@@ -624,6 +625,23 @@ docker exec leadgen_postgres pg_dump -U leadgen leadgen_db > backup_$(date +%Y%m
 
 ---
 
+## User Roles
+
+Two roles exist. Every login returns its real role from `auth_users.role` (previously
+hardcoded to `admin` for anyone).
+
+| Role | Access |
+|---|---|
+| `admin` | Everything, including Settings (API keys, CRM connection tokens, automation config) |
+| `client` | Every operational page — Search, ICP, Leads, Pipeline, Research, Outreach, CRM push, Analytics — with Settings entirely inaccessible, gated server-side (not just hidden in the UI) |
+
+A `client` account is auto-seeded on first boot (username `client`) for handing to a
+client/prospect for testing — ask whoever ran the deploy for the password, it's generated
+once and never committed to this repo. Change it via `POST /auth/change-password`, or add
+more accounts directly in `auth_users` (no admin UI for user management yet).
+
+---
+
 ## Security Checklist
 
 Before going to production:
@@ -652,6 +670,7 @@ Not yet live-tested against production Postgres or real Pipedrive/Calendly accou
 - **Pain-Aware Scoring v2 (M8)** — `icp_score` (0–100, ICP fit + pain severity + intent + quality, full breakdown), computed automatically after research. Email and follow-up copy now reference up to 2 specific researched pains when available.
 - **CRM Integration (M9)** — Pipedrive (org→person→deal + research note) and generic signed webhook (Zapier/n8n/GoHighLevel). Settings → CRM Connections. Auto-push from ICP profiles, retry queue for failures.
 - **Phase-2 Suite (M10)** — AI reply classification (interested/objection/not_interested/ooo/unsubscribe_intent) wired into the existing IMAP reply checker, with auto-suppression on unsubscribe intent; Calendly meeting booking (CTA + webhook); multi-decision-maker capture via existing People Finder; white-label branding (name/color/footer); daily digest email.
+- **Role-based access** — real `admin`/`client` roles (every login previously got hardcoded `admin`). A `client` account is auto-seeded with full operational access and Settings entirely blocked, server-side — see [User Roles](#user-roles).
 
 **Bug fixes**
 - `controva_api.py`'s `/leads` and `/leads/:id` referenced columns and a table that don't exist (`l.rating`, `contacts.title`, `email_copies`) and were broken on every call. Fixed to match the real schema (`google_rating`, `job_title`, the `assets` table), and extended with research/`icp_score`/`meeting_booked`.
