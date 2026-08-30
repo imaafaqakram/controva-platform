@@ -4667,7 +4667,8 @@ const LoginScreen = ({ onLogin }) => {
       const r = await api.post('/auth/login', { username, password });
       if ((r.success || r.status === 'ok') && r.token) {
         localStorage.setItem('auth_token', r.token);
-        onLogin(r.token);
+        try { localStorage.setItem('auth_role', r.user?.role || 'admin'); } catch (e) {}
+        onLogin(r.token, r.user?.role || 'admin');
       } else {
         setError(r.error || 'Invalid credentials');
       }
@@ -4707,11 +4708,12 @@ const LoginScreen = ({ onLogin }) => {
 // ─────────────────────────────────────────────────
 //  Main App
 // ─────────────────────────────────────────────────
-const App = () => {
+const App = ({ role = 'admin' }) => {
   const [theme, toggleTheme] = useTheme();
   const [page, setPage] = useState('dashboard');
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [brand, setBrand] = useState({ name: 'Controva', color: '' });
+  const isAdmin = role === 'admin';
 
   useEffect(() => {
     api.get('/config').then(c => {
@@ -4737,8 +4739,8 @@ const App = () => {
     { id: 'social',      label: 'Social',      icon: 'Share2' },
     { id: 'ecommerce',   label: 'E-commerce',  icon: 'ShoppingBag' },
     { id: 'divider2' },
-    { id: 'settings',  label: 'Settings',  icon: 'Settings' },
-  ];
+    { id: 'settings',  label: 'Settings',  icon: 'Settings', adminOnly: true },
+  ].filter(item => isAdmin || !item.adminOnly);
 
   let CurrentPage = DashboardPage;
   if (page === 'icp') CurrentPage = ICPPage;
@@ -4753,7 +4755,7 @@ const App = () => {
   else if (page === 'outreach') CurrentPage = OutreachPage;
   else if (page === 'analytics') CurrentPage = AnalyticsPage;
   else if (page === 'intent') CurrentPage = IntentPage;
-  else if (page === 'settings') CurrentPage = SettingsPage;
+  else if (page === 'settings' && isAdmin) CurrentPage = SettingsPage;
 
   return (
     <div className="min-h-screen flex">
@@ -4817,18 +4819,29 @@ const AuthWrapper = () => {
   const [authToken, setAuthToken] = useState(() => {
     try { return localStorage.getItem('auth_token'); } catch (e) { return null; }
   });
+  const [role, setRole] = useState(() => {
+    try { return localStorage.getItem('auth_role') || 'admin'; } catch (e) { return 'admin'; }
+  });
   const [checking, setChecking] = useState(true);
 
   useEffect(() => {
     if (!authToken) { setChecking(false); return; }
     api.post('/auth/check', { token: authToken })
-      .then(r => { if (!r.authenticated) { setAuthToken(null); try { localStorage.removeItem('auth_token'); } catch (e) {} } })
+      .then(r => {
+        if (!r.authenticated) {
+          setAuthToken(null);
+          try { localStorage.removeItem('auth_token'); localStorage.removeItem('auth_role'); } catch (e) {}
+        } else if (r.role) {
+          setRole(r.role);
+          try { localStorage.setItem('auth_role', r.role); } catch (e) {}
+        }
+      })
       .finally(() => setChecking(false));
   }, []);
 
   if (checking) return <div className="min-h-screen flex items-center justify-center"><Spinner size="w-8 h-8" /></div>;
-  if (!authToken) return <LoginScreen onLogin={(t) => setAuthToken(t)} />;
-  return <App />;
+  if (!authToken) return <LoginScreen onLogin={(t, r) => { setAuthToken(t); setRole(r || 'admin'); }} />;
+  return <App role={role} />;
 };
 
 // Mount

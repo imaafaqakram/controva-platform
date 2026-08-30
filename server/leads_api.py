@@ -5426,8 +5426,10 @@ def ensure_auth_tables():
             username   VARCHAR(100) PRIMARY KEY,
             salt       VARCHAR(64) NOT NULL,
             pwhash     VARCHAR(128) NOT NULL,
+            role       VARCHAR(20) NOT NULL DEFAULT 'admin',
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )""")
+    cur.execute("ALTER TABLE auth_users ADD COLUMN IF NOT EXISTS role VARCHAR(20) NOT NULL DEFAULT 'admin'")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS auth_sessions (
             token      VARCHAR(128) PRIMARY KEY,
@@ -5465,7 +5467,30 @@ def ensure_auth_tables():
             print('=' * 64)
         else:
             print('Admin user seeded from ADMIN_PASSWORD / config.json')
+    # Seed a restricted 'client' role account for handing to a client/test
+    # user — everything except Settings (API keys, CRM connection secrets,
+    # automation toggles). Fixed credentials so they're known outside the
+    # server log; rotate via /auth/change-password once the client has it.
+    cur.execute("SELECT COUNT(*) FROM auth_users WHERE username = 'client'")
+    if cur.fetchone()[0] == 0:
+        client_salt = '04d689de7dbccc5a283383c39dab94c4'
+        client_pwhash = 'f845da1eb057654174c2aa37562b60f44738ed7f6ba18bc7d4d5f40eec82c40c'
+        cur.execute("INSERT INTO auth_users (username, salt, pwhash, role) VALUES (%s, %s, %s, 'client')",
+                    ('client', client_salt, client_pwhash))
+        print('Client role account seeded: username=client — password was generated once and '
+              'given directly to the operator; rotate it via POST /auth/change-password if lost')
     conn.commit(); cur.close(); conn.close()
+
+def get_user_role(username):
+    if username == 'service':
+        return 'service'
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("SELECT role FROM auth_users WHERE username = %s", (username,))
+        row = cur.fetchone(); cur.close(); conn.close()
+        return row[0] if row else 'admin'
+    except Exception:
+        return 'admin'
 
 def auth_hash(password, salt):
     return _h_hashlib.sha256((password + salt).encode()).hexdigest()
@@ -7307,6 +7332,29 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(401, {'error': 'Unauthorized — log in first'})
         return False
 
+    def current_username(self):
+        """Re-extracts the bearer token and resolves it to a username —
+        same token-parsing logic as check_auth(), which discards the username
+        in favor of the fixed single-tenant IDs. Returns None if no valid
+        session (callers should have already gone through require_auth())."""
+        auth_header = self.headers.get('Authorization')
+        token = ''
+        if auth_header and auth_header.startswith('Bearer '):
+            token = auth_header.split(' ', 1)[1].strip()
+        if not token:
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            token = (qs.get('token') or [''])[0]
+        return auth_check(token)
+
+    def require_admin(self):
+        """Blocks the 'client' role from Settings-only surfaces (API keys, CRM
+        connection secrets, automation config). Call after require_auth()."""
+        role = get_user_role(self.current_username() or '')
+        if role in ('admin', 'service'):
+            return True
+        self.send_json(403, {'error': 'This account does not have Settings access'})
+        return False
+
     def send_json(self, code, data):
         body = json.dumps(data, ensure_ascii=False).encode('utf-8')
         self.send_response(code)
@@ -7450,6 +7498,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(500, {'error': str(e)})
 
         elif p == '/api-keys':
+            if not self.require_admin(): return
             try:
                 self.send_json(200, get_api_keys_masked())
             except Exception as e:
@@ -7482,6 +7531,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(500, {'error': str(e)})
 
         elif p == '/crm/connections':
+            if not self.require_admin(): return
             try:
                 conn = db_conn(); cur = conn.cursor()
                 cur.execute("""SELECT id, type, name, config, is_active, created_at,
@@ -7775,7 +7825,7 @@ class Handler(BaseHTTPRequestHandler):
                 tok = auth_login(username, password, ip)
                 if tok:
                     self.send_json(200, {'success': True, 'status': 'ok', 'token': tok,
-                                         'user': {'email': username, 'role': 'admin'}})
+                                         'user': {'email': username, 'role': get_user_role(username)}})
                 else:
                     left = AUTH_MAX_FAILURES - len(_login_failures.get(auth_lock_key(username, ip), []))
                     self.send_json(401, {'success': False,
@@ -7814,7 +7864,8 @@ class Handler(BaseHTTPRequestHandler):
                 token = body.get('token', '')
                 user = auth_check(token)
                 self.send_json(200, {'authenticated': bool(user), 'valid': bool(user),
-                                     'user': user if user else None})
+                                     'user': user if user else None,
+                                     'role': get_user_role(user) if user else None})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
             return
@@ -7992,6 +8043,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(500, {'error': str(e)})
 
         elif p == '/crm/connections/save':
+            if not self.require_admin(): return
             try:
                 cid = body.get('id')
                 ctype = body.get('type', '')
@@ -8022,6 +8074,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(500, {'error': str(e)})
 
         elif p.startswith('/crm/connections/') and p.endswith('/delete'):
+            if not self.require_admin(): return
             try:
                 cid = p.split('/')[3]
                 conn = db_conn(); cur = conn.cursor()
@@ -8032,6 +8085,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(500, {'error': str(e)})
 
         elif p == '/crm/push':
+            if not self.require_admin(): return
             try:
                 connection_id = body.get('connection_id')
                 if not connection_id:
@@ -8286,6 +8340,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(500, {'error': str(e)})
 
         elif p == '/config':
+            if not self.require_admin(): return
             try:
                 for k, v in body.items():
                     if k in CONFIG: CONFIG[k] = v
@@ -8296,6 +8351,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
         elif p == '/api-keys/update':
+            if not self.require_admin(): return
             try:
                 key_name = body.get('key', '')
                 key_value = body.get('value', '')
