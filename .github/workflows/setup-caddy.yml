@@ -17,7 +17,7 @@ jobs:
           echo "### does app.controvallc.com resolve? ###"
           getent hosts app.controvallc.com || { echo "NOT RESOLVING YET — stopping, re-run once DNS propagates"; exit 1; }
 
-      - name: Install + configure Caddy on the VM
+      - name: Install + configure Caddy on the VM (port 8443 — 443 is owned by Xray, not touching it)
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SERVER_HOST }}
@@ -26,6 +26,9 @@ jobs:
           command_timeout: 5m
           script: |
             set -e
+            echo "### what currently owns 80/443/8443? ###"
+            sudo ss -tlnp | grep -E ':80 |:443 |:8443 ' || echo "(none of 80/443/8443 currently bound)"
+
             echo "### installing caddy (idempotent) ###"
             if ! command -v caddy >/dev/null 2>&1; then
               sudo apt-get update -qq
@@ -38,9 +41,12 @@ jobs:
               echo "caddy already installed: $(caddy version)"
             fi
 
-            echo "### writing Caddyfile ###"
+            echo "### writing Caddyfile (serves on :8443, never touches :443) ###"
             sudo tee /etc/caddy/Caddyfile > /dev/null <<'CADDYEOF'
-            app.controvallc.com {
+            {
+                https_port 8443
+            }
+            app.controvallc.com:8443 {
                 reverse_proxy localhost:8080
             }
             CADDYEOF
@@ -54,12 +60,12 @@ jobs:
             sleep 5
             sudo systemctl status caddy --no-pager
 
-            echo "### local HTTPS check ###"
-            curl -sk -o /dev/null -w "Local: HTTP %{http_code}\n" https://localhost/health -H "Host: app.controvallc.com" || true
+            echo "### local HTTPS check on 8443 ###"
+            curl -sk -o /dev/null -w "Local :8443 -> HTTP %{http_code}\n" https://localhost:8443/health -H "Host: app.controvallc.com" || true
 
       - name: External HTTPS check (this runner, real internet)
         run: |
           sleep 5
-          echo "### does the outside world see it over HTTPS? ###"
-          curl -s -o /dev/null -w "https://app.controvallc.com/health -> HTTP %{http_code}\n" --max-time 15 https://app.controvallc.com/health
-          curl -s --max-time 15 https://app.controvallc.com/health
+          echo "### does the outside world see it on :8443? ###"
+          curl -s -o /dev/null -w "https://app.controvallc.com:8443/health -> HTTP %{http_code}\n" --max-time 15 https://app.controvallc.com:8443/health || echo "UNREACHABLE — almost certainly the AWS security group doesn't have 8443 open yet"
+          curl -s --max-time 15 https://app.controvallc.com:8443/health || true
