@@ -67,3 +67,19 @@ jobs:
             sudo journalctl -u caddy -n 40 --no-pager || true
             echo "--- local :8443 check (now, not right after restart) ---"
             curl -sk -o /dev/null -w "Local :8443 -> HTTP %{http_code}\n" https://localhost:8443/health -H "Host: app.controvallc.com" || true
+
+      - name: DNS deep-dive from the internet (this runner, not the VM)
+        run: |
+          echo "### nameservers for controvallc.com ###"
+          dig +short NS controvallc.com || nslookup -type=NS controvallc.com
+          echo
+          echo "### A/CNAME chain for app.controvallc.com ###"
+          dig app.controvallc.com ANY +noall +answer || true
+          dig +short A app.controvallc.com || true
+          dig +short CNAME app.controvallc.com || true
+          echo
+          echo "### raw curl -v to https://app.controvallc.com (bare, port 443) ###"
+          curl -vk --max-time 10 https://app.controvallc.com/health 2>&1 | head -40 || true
+          echo
+          echo "### does it match what SERVER_HOST resolves to? ###"
+          getent hosts app.controvallc.com || true
