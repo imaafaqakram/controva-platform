@@ -41,3 +41,22 @@ jobs:
             echo
             echo "### health endpoint ###"
             curl -s http://localhost:8080/health || true
+            echo
+            echo "### reverse proxy (caddy/nginx) ###"
+            systemctl is-active caddy 2>/dev/null && echo "caddy: active" || echo "caddy: not active/not installed"
+            systemctl is-active nginx 2>/dev/null && echo "nginx: active" || echo "nginx: not active/not installed"
+            echo "--- Caddyfile ---"
+            cat /etc/caddy/Caddyfile 2>/dev/null || echo "(no /etc/caddy/Caddyfile)"
+            echo "--- nginx sites-enabled ---"
+            ls /etc/nginx/sites-enabled/ 2>/dev/null && cat /etc/nginx/sites-enabled/* 2>/dev/null || echo "(no nginx sites-enabled)"
+            echo
+            echo "### firewall — is 8080 exposed publicly? ###"
+            sudo ufw status 2>/dev/null || echo "(ufw not active/installed)"
+            echo
+            echo "### public IP + domain check ###"
+            PUBIP=$(curl -s ifconfig.me || echo unknown)
+            echo "Public IP: $PUBIP"
+            echo "--- does app.controvallc.com resolve, and to what? ---"
+            getent hosts app.controvallc.com || echo "app.controvallc.com does not resolve"
+            echo "--- end-to-end HTTPS test from the VM itself ---"
+            curl -sk -o /dev/null -w "https://app.controvallc.com -> HTTP %{http_code}\n" --max-time 8 https://app.controvallc.com/health || echo "https://app.controvallc.com unreachable"
