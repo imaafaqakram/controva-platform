@@ -1,5 +1,5 @@
 name: VM Diagnostics
-# retry: re-check after secrets update
+# retry: root-cause deploy.yml's restart reliability gap (sudo hypothesis)
 
 on:
   push:
@@ -20,6 +20,23 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
+            echo "### ROOT CAUSE TEST: does deploy.yml's plain (non-sudo) systemctl restart actually work over SSH? ###"
+            echo "--- ActiveEnterTimestamp BEFORE test ---"
+            systemctl show leadgen-api --property=ActiveEnterTimestamp --no-pager
+            echo "--- whoami / groups / passwordless sudo? ---"
+            whoami
+            groups
+            sudo -n true 2>&1 && echo "passwordless sudo: YES" || echo "passwordless sudo: NO / needs password"
+            echo "--- running: systemctl restart leadgen-api (NO sudo — exactly what deploy.yml runs) ---"
+            systemctl restart leadgen-api 2>&1
+            echo "exit code: $?"
+            sleep 4
+            echo "--- ActiveEnterTimestamp AFTER plain restart attempt (compare to BEFORE) ---"
+            systemctl show leadgen-api --property=ActiveEnterTimestamp --no-pager
+            echo "--- is-active after plain restart attempt ---"
+            systemctl is-active leadgen-api
+            echo
+
             echo "### leadgen-api ###"
             systemctl status leadgen-api --no-pager || true
             echo

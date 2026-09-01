@@ -99,11 +99,21 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
-            systemctl restart leadgen-api
+            # Plain `systemctl restart` over a non-interactive SSH session has no active
+            # logind seat, so polkit denies it ("Access denied ... requires interactive
+            # authentication") even when passwordless sudo is available. Without `sudo`
+            # here, that failure was silent (no `set -e`, exit code discarded) — the old
+            # process kept running and kept answering health checks, so the deploy went
+            # green while serving stale code. Confirmed live via diagnostics.yml on 2026-09-01.
+            BEFORE=$(systemctl show leadgen-api --property=ActiveEnterTimestamp --no-pager)
+            sudo systemctl restart leadgen-api
             sleep 4
             STATUS=$(systemctl is-active leadgen-api)
+            AFTER=$(systemctl show leadgen-api --property=ActiveEnterTimestamp --no-pager)
             echo "Service status: $STATUS"
-            if [ "$STATUS" != "active" ]; then
+            echo "Restart timestamp: $BEFORE -> $AFTER"
+            if [ "$STATUS" != "active" ] || [ "$BEFORE" = "$AFTER" ]; then
+              echo "::error::Service did not actually restart (timestamp unchanged) or is not active"
               journalctl -u leadgen-api -n 30 --no-pager
               exit 1
             fi
