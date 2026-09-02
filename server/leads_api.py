@@ -7560,7 +7560,8 @@ class Handler(BaseHTTPRequestHandler):
                                       p.source_mix, p.min_lead_score, p.push_to_crm, p.is_active,
                                       to_char(p.last_run_at,'YYYY-MM-DD HH24:MI'),
                                       (SELECT COUNT(*) FROM leads l WHERE l.icp_id=p.id),
-                                      (SELECT COUNT(*) FROM leads l WHERE l.icp_id=p.id AND l.ai_score >= 7)
+                                      (SELECT COUNT(*) FROM leads l WHERE l.icp_id=p.id
+                                        AND COALESCE(l.icp_score, l.ai_score * 10, 0) >= p.min_lead_score)
                                FROM icp_profiles p ORDER BY p.id DESC""")
                 rows = cur.fetchall()
                 cur.execute("""SELECT r.icp_id, r.leads_found, r.leads_new, r.status,
