@@ -5,7 +5,7 @@ Complete documentation of all 45+ endpoints.
 **Base URL:** `http://YOUR_SERVER_IP:8080`
 **Authentication:** Most endpoints are open. For production, add a reverse proxy with HTTP basic auth, or use the `/auth/login` token.
 **Content-Type:** `application/json` for all POST requests.
-**Version:** 8.0
+**Version:** 8.1
 
 ---
 
@@ -381,6 +381,37 @@ see [Configuration](#configuration) below.
 
 ---
 
+## Multi-Domain Sending + Outreach Automation (M11)
+
+### GET /sending-domains
+List configured sending domains with today's/7-day send stats. Admin only.
+
+### POST /sending-domains/save
+Create or update a sending domain. Omit `id` to create. `from_email`'s domain must match
+`domain`. The domain must already be verified in your Resend account (Resend supplies the
+SPF/DKIM records to add at that domain's DNS host — this endpoint doesn't do that part).
+
+```json
+{"domain": "mail-two.com", "from_email": "hello@mail-two.com", "from_name": "Controva",
+ "daily_cap": 20, "is_active": true}
+```
+
+### POST /sending-domains/{id}/delete
+Remove a sending domain. Admin only.
+
+Outreach sends (initial send and sequence follow-ups) automatically rotate across every
+active, under-cap domain configured here — no domain configured means everything still
+goes out via the single global `from_email`/`from_name` (Configuration). Any domain with
+≥10 sends and a ≥5% bounce+complaint rate in the trailing 7 days is paused automatically.
+
+Automation mode (`outreach_automation_mode`: `off` | `daily_approval` | `full_auto`) is
+read/written via the existing `GET`/`POST /config` — see [Configuration](#configuration).
+`full_auto` runs a background loop that sends `ready` leads through the same function
+(and every gate — verification, suppression, throttle, domain caps) a manual "Send Email"
+click uses.
+
+---
+
 ## SEO Intelligence
 
 ### POST /keywords
@@ -641,9 +672,9 @@ When you hit a limit, the API returns an error in the response body explaining w
 
 ## Versioning
 
-Current API version: **8.0** — adds AI research (M7), pain-aware scoring (M8), CRM push
-(M9), and the phase-2 suite (M10). Fully backwards-compatible with 7.0 clients — all new
-fields are additive.
+Current API version: **8.1** — adds AI research (M7), pain-aware scoring (M8), CRM push
+(M9), the phase-2 suite (M10), and multi-domain sending + outreach automation (M11).
+Fully backwards-compatible with 7.0 clients — all new fields are additive.
 
 Check `/health` for the version your server is running.
 

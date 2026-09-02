@@ -4,7 +4,7 @@
 > without removing anything from the current system. Every existing capability stays;
 > each milestone adds a new subsystem on top.
 >
-> Created: 2026-08-27 · Status: M6-M10 shipped (PR #15, pending merge + live smoke test) · Owner: Controva LLC
+> Created: 2026-08-27 · Status: M6-M11 shipped and merged; M6-M10 confirmed live via smoke test + deploy verification · Owner: Controva LLC
 
 ---
 
@@ -36,6 +36,7 @@ cost tracking) is retained as the foundation these milestones build on.
 | M8 | Pain-Aware Scoring & Messaging ✅ **shipped** (PR #15) | "scores the leads", "personalised message generation" | M7 |
 | M9 | CRM Integration ✅ **shipped** (PR #15, Pipedrive + generic webhook; HubSpot not built) | "sends best opportunities into a CRM" | M8 |
 | M10 | Phase-2 Suite + White-Label Polish ✅ **shipped** (PR #15) | outreach / follow-ups / reply classification / booking (client's "later" list) | M8, M9 |
+| M11 | Multi-Domain Sending + Outreach Automation ✅ **shipped** (PR #19) | scale outreach across multiple domains without burning sender reputation; optionally remove the manual click before a lead's first email sends | M9 |
 
 **Not yet done, tracked separately:** HubSpot as a second named CRM (webhook covers the same need generically today); `controva_api.py` webhook-events subscription feed (the plan's "webhook events" bullet — a pub/sub system is a bigger lift than the leads/research/scoring fields that shipped); live testing against a real Postgres instance and real Pipedrive/Calendly accounts (none were available in the session that built this — see PR #15's test plan).
 

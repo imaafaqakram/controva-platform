@@ -35,14 +35,15 @@ real Pipedrive/Calendly accounts.
 9. [Pain-Aware Scoring v2 (M8)](#pain-aware-scoring-v2-m8)
 10. [CRM Integration (M9)](#crm-integration-m9)
 11. [Phase-2 Suite & White-Label (M10)](#phase-2-suite--white-label-m10)
-12. [Deployment & CI/CD](#deployment--cicd)
-13. [Configuration & API Keys](#configuration--api-keys)
-14. [Architecture](#architecture)
-15. [Database Schema](#database-schema)
-16. [Troubleshooting](#troubleshooting)
-17. [User Roles](#user-roles)
-18. [Security Checklist](#security-checklist)
-19. [Changelog](#changelog)
+12. [Multi-Domain Sending & Outreach Automation (M11)](#multi-domain-sending--outreach-automation-m11)
+13. [Deployment & CI/CD](#deployment--cicd)
+14. [Configuration & API Keys](#configuration--api-keys)
+15. [Architecture](#architecture)
+16. [Database Schema](#database-schema)
+17. [Troubleshooting](#troubleshooting)
+18. [User Roles](#user-roles)
+19. [Security Checklist](#security-checklist)
+20. [Changelog](#changelog)
 
 ---
 
@@ -410,6 +411,20 @@ scope than the rest of this milestone, tracked as a follow-up in `docs/CLIENT_MV
 
 ---
 
+## Multi-Domain Sending & Outreach Automation (M11)
+
+| Capability | Configure | What happens |
+|---|---|---|
+| **Sending domains** | Settings → Sending Domains → add each domain (verify it in Resend first — Resend gives you the SPF/DKIM records to add at that domain's DNS) | Outreach rotates every send across all active domains, always picking whichever has the most daily headroom left, so volume spreads evenly instead of piling onto one domain. Falls back to the single global `FROM_EMAIL` when no domains are configured — fully backward compatible. |
+| **Per-domain daily caps** | Set per domain when adding it (5–200/day) | Once a domain hits its cap it's skipped for the rest of the day. If every configured domain is paused or at cap, sends block with a clear error rather than silently falling back to an unmanaged sender. |
+| **Auto-pause on bad health** | Nothing — automatic | Any domain with ≥10 sends in the trailing 7 days and a ≥5% bounce+complaint rate is paused automatically (`paused_reason` explains why) — protects the other domains' reputation. Resume it manually once the underlying issue is fixed. |
+| **Outreach automation mode** | Settings → Outreach Automation | **Manual** (default): unchanged — you click Send Email per lead. **Daily review**: copy still generates automatically; the daily digest tells you how many leads are ready so you review and send in a batch. **Fully automatic**: a background loop sends `ready` leads on its own every few minutes, through the exact same verification/suppression/throttle/domain-cap gates a manual send uses — no new bypass. |
+
+Follow-up sequence sends (steps 2–3) already ran automatically before this milestone; M11 rotates
+those across sending domains too and adds the option to automate the *initial* send as well.
+
+---
+
 ## Deployment & CI/CD
 
 ### Auto-deploy (GitHub Actions)
@@ -549,7 +564,9 @@ controva-platform/
     │   ├── 007_research.sql     ← M7: AI research dossier
     │   ├── 008_scoring.sql      ← M8: pain-aware scoring v2
     │   ├── 009_crm.sql          ← M9: CRM connections + push log
-    │   └── 010_phase2.sql       ← M10: reply classification, meeting booking
+    │   ├── 010_phase2.sql       ← M10: reply classification, meeting booking
+    │   ├── 011_roles.sql        ← Role-based access — admin / client accounts
+    │   └── 012_sending_domains.sql ← M11: multi-domain sending + automation
     ├── controva_api.py          ← Separate public REST API (port 8081, X-API-Key auth)
     ├── leadgen-api.service      ← Systemd unit
     └── setup.sh                 ← One-click installer
@@ -564,13 +581,14 @@ controva-platform/
 | `leads` | Every discovered business — name, city, niche, phone, address, website, has_website, website_verified, ai_score, status |
 | `contacts` | Contacts per lead — full_name, email, linkedin_url, job_title, confidence (best-verified contact plus, since M10, additional decision-makers from `find_people()`) |
 | `assets` | Generated content — mockup images, email subject, email body |
-| `outreach_log` | Every email sent — recipient, timestamps, open/reply, reply_classification, reply_digest *(M10)* |
+| `outreach_log` | Every email sent — recipient, timestamps, open/reply, reply_classification, reply_digest *(M10)*, sending_domain_id *(M11)* |
 | `processed_cache` | SHA hashes of past searches — prevents duplicate processing |
 | `discovery_state` | Round counter per (niche, city) — tracks which round each search is on |
 | `workflow_runs` | Background job log |
 | `icp_profiles` / `icp_runs` *(M6)* | Saved Ideal Customer Profiles + autonomous discovery run history |
 | `lead_research` *(M7)* | AI research dossier per lead — web_findings, reviews_summary, tech_stack, hiring_signals, social_presence, pain_points (evidence + severity), needs_summary, recommended_angle, sources |
 | `crm_connections` / `crm_push_log` *(M9)* | Configured CRM targets (Pipedrive / webhook) + per-lead push history and retry status |
+| `sending_domains` *(M11)* | Verified outbound sending identities — domain, from_email/name, daily_cap, is_active, paused_reason |
 
 ### Key columns on `leads`
 
@@ -658,12 +676,22 @@ Before going to production:
 
 ## Changelog
 
-### v8.0 — August 2026 (M7–M10, pending merge)
+### v8.1 — September 2026 (M11, ops fixes)
+
+**New features**
+- **Multi-Domain Sending & Outreach Automation (M11)** — rotate outbound email across multiple verified sending domains (Settings → Sending Domains) with per-domain daily caps and automatic pausing on a bad bounce/complaint rate; optional automation mode (manual / daily review / fully automatic) so the initial send — not just sequence follow-ups — can run unattended. See [Multi-Domain Sending & Outreach Automation](#multi-domain-sending--outreach-automation-m11).
+- **ICP qualified-lead threshold** — `min_lead_score` (already gating M9's CRM auto-push) is now editable in the ICP builder; the "qualified" count on each profile card uses each profile's own threshold instead of a hardcoded `ai_score >= 7`.
+- **Log Out button** — the sidebar had no way to log out or switch accounts.
+
+**Bug fixes**
+- `deploy.yml`'s "Restart API service" step ran `systemctl restart` without `sudo`. Over a non-interactive SSH session that fails polkit authorization silently, and the script had no `set -e` — so the old process kept running and CI reported green while serving stale code (root cause of the first M7–M10 deploy needing a manual restart). Now runs with `sudo` and fails the step if the service's restart timestamp doesn't actually change.
+
+### v8.0 — August 2026 (M7–M10)
 
 Closes the gap between the client proposal and the shipped product — see
 `docs/CLIENT_MVP_PLAN.md` for the full milestone breakdown and what was scoped down.
 Everything below is additive; nothing existing was removed or changed in behavior.
-Not yet live-tested against production Postgres or real Pipedrive/Calendly accounts.
+Confirmed live against production Postgres; not yet tested against real Pipedrive/Calendly accounts.
 
 **New features**
 - **AI Research & Pain Detection (M7)** — per-lead dossier: web presence, review mining, tech stack, hiring/intent signals, social presence, evidence-backed pain points with severity, needs summary, recommended pitch angle. `POST /lead/{id}/research`, `POST /research/queue`, Research panel in lead detail, AI Research queue on Pipeline page.
