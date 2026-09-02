@@ -3675,21 +3675,23 @@ const IntentPage = () => {
 const CrmConnectionsEditor = () => {
   const [connections, setConnections] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [adding, setAdding] = useState(false);
-  const [form, setForm] = useState({ type: 'pipedrive', name: '', config: {} });
+  const [editing, setEditing] = useState(null);   // null | {} (new) | connection object (edit)
   const [pushing, setPushing] = useState(false);
   const { showToast } = useToast();
 
   const load = () => api.get('/crm/connections').then(d => { setConnections(d.connections || []); setLoading(false); }).catch(() => setLoading(false));
   useEffect(() => { load(); }, []);
 
+  const blank = { type: 'pipedrive', name: '', config: {}, is_active: true };
+  const f = editing || {};
+  const setF = (patch) => setEditing({ ...f, ...patch });
+
   const save = async () => {
-    if (!form.name.trim()) { showToast('Name required', 'error'); return; }
+    if (!(f.name || '').trim()) { showToast('Name required', 'error'); return; }
     try {
-      await api.post('/crm/connections/save', form);
+      await api.post('/crm/connections/save', f);
       showToast('CRM connection saved');
-      setAdding(false);
-      setForm({ type: 'pipedrive', name: '', config: {} });
+      setEditing(null);
       load();
     } catch (e) { showToast('Failed: ' + e.message, 'error'); }
   };
@@ -3719,40 +3721,47 @@ const CrmConnectionsEditor = () => {
             <div className="font-medium text-sm flex items-center gap-2">
               <Badge variant={c.type === 'pipedrive' ? 'info' : 'default'}>{c.type}</Badge>
               <span className="truncate">{c.name}</span>
+              <Badge variant={c.is_active ? 'success' : 'grey'}>{c.is_active ? 'Active' : 'Paused'}</Badge>
             </div>
             <p className="text-xs text-slate-500 mt-0.5">{c.pushed_ok} pushed · {c.pushed_failed} failed</p>
           </div>
           <div className="flex gap-2 flex-shrink-0">
             <Button size="sm" variant="secondary" onClick={() => pushQualified(c.id)} disabled={pushing}>Push Qualified</Button>
+            <Button size="sm" variant="secondary" icon="Edit3" onClick={() => setEditing(c)}>Edit</Button>
             <Button size="sm" variant="ghost" icon="Trash2" onClick={() => remove(c.id)} />
           </div>
         </div>
       ))}
-      {!adding ? (
-        <Button size="sm" variant="secondary" icon="Plus" onClick={() => setAdding(true)}>Add CRM Connection</Button>
+      {!editing ? (
+        <Button size="sm" variant="secondary" icon="Plus" onClick={() => setEditing(blank)}>Add CRM Connection</Button>
       ) : (
         <div className="p-3 border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-lg space-y-2">
-          <select value={form.type} onChange={e => setForm({ ...form, type: e.target.value, config: {} })}
+          <h4 className="text-xs font-semibold text-slate-500">{f.id ? 'Edit CRM Connection' : 'New CRM Connection'}</h4>
+          <select value={f.type || 'pipedrive'} onChange={e => setF({ type: e.target.value, config: f.id ? f.config : {} })}
             className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-2 text-sm">
             <option value="pipedrive">Pipedrive</option>
             <option value="webhook">Generic Webhook (Zapier/n8n/GoHighLevel/custom)</option>
           </select>
-          <Input value={form.name} onChange={v => setForm({ ...form, name: v })} placeholder="Connection name (e.g. 'Main Pipedrive')" />
-          {form.type === 'pipedrive' ? (
+          <Input value={f.name || ''} onChange={v => setF({ name: v })} placeholder="Connection name (e.g. 'Main Pipedrive')" />
+          {f.type === 'pipedrive' ? (
             <>
-              <Input value={form.config.api_token || ''} onChange={v => setForm({ ...form, config: { ...form.config, api_token: v } })} placeholder="Pipedrive API token" />
-              <Input value={form.config.pipeline_id || ''} onChange={v => setForm({ ...form, config: { ...form.config, pipeline_id: v } })} placeholder="Pipeline ID (optional)" />
-              <Input value={form.config.stage_id || ''} onChange={v => setForm({ ...form, config: { ...form.config, stage_id: v } })} placeholder="Stage ID (optional)" />
+              <Input value={(f.config || {}).api_token || ''} onChange={v => setF({ config: { ...f.config, api_token: v } })} placeholder="Pipedrive API token" />
+              <Input value={(f.config || {}).pipeline_id || ''} onChange={v => setF({ config: { ...f.config, pipeline_id: v } })} placeholder="Pipeline ID (optional)" />
+              <Input value={(f.config || {}).stage_id || ''} onChange={v => setF({ config: { ...f.config, stage_id: v } })} placeholder="Stage ID (optional)" />
             </>
           ) : (
             <>
-              <Input value={form.config.webhook_url || ''} onChange={v => setForm({ ...form, config: { ...form.config, webhook_url: v } })} placeholder="Webhook URL" />
-              <Input value={form.config.webhook_secret || ''} onChange={v => setForm({ ...form, config: { ...form.config, webhook_secret: v } })} placeholder="Signing secret (optional)" />
+              <Input value={(f.config || {}).webhook_url || ''} onChange={v => setF({ config: { ...f.config, webhook_url: v } })} placeholder="Webhook URL" />
+              <Input value={(f.config || {}).webhook_secret || ''} onChange={v => setF({ config: { ...f.config, webhook_secret: v } })} placeholder="Signing secret (optional)" />
             </>
           )}
+          {f.id && <p className="text-[11px] text-slate-400">Token/secret fields show masked (••••) — leave as-is to keep the saved value, or type a new one to replace it.</p>}
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={f.is_active ?? true} onChange={e => setF({ is_active: e.target.checked })} /> Active
+          </label>
           <div className="flex gap-2">
-            <Button size="sm" onClick={save}>Save</Button>
-            <Button size="sm" variant="ghost" onClick={() => setAdding(false)}>Cancel</Button>
+            <Button size="sm" onClick={save}>{f.id ? 'Save' : 'Create'}</Button>
+            <Button size="sm" variant="ghost" onClick={() => setEditing(null)}>Cancel</Button>
           </div>
         </div>
       )}
@@ -3763,20 +3772,22 @@ const CrmConnectionsEditor = () => {
 const SendingDomainsEditor = () => {
   const [domains, setDomains] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [adding, setAdding] = useState(false);
-  const [form, setForm] = useState({ domain: '', from_email: '', from_name: 'Controva', daily_cap: 20 });
+  const [editing, setEditing] = useState(null);   // null | {} (new) | domain object (edit)
   const { showToast } = useToast();
 
   const load = () => api.get('/sending-domains').then(d => { setDomains(d.domains || []); setLoading(false); }).catch(() => setLoading(false));
   useEffect(() => { load(); }, []);
 
+  const blank = { domain: '', from_email: '', from_name: 'Controva', daily_cap: 20, is_active: true };
+  const f = editing || {};
+  const setF = (k, v) => setEditing({ ...f, [k]: v });
+
   const save = async () => {
-    if (!form.domain.trim() || !form.from_email.trim()) { showToast('Domain and from-email required', 'error'); return; }
+    if (!(f.domain || '').trim() || !(f.from_email || '').trim()) { showToast('Domain and from-email required', 'error'); return; }
     try {
-      await api.post('/sending-domains/save', form);
+      await api.post('/sending-domains/save', f);
       showToast('Sending domain saved');
-      setAdding(false);
-      setForm({ domain: '', from_email: '', from_name: 'Controva', daily_cap: 20 });
+      setEditing(null);
       load();
     } catch (e) { showToast('Failed: ' + e.message, 'error'); }
   };
@@ -3796,7 +3807,7 @@ const SendingDomainsEditor = () => {
 
   return (
     <div className="space-y-3">
-      {domains.length === 0 && !adding && (
+      {domains.length === 0 && !editing && (
         <p className="text-xs text-slate-500">No sending domains configured yet — outreach sends from the single FROM_EMAIL in API Keys.</p>
       )}
       {domains.map(d => (
@@ -3813,28 +3824,33 @@ const SendingDomainsEditor = () => {
               {d.paused_reason && <p className="text-xs text-red-500 mt-0.5">{d.paused_reason}</p>}
             </div>
             <div className="flex gap-2 flex-shrink-0">
+              <Button size="sm" variant="secondary" icon="Edit3" onClick={() => setEditing(d)}>Edit</Button>
               <Button size="sm" variant="secondary" onClick={() => toggleActive(d)}>{d.is_active ? 'Pause' : 'Resume'}</Button>
               <Button size="sm" variant="ghost" icon="Trash2" onClick={() => remove(d.id)} />
             </div>
           </div>
         </div>
       ))}
-      {!adding ? (
-        <Button size="sm" variant="secondary" icon="Plus" onClick={() => setAdding(true)}>Add Sending Domain</Button>
+      {!editing ? (
+        <Button size="sm" variant="secondary" icon="Plus" onClick={() => setEditing(blank)}>Add Sending Domain</Button>
       ) : (
         <div className="p-3 border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-lg space-y-2">
-          <Input value={form.domain} onChange={v => setForm({ ...form, domain: v.trim().toLowerCase() })} placeholder="Domain (must be verified in Resend), e.g. mail-two.com" />
-          <Input value={form.from_email} onChange={v => setForm({ ...form, from_email: v })} placeholder="From address, e.g. hello@mail-two.com" />
-          <Input value={form.from_name} onChange={v => setForm({ ...form, from_name: v })} placeholder="From name" />
+          <h4 className="text-xs font-semibold text-slate-500">{f.id ? 'Edit Sending Domain' : 'New Sending Domain'}</h4>
+          <Input value={f.domain || ''} onChange={v => setF('domain', v.trim().toLowerCase())} placeholder="Domain (must be verified in Resend), e.g. mail-two.com" />
+          <Input value={f.from_email || ''} onChange={v => setF('from_email', v)} placeholder="From address, e.g. hello@mail-two.com" />
+          <Input value={f.from_name || ''} onChange={v => setF('from_name', v)} placeholder="From name" />
           <div>
-            <label className="text-xs font-medium text-slate-500 block mb-1">Daily cap — {form.daily_cap}</label>
-            <input type="range" min="5" max="200" step="5" value={form.daily_cap}
-              onChange={e => setForm({ ...form, daily_cap: parseInt(e.target.value, 10) })} className="w-full" />
+            <label className="text-xs font-medium text-slate-500 block mb-1">Daily cap — {f.daily_cap ?? 20}</label>
+            <input type="range" min="5" max="200" step="5" value={f.daily_cap ?? 20}
+              onChange={e => setF('daily_cap', parseInt(e.target.value, 10))} className="w-full" />
             <p className="text-[11px] text-slate-400 mt-1">Start low on a new domain and raise it over a few weeks as it warms up.</p>
           </div>
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={f.is_active ?? true} onChange={e => setF('is_active', e.target.checked)} /> Active
+          </label>
           <div className="flex gap-2">
-            <Button size="sm" onClick={save}>Save</Button>
-            <Button size="sm" variant="ghost" onClick={() => setAdding(false)}>Cancel</Button>
+            <Button size="sm" onClick={save}>{f.id ? 'Save' : 'Create'}</Button>
+            <Button size="sm" variant="ghost" onClick={() => setEditing(null)}>Cancel</Button>
           </div>
         </div>
       )}
@@ -3948,6 +3964,17 @@ const SettingsPage = () => {
             </label>
           ))}
         </div>
+        {config.outreach_automation_mode === 'full_auto' && (
+          <div className="mt-4 pt-4 border-t border-slate-200 dark:border-slate-800">
+            <label className="text-xs font-medium text-slate-500 block mb-1">
+              Check for ready leads every — {Math.round((config.outreach_automation_interval_sec ?? 300) / 60)} min
+            </label>
+            <input type="range" min="1" max="60" step="1"
+              value={Math.round((config.outreach_automation_interval_sec ?? 300) / 60)}
+              onChange={e => update('outreach_automation_interval_sec', parseInt(e.target.value, 10) * 60)}
+              className="w-full" />
+          </div>
+        )}
       </Card>
 
       <Card>
