@@ -3760,6 +3760,88 @@ const CrmConnectionsEditor = () => {
   );
 };
 
+const SendingDomainsEditor = () => {
+  const [domains, setDomains] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [adding, setAdding] = useState(false);
+  const [form, setForm] = useState({ domain: '', from_email: '', from_name: 'Controva', daily_cap: 20 });
+  const { showToast } = useToast();
+
+  const load = () => api.get('/sending-domains').then(d => { setDomains(d.domains || []); setLoading(false); }).catch(() => setLoading(false));
+  useEffect(() => { load(); }, []);
+
+  const save = async () => {
+    if (!form.domain.trim() || !form.from_email.trim()) { showToast('Domain and from-email required', 'error'); return; }
+    try {
+      await api.post('/sending-domains/save', form);
+      showToast('Sending domain saved');
+      setAdding(false);
+      setForm({ domain: '', from_email: '', from_name: 'Controva', daily_cap: 20 });
+      load();
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+  };
+
+  const toggleActive = async (d) => {
+    try { await api.post('/sending-domains/save', { ...d, is_active: !d.is_active }); load(); }
+    catch (e) { showToast('Failed', 'error'); }
+  };
+
+  const remove = async (id) => {
+    if (!confirm('Delete this sending domain?')) return;
+    try { await api.post('/sending-domains/' + id + '/delete', {}); load(); }
+    catch (e) { showToast('Failed', 'error'); }
+  };
+
+  if (loading) return <div className="py-4 text-center"><Spinner /></div>;
+
+  return (
+    <div className="space-y-3">
+      {domains.length === 0 && !adding && (
+        <p className="text-xs text-slate-500">No sending domains configured yet — outreach sends from the single FROM_EMAIL in API Keys.</p>
+      )}
+      {domains.map(d => (
+        <div key={d.id} className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+          <div className="flex items-center justify-between gap-2">
+            <div className="min-w-0">
+              <div className="font-medium text-sm flex items-center gap-2">
+                <span className="truncate">{d.from_name} &lt;{d.from_email}&gt;</span>
+                <Badge variant={d.is_active ? 'success' : 'grey'}>{d.is_active ? 'Active' : 'Paused'}</Badge>
+              </div>
+              <p className="text-xs text-slate-500 mt-0.5">
+                {d.sent_today}/{d.daily_cap} sent today · {d.bad_7d}/{d.sent_7d || 0} bounced or complained (7d)
+              </p>
+              {d.paused_reason && <p className="text-xs text-red-500 mt-0.5">{d.paused_reason}</p>}
+            </div>
+            <div className="flex gap-2 flex-shrink-0">
+              <Button size="sm" variant="secondary" onClick={() => toggleActive(d)}>{d.is_active ? 'Pause' : 'Resume'}</Button>
+              <Button size="sm" variant="ghost" icon="Trash2" onClick={() => remove(d.id)} />
+            </div>
+          </div>
+        </div>
+      ))}
+      {!adding ? (
+        <Button size="sm" variant="secondary" icon="Plus" onClick={() => setAdding(true)}>Add Sending Domain</Button>
+      ) : (
+        <div className="p-3 border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-lg space-y-2">
+          <Input value={form.domain} onChange={v => setForm({ ...form, domain: v.trim().toLowerCase() })} placeholder="Domain (must be verified in Resend), e.g. mail-two.com" />
+          <Input value={form.from_email} onChange={v => setForm({ ...form, from_email: v })} placeholder="From address, e.g. hello@mail-two.com" />
+          <Input value={form.from_name} onChange={v => setForm({ ...form, from_name: v })} placeholder="From name" />
+          <div>
+            <label className="text-xs font-medium text-slate-500 block mb-1">Daily cap — {form.daily_cap}</label>
+            <input type="range" min="5" max="200" step="5" value={form.daily_cap}
+              onChange={e => setForm({ ...form, daily_cap: parseInt(e.target.value, 10) })} className="w-full" />
+            <p className="text-[11px] text-slate-400 mt-1">Start low on a new domain and raise it over a few weeks as it warms up.</p>
+          </div>
+          <div className="flex gap-2">
+            <Button size="sm" onClick={save}>Save</Button>
+            <Button size="sm" variant="ghost" onClick={() => setAdding(false)}>Cancel</Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 const SettingsPage = () => {
   const [config, setConfig] = useState(null);
   const { showToast } = useToast();
@@ -3830,6 +3912,42 @@ const SettingsPage = () => {
         <h3 className="font-semibold mb-3 flex items-center gap-2"><Icon name="Link2" /> CRM Connections</h3>
         <p className="text-xs text-slate-500 mb-3">Push qualified leads — with their full research dossier — into Pipedrive or any webhook-compatible system (Zapier, n8n, GoHighLevel).</p>
         <CrmConnectionsEditor />
+      </Card>
+
+      <Card>
+        <h3 className="font-semibold mb-3 flex items-center gap-2"><Icon name="Mail" /> Sending Domains</h3>
+        <p className="text-xs text-slate-500 mb-3">
+          Add verified sending domains (verify each one in Resend first — it'll give you SPF/DKIM records to add at that domain's DNS).
+          Outreach rotates across every active domain below, spreading volume evenly and respecting each one's daily cap.
+        </p>
+        <SendingDomainsEditor />
+      </Card>
+
+      <Card>
+        <h3 className="font-semibold mb-3 flex items-center gap-2"><Icon name="Zap" /> Outreach Automation</h3>
+        <p className="text-xs text-slate-500 mb-3">How much human review happens before a lead's email actually goes out.</p>
+        <div className="space-y-2">
+          {[
+            { id: 'off',            label: 'Manual (default)',   desc: 'Nothing sends on its own — you click Send Email per lead, same as today.', icon: 'User' },
+            { id: 'daily_approval', label: 'Daily review',       desc: 'Copy is generated automatically; the daily digest tells you how many leads are ready so you can review and send in a batch.', icon: 'Inbox' },
+            { id: 'full_auto',      label: 'Fully automatic',    desc: 'Ready leads send on their own on a timer — no clicking. Still gated by verification, suppression, throttle, and domain caps above.', icon: 'Play' },
+          ].map(opt => (
+            <label key={opt.id} className={'flex items-start gap-3 p-3 rounded-lg border-2 cursor-pointer transition-colors ' + (
+              (config.outreach_automation_mode || 'off') === opt.id
+                ? 'border-accent-500 bg-accent-50 dark:bg-accent-900/20'
+                : 'border-slate-200 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700'
+            )}>
+              <input type="radio"
+                checked={(config.outreach_automation_mode || 'off') === opt.id}
+                onChange={() => update('outreach_automation_mode', opt.id)}
+                className="mt-0.5" />
+              <div className="flex-1 min-w-0">
+                <div className="font-medium text-sm flex items-center gap-2"><Icon name={opt.icon} className="w-4 h-4" /> {opt.label}</div>
+                <p className="text-xs text-slate-500 mt-0.5">{opt.desc}</p>
+              </div>
+            </label>
+          ))}
+        </div>
       </Card>
 
       <Card>

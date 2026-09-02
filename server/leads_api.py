@@ -107,6 +107,9 @@ CONFIG = {
     'daily_digest_enabled': False,
     'digest_recipient_email': '',      # where the daily digest is sent
     'multi_decision_maker_capture': True,  # store extra find_people() contacts during research
+    # M11: multi-domain sending + outreach automation
+    'outreach_automation_mode': 'off',        # off | full_auto | daily_approval
+    'outreach_automation_interval_sec': 300,  # how often the automation loop checks for ready leads
 }
 
 # Map enrichment_strategy → providers list for enrich_lead()
@@ -6277,10 +6280,17 @@ def run_daily_digest():
         highlights = cur.fetchall()
         cur.execute("SELECT COALESCE(SUM(cost),0) FROM api_usage WHERE created_at > NOW() - INTERVAL '24 hours'")
         cost_today = float(cur.fetchone()[0])
+        ready_to_send = 0
+        if CONFIG.get('outreach_automation_mode') == 'daily_approval':
+            cur.execute("SELECT COUNT(*) FROM leads WHERE status='ready'")
+            ready_to_send = cur.fetchone()[0]
         cur.close(); conn.close()
 
         lines = [f"New leads (24h): {new_leads}", f"Qualified (score >= 60): {qualified}",
                  f"API spend (24h): ${cost_today:.2f}", '']
+        if ready_to_send:
+            lines.insert(0, f"{ready_to_send} leads ready to send — review and click Send in Outreach.")
+            lines.insert(1, '')
         if highlights:
             lines.append('Research highlights:')
             for name, pains in highlights:
@@ -6622,16 +6632,23 @@ def process_due_enrollments():
         body_html = body.replace('\n', '<br>')
         if detail.get('mockup_url'):
             body_html += f'<br><br><img src="{detail["mockup_url"]}" alt="Website Mockup" style="max-width:100%; border-radius:8px;">'
+        sd = pick_sending_domain()   # M11: rotate across configured sending domains
+        if not sd and has_sending_domains_configured():
+            print(f'[sequence] all sending domains paused/at cap — skipping lead {lead_id} this tick')
+            skipped += 1
+            break   # same treatment as the throttle cap above — stop, retry next tick
         result = send_email_via_resend(email, subject, body, body_html,
+                                       from_email=sd['from_email'] if sd else None,
+                                       from_name=sd['from_name'] if sd else None,
                                        unsub_url=build_unsub_url(unsub_token))
         try:
             conn = db_conn(); cur = conn.cursor()
             if result.get('success'):
                 cur.execute("""INSERT INTO outreach_log (lead_id, email_to, email_subject, email_body,
-                               mockup_url, sent_at, status, resend_message_id)
-                               VALUES (%s,%s,%s,%s,%s,NOW(),'sent',%s)""",
+                               mockup_url, sent_at, status, resend_message_id, sending_domain_id)
+                               VALUES (%s,%s,%s,%s,%s,NOW(),'sent',%s,%s)""",
                             (lead_id, email, subject, body, detail.get('mockup_url') or '',
-                             result.get('message_id')))
+                             result.get('message_id'), sd['id'] if sd else None))
                 # advance; gap to next step from the schedule (absolute days → difference)
                 cur.execute("""SELECT ns.delay_days - ss.delay_days FROM enrollments e
                                JOIN sequence_steps ss ON ss.sequence_id=e.sequence_id AND ss.step_number=e.current_step
@@ -7045,6 +7062,126 @@ def send_email_via_resend(to_email, subject, body_text, body_html=None, from_ema
     except Exception as e:
         return {"success": False, "error": str(e)}
 
+# ──────────────────────────────────────────────────────────────
+#  M11: MULTI-DOMAIN SENDING + OUTREACH AUTOMATION
+# ──────────────────────────────────────────────────────────────
+def ensure_sending_domains_table():
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS sending_domains (
+            id SERIAL PRIMARY KEY,
+            domain VARCHAR(255) NOT NULL UNIQUE,
+            from_email VARCHAR(255) NOT NULL,
+            from_name VARCHAR(255) NOT NULL DEFAULT 'Controva',
+            daily_cap SMALLINT NOT NULL DEFAULT 20,
+            is_active BOOLEAN NOT NULL DEFAULT TRUE,
+            paused_reason TEXT,
+            created_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+    """)
+    cur.execute("ALTER TABLE outreach_log ADD COLUMN IF NOT EXISTS sending_domain_id INTEGER REFERENCES sending_domains(id)")
+    conn.commit(); cur.close(); conn.close()
+
+def pick_sending_domain():
+    """Choose the active sending domain with the most daily headroom left
+    (least sent in the trailing 24h first — spreads volume evenly).
+    Returns a dict, or None when no domains are configured/available —
+    callers fall back to the single global FROM_EMAIL/FROM_NAME in that case."""
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("""
+            SELECT d.id, d.domain, d.from_email, d.from_name, d.daily_cap,
+                   COUNT(o.id) FILTER (WHERE o.sent_at > NOW() - INTERVAL '24 hours') as sent_today
+            FROM sending_domains d
+            LEFT JOIN outreach_log o ON o.sending_domain_id = d.id
+            WHERE d.is_active = TRUE
+            GROUP BY d.id
+            HAVING COUNT(o.id) FILTER (WHERE o.sent_at > NOW() - INTERVAL '24 hours') < d.daily_cap
+            ORDER BY sent_today ASC, d.id ASC
+            LIMIT 1
+        """)
+        row = cur.fetchone()
+        cur.close(); conn.close()
+        if not row: return None
+        return {'id': row[0], 'domain': row[1], 'from_email': row[2], 'from_name': row[3],
+                'daily_cap': row[4], 'sent_today': row[5]}
+    except Exception:
+        return None
+
+def has_sending_domains_configured():
+    """True when at least one sending domain row exists (active or not).
+    Distinguishes 'no domains set up — use the global FROM_EMAIL' (fine)
+    from 'domains are set up but all are paused/at cap' (should block,
+    not silently escape to an unmanaged default sender)."""
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM sending_domains")
+        n = cur.fetchone()[0]
+        cur.close(); conn.close()
+        return n > 0
+    except Exception:
+        return False
+
+def check_sending_domain_health():
+    """Auto-pause any sending domain whose bounce+complaint rate over its last
+    7 days of sends crosses a safe threshold, so one bad domain can't drag the
+    others down. Requires >=10 sends before judging (avoid pausing on noise).
+    Never raises — this runs unattended from the automation loop."""
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("""
+            SELECT d.id, d.domain, COUNT(o.id) as total,
+                   COUNT(o.id) FILTER (WHERE o.status IN ('bounced','complained')) as bad
+            FROM sending_domains d JOIN outreach_log o ON o.sending_domain_id = d.id
+            WHERE d.is_active = TRUE AND o.sent_at > NOW() - INTERVAL '7 days'
+            GROUP BY d.id HAVING COUNT(o.id) >= 10
+        """)
+        for domain_id, domain, total, bad in cur.fetchall():
+            rate = bad / total if total else 0
+            if rate >= 0.05:
+                cur.execute("UPDATE sending_domains SET is_active=FALSE, paused_reason=%s WHERE id=%s",
+                            (f'auto-paused: {bad}/{total} ({rate:.0%}) bounced or complained in the last 7 days', domain_id))
+                print(f'[sending-domains] auto-paused {domain}: {bad}/{total} bounced/complained')
+        conn.commit(); cur.close(); conn.close()
+    except Exception as e:
+        print(f'[sending-domains] health check failed: {e}')
+
+def outreach_automation_loop():
+    """Background thread. 'full_auto' sends ready leads on a timer through the
+    exact same function (and gates) a human's 'Send Email' click uses.
+    'daily_approval' and 'off' do nothing here — daily_approval instead gets a
+    nudge in the existing daily digest so a human reviews and sends manually."""
+    while True:
+        try:
+            time.sleep(int(CONFIG.get('outreach_automation_interval_sec', 300)))
+            if CONFIG.get('outreach_automation_mode') != 'full_auto':
+                continue
+            check_sending_domain_health()
+            conn = db_conn(); cur = conn.cursor()
+            cur.execute("""
+                SELECT l.id FROM leads l
+                WHERE l.status = 'ready'
+                  AND EXISTS (SELECT 1 FROM assets WHERE lead_id=l.id AND asset_type='email_subject')
+                  AND EXISTS (SELECT 1 FROM assets WHERE lead_id=l.id AND asset_type='email_body')
+                ORDER BY l.id ASC LIMIT 50
+            """)
+            lead_ids = [r[0] for r in cur.fetchall()]
+            cur.close(); conn.close()
+            for lead_id in lead_ids:
+                if CONFIG.get('outreach_automation_mode') != 'full_auto':
+                    break   # mode was switched off mid-batch — stop immediately
+                ok, _ = send_throttle_status()
+                if not ok:
+                    break
+                try:
+                    result = send_lead_email(lead_id)
+                    if not result.get('success'):
+                        print(f'[outreach-automation] lead {lead_id} skipped: {result.get("error")}')
+                except Exception as e:
+                    print(f'[outreach-automation] send failed for lead {lead_id}: {e}')
+        except Exception as e:
+            print(f'[outreach-automation] loop error: {e}')
+
 def send_lead_email(lead_id):
     """Send the prepared email for a specific lead."""
     conn = db_conn(); cur = conn.cursor()
@@ -7096,17 +7233,25 @@ def send_lead_email(lead_id):
     body_html = f"""<html><body style="font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: 15px; line-height: 1.6; color: #333; max-width: 600px; padding: 16px;">{body_html}</body></html>"""
 
     unsub_token = get_or_create_unsub_token(lead_id)
+    # M11: rotate across configured sending domains when any are set up;
+    # falls back to the single global FROM_EMAIL/FROM_NAME otherwise.
+    sd = pick_sending_domain()
+    if not sd and has_sending_domains_configured():
+        return {"success": False, "error": "Blocked: all sending domains are paused or at their "
+                                           "daily cap — check Settings → Sending Domains"}
     result = send_email_via_resend(email, subj, body, body_html,
+                                   from_email=sd['from_email'] if sd else None,
+                                   from_name=sd['from_name'] if sd else None,
                                    unsub_url=build_unsub_url(unsub_token))
 
     if result.get("success"):
         conn = db_conn(); cur = conn.cursor()
         cur.execute("""
             INSERT INTO outreach_log
-              (lead_id, email_to, email_subject, email_body, mockup_url, sent_at, status, resend_message_id)
-            VALUES (%s, %s, %s, %s, %s, NOW(), 'sent', %s)
+              (lead_id, email_to, email_subject, email_body, mockup_url, sent_at, status, resend_message_id, sending_domain_id)
+            VALUES (%s, %s, %s, %s, %s, NOW(), 'sent', %s, %s)
             RETURNING id
-        """, (lead_id, email, subj, body, mockup or "", result.get("message_id")))
+        """, (lead_id, email, subj, body, mockup or "", result.get("message_id"), sd['id'] if sd else None))
         cur.execute("UPDATE leads SET status='sent' WHERE id=%s", (lead_id,))
         conn.commit()
         cur.close(); conn.close()
@@ -7550,6 +7695,25 @@ class Handler(BaseHTTPRequestHandler):
                                   'is_active': active, 'created_at': created.isoformat() if created else None,
                                   'pushed_ok': ok_n, 'pushed_failed': fail_n})
                 self.send_json(200, {'connections': conns})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p == '/sending-domains':
+            if not self.require_admin(): return
+            try:
+                conn = db_conn(); cur = conn.cursor()
+                cur.execute("""
+                    SELECT d.id, d.domain, d.from_email, d.from_name, d.daily_cap, d.is_active, d.paused_reason,
+                           COUNT(o.id) FILTER (WHERE o.sent_at > NOW() - INTERVAL '24 hours') as sent_today,
+                           COUNT(o.id) FILTER (WHERE o.sent_at > NOW() - INTERVAL '7 days') as sent_7d,
+                           COUNT(o.id) FILTER (WHERE o.sent_at > NOW() - INTERVAL '7 days' AND o.status IN ('bounced','complained')) as bad_7d
+                    FROM sending_domains d LEFT JOIN outreach_log o ON o.sending_domain_id = d.id
+                    GROUP BY d.id ORDER BY d.id ASC
+                """)
+                rows = cur.fetchall(); cur.close(); conn.close()
+                domains = [dict(zip(['id','domain','from_email','from_name','daily_cap','is_active',
+                                     'paused_reason','sent_today','sent_7d','bad_7d'], r)) for r in rows]
+                self.send_json(200, {'domains': domains, 'automation_mode': CONFIG.get('outreach_automation_mode', 'off')})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
@@ -8080,6 +8244,46 @@ class Handler(BaseHTTPRequestHandler):
                 cid = p.split('/')[3]
                 conn = db_conn(); cur = conn.cursor()
                 cur.execute("DELETE FROM crm_connections WHERE id=%s", (cid,))
+                conn.commit(); cur.close(); conn.close()
+                self.send_json(200, {'success': True})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p == '/sending-domains/save':
+            if not self.require_admin(): return
+            try:
+                did = body.get('id')
+                domain = (body.get('domain') or '').strip().lower()
+                from_email = (body.get('from_email') or '').strip()
+                if not domain or not from_email:
+                    self.send_json(400, {'error': 'domain and from_email are required'}); return
+                if '@' not in from_email or from_email.rsplit('@', 1)[1] != domain:
+                    self.send_json(400, {'error': f'from_email must be an address at {domain}'}); return
+                from_name = (body.get('from_name') or 'Controva').strip()
+                daily_cap = max(1, int(body.get('daily_cap', 20) or 20))
+                is_active = bool(body.get('is_active', True))
+                conn = db_conn(); cur = conn.cursor()
+                if did:
+                    cur.execute("""UPDATE sending_domains SET domain=%s, from_email=%s, from_name=%s,
+                                   daily_cap=%s, is_active=%s, paused_reason=CASE WHEN %s THEN NULL ELSE paused_reason END
+                                   WHERE id=%s""",
+                                (domain, from_email, from_name, daily_cap, is_active, is_active, did))
+                else:
+                    cur.execute("""INSERT INTO sending_domains (domain, from_email, from_name, daily_cap, is_active)
+                                   VALUES (%s,%s,%s,%s,%s) RETURNING id""",
+                                (domain, from_email, from_name, daily_cap, is_active))
+                    did = cur.fetchone()[0]
+                conn.commit(); cur.close(); conn.close()
+                self.send_json(200, {'success': True, 'id': did})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p.startswith('/sending-domains/') and p.endswith('/delete'):
+            if not self.require_admin(): return
+            try:
+                did = p.split('/')[2]
+                conn = db_conn(); cur = conn.cursor()
+                cur.execute("DELETE FROM sending_domains WHERE id=%s", (did,))
                 conn.commit(); cur.close(); conn.close()
                 self.send_json(200, {'success': True})
             except Exception as e:
@@ -8643,6 +8847,7 @@ if __name__ == '__main__':
         ensure_scoring_columns()
         ensure_crm_tables()
         ensure_phase2_columns()
+        ensure_sending_domains_table()
         print('Schema migration: OK')
     except Exception as e:
         print(f'Schema migration warning (non-fatal): {e}')
@@ -8665,6 +8870,9 @@ if __name__ == '__main__':
     # M10: daily digest scheduler (checks hourly, fires once per day)
     t3 = threading.Thread(target=digest_scheduler_loop, daemon=True)
     t3.start()
+    # M11: outreach automation loop (no-op unless outreach_automation_mode == 'full_auto')
+    t4 = threading.Thread(target=outreach_automation_loop, daemon=True)
+    t4.start()
     server = ThreadingServer(('0.0.0.0', 8080), Handler)
     print('LeadGen v5 - Multi-Module Intelligence Platform')
     print('Modules: discover, enrich, score, assets, seo, competitor, ecommerce')
