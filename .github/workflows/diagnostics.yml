@@ -1,5 +1,5 @@
 name: VM Diagnostics
-# retry: root-cause deploy.yml's restart reliability gap (sudo hypothesis)
+# retry: investigate stuck ICP run (>5min, no completion)
 
 on:
   push:
@@ -20,6 +20,28 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
+            echo "### STUCK ICP RUN INVESTIGATION ###"
+            echo "--- when did leadgen-api last (re)start? (a restart mid-run would kill the in-memory job silently) ---"
+            systemctl show leadgen-api --property=ActiveEnterTimestamp --no-pager
+            echo "--- most recent icp_runs rows (status/timestamps/log) ---"
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
+              "SELECT id, icp_id, started_at, finished_at, status, leads_found, leads_new FROM icp_runs ORDER BY id DESC LIMIT 5;" 2>&1
+            echo "--- full log of the most recent run ---"
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -t -c \
+              "SELECT log FROM icp_runs ORDER BY id DESC LIMIT 1;" 2>&1
+            echo "--- the ICP profile that run belongs to ---"
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
+              "SELECT p.id, p.name, p.industries, p.geos FROM icp_profiles p ORDER BY p.id DESC LIMIT 3;" 2>&1
+            echo "--- is the process actually busy right now, or idle? (CPU%% over 1s sample) ---"
+            top -bn1 -o %CPU | head -15
+            echo "--- leadgen-api logs from the last 15 minutes (errors/exceptions/tracebacks) ---"
+            journalctl -u leadgen-api --since "15 minutes ago" --no-pager | grep -iE "error|exception|traceback|timeout|refused|reset" || echo "(no error-looking lines in the last 15 minutes)"
+            echo "--- full leadgen-api log tail (last 15 min, unfiltered) ---"
+            journalctl -u leadgen-api --since "15 minutes ago" --no-pager | tail -100
+            echo "--- is the API still responsive at all? ---"
+            curl -s --max-time 8 http://localhost:8080/health || echo "NOT RESPONDING"
+            echo
+
             echo "### ROOT CAUSE TEST: does deploy.yml's plain (non-sudo) systemctl restart actually work over SSH? ###"
             echo "--- ActiveEnterTimestamp BEFORE test ---"
             systemctl show leadgen-api --property=ActiveEnterTimestamp --no-pager
