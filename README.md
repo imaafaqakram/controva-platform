@@ -37,14 +37,15 @@ real Pipedrive/Calendly accounts.
 11. [Phase-2 Suite & White-Label (M10)](#phase-2-suite--white-label-m10)
 12. [Multi-Domain Sending & Outreach Automation (M11)](#multi-domain-sending--outreach-automation-m11)
 13. [Activity Log (M12)](#activity-log-m12)
-14. [Deployment & CI/CD](#deployment--cicd)
-15. [Configuration & API Keys](#configuration--api-keys)
-16. [Architecture](#architecture)
-17. [Database Schema](#database-schema)
-18. [Troubleshooting](#troubleshooting)
-19. [User Roles](#user-roles)
-20. [Security Checklist](#security-checklist)
-21. [Changelog](#changelog)
+14. [Workflow Builder & N8N (M13)](#workflow-builder--n8n-m13)
+15. [Deployment & CI/CD](#deployment--cicd)
+16. [Configuration & API Keys](#configuration--api-keys)
+17. [Architecture](#architecture)
+18. [Database Schema](#database-schema)
+19. [Troubleshooting](#troubleshooting)
+20. [User Roles](#user-roles)
+21. [Security Checklist](#security-checklist)
+22. [Changelog](#changelog)
 
 ---
 
@@ -444,6 +445,27 @@ show as `(system)` since no user triggered them.
 
 ---
 
+## Workflow Builder & N8N (M13)
+
+Two separate things, both under a new **Workflows** area — build your own automation pipeline
+inside Controva, and separately, see your existing n8n workflows without leaving the dashboard.
+
+| Capability | Configure | What happens |
+|---|---|---|
+| **Visual workflow builder** | Nav → **Workflows** → New Workflow | A drag-and-drop canvas (custom-built — no bundler in this app, so no third-party node-graph library) for wiring up a pipeline from six step types: **Search Leads**, **Enrich**, **AI Score**, **Filter by Score**, **Generate Email Copy**, **Send Email**. Drag from a node's right dot to another node's left dot to connect them; click a node to configure it; drag a node to reposition it. |
+| **Data actually flows node-to-node** | — | Each step only acts on the leads that flowed to it from the step(s) before it (a fresh `wf_*` handler per node type, scoped to that specific lead-id list) — not "every pending lead platform-wide," which is what naively reusing the existing bulk functions would have done. |
+| **Domain choice on Send Email** | Node config → Sending domain | Pick a specific verified sending domain for that node, or leave it on **Auto** to use the same M11 rotation-by-headroom logic as every other send. |
+| **Run** | Click **Run** on a saved workflow | Executes the graph in topological order (a DAG, not just a straight line — supports branching/fan-in). Manual trigger only for now; no schedule yet. |
+| **N8N Workflows panel** | Settings → API Keys → set N8N Instance URL + N8N API Key, then nav → **N8N Workflows** | Read-only list of your n8n instance's workflows (name, active/inactive) with a link to open each directly in n8n. N8N remains the engine — this doesn't create, edit, or run anything there, it's purely visibility from one place. |
+| **N8N search-webhook** | Settings → API Keys → N8N Webhook URL | The pre-existing (pre-M13) integration that fires after every completed lead search, sending results to n8n for Google Sheets/Drive logging. Previously only configurable via a server environment variable with no dashboard visibility at all — now a normal Settings field like everything else. |
+
+Not built (intentionally, to keep this a real, tested feature rather than a sprawling one):
+scroll-wheel zoom (button zoom in/out/reset only), scheduled/event-triggered workflow runs (manual
+only, matching what was asked for), and node types beyond the six above (no CRM push, delay, or
+reply-based branching node yet — natural fast-follows if needed).
+
+---
+
 ## Deployment & CI/CD
 
 ### Auto-deploy (GitHub Actions)
@@ -586,7 +608,8 @@ controva-platform/
     │   ├── 010_phase2.sql       ← M10: reply classification, meeting booking
     │   ├── 011_roles.sql        ← Role-based access — admin / client accounts
     │   ├── 012_sending_domains.sql ← M11: multi-domain sending + automation
-    │   └── 013_activity_log.sql ← M12: attribute api_usage rows to a user
+    │   ├── 013_activity_log.sql ← M12: attribute api_usage rows to a user
+    │   └── 014_workflows.sql ← M13: user-defined visual workflows
     ├── controva_api.py          ← Separate public REST API (port 8081, X-API-Key auth)
     ├── leadgen-api.service      ← Systemd unit
     └── setup.sh                 ← One-click installer
@@ -610,6 +633,7 @@ controva-platform/
 | `crm_connections` / `crm_push_log` *(M9)* | Configured CRM targets (Pipedrive / webhook) + per-lead push history and retry status |
 | `sending_domains` *(M11)* | Verified outbound sending identities — domain, from_email/name, daily_cap, is_active, paused_reason |
 | `api_usage` *(M5, username added M12)* | Every paid API call — provider, endpoint, cost, username (who triggered it — NULL for scheduler-initiated calls), created_at |
+| `workflows` / `workflow_runs` *(M13)* | Saved node graphs (JSONB: nodes + edges) for the visual workflow builder, and their run history (status, log, per-node result counts) |
 
 ### Key columns on `leads`
 
@@ -696,6 +720,14 @@ Before going to production:
 ---
 
 ## Changelog
+
+### v8.3 — September 2026 (M13)
+
+**New features**
+- **Visual Workflow Builder (M13)** — a custom drag-and-drop canvas (built from scratch; no bundler in this app, so no third-party node-graph library) for wiring up your own pipeline from six step types: Search Leads, Enrich, AI Score, Filter by Score, Generate Email Copy, Send Email (with a per-node sending-domain choice). Each step only processes the leads that actually flowed to it from earlier steps, not every pending lead platform-wide. Runs are manual-trigger only for now. See [Workflow Builder & N8N](#workflow-builder--n8n-m13).
+- **N8N Workflows panel** — read-only list of your n8n instance's workflows with a link to open each in n8n; n8n stays the engine.
+- **N8N Webhook URL now in Settings** — the pre-existing post-search → n8n webhook (Sheets/Drive logging) was only configurable via a server environment variable with zero dashboard visibility; it's now a normal API Keys field like everything else.
+- **`Plus` icon** — the "+"-style icon referenced by the ICP, CRM Connections, and Sending Domains "Add" buttons was never actually defined, so it silently rendered nothing on all three. Added.
 
 ### v8.2 — September 2026 (M12, ICP fixes)
 
