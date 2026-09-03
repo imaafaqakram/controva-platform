@@ -4463,7 +4463,16 @@ const ICPPage = ({ setPage }) => {
 
   useEffect(() => {
     if (!runJob) return;
+    const startedAt = Date.now();
     const t = setInterval(() => {
+      // Safety net: a missed poll (backgrounded browser tab throttling
+      // setInterval, or a server restart that dropped the in-memory job)
+      // shouldn't leave this showing "running" forever with no way out —
+      // the ICP list itself is the source of truth, so fall back to it.
+      if (Date.now() - startedAt > 3 * 60 * 1000) {
+        clearInterval(t); setRunJob(null); refresh();
+        return;
+      }
       api.get('/job-status?job_id=' + runJob.job_id).then(j => {
         setRunJob(j);
         if (j.status === 'completed' || j.status === 'failed') { clearInterval(t); refresh(); }
@@ -4508,7 +4517,12 @@ const ICPPage = ({ setPage }) => {
         <Card className="border-2 border-amber-300">
           <div className="flex items-center justify-between mb-2">
             <h3 className="font-semibold text-sm flex items-center gap-2"><Spinner /> ICP run in progress</h3>
-            <span className="text-xs text-slate-500">{runJob.progress || 0}%</span>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-slate-500">{runJob.progress || 0}%</span>
+              <Button size="sm" variant="ghost" icon="RefreshCw" onClick={() => { setRunJob(null); refresh(); }}>
+                Looks stuck? Refresh
+              </Button>
+            </div>
           </div>
           <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden mb-2">
             <div className="h-full bg-amber-400 rounded-full transition-all" style={{ width: (runJob.progress || 0) + '%' }}></div>
