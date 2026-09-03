@@ -1,5 +1,5 @@
 name: VM Diagnostics
-# retry: check latest ICP run results + Activity Log attribution
+# retry: investigate workflow_runs migration error ("column workflow_id does not exist")
 
 on:
   push:
@@ -20,6 +20,26 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
+            echo "### WORKFLOW_RUNS SCHEMA INVESTIGATION ###"
+            echo "--- does 'workflows' table exist, and what does it look like? ---"
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "\d workflows" 2>&1
+            echo "--- does 'workflow_runs' table exist, and what does it ACTUALLY look like? ---"
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "\d workflow_runs" 2>&1
+            echo "--- any rows in either table already? ---"
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "SELECT COUNT(*) FROM workflows;" 2>&1
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "SELECT COUNT(*) FROM workflow_runs;" 2>&1
+            echo "--- list ALL tables in this database (any n8n or other unexpected owner of this name?) ---"
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "\dt" 2>&1
+            echo "--- is there possibly a SECOND postgres/database that n8n uses — same container? ---"
+            docker ps --format '{{.Names}}\t{{.Image}}' 2>&1
+            echo "--- try the exact CREATE INDEX statement from the migration directly, capture full error ---"
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "CREATE INDEX IF NOT EXISTS idx_workflow_runs_wf ON workflow_runs(workflow_id);" 2>&1
+            echo "--- leadgen-api logs mentioning workflow (did ensure_workflow_tables() run at startup, and what happened) ---"
+            journalctl -u leadgen-api --since "20 minutes ago" --no-pager | grep -i workflow || echo "(no workflow-related log lines)"
+            echo "--- is the /workflows API actually working right now despite the migration error? ---"
+            curl -s http://localhost:8080/health || true
+            echo
+
             echo "### LATEST ICP RUN + ACTIVITY LOG ATTRIBUTION CHECK ###"
             echo "--- most recent icp_runs rows (status/timestamps/counts) ---"
             docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
