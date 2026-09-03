@@ -43,9 +43,14 @@ HERE_API_KEY   = os.environ.get('HERE_API_KEY', '')  # Free 250k/mo: developer.h
 # service. Auto-generated into config.json on first start.
 SERVICE_TOKEN  = os.environ.get('SERVICE_TOKEN', '')
 
-# ── N8N Webhook Integration ──────────────────────────────────────
-# Fires after every completed search → sends leads to Google Sheets & Drive via N8N
+# ── N8N Integration ───────────────────────────────────────────────
+# N8N_WEBHOOK_URL: fires after every completed search → sends leads to
+# Google Sheets & Drive via N8N. N8N_URL/N8N_API_KEY: read-only proxy so
+# the dashboard's n8n panel can list your n8n workflows (n8n itself stays
+# the engine — this doesn't create/run/edit anything there).
 N8N_WEBHOOK_URL = os.environ.get('N8N_WEBHOOK_URL', '')
+N8N_URL         = os.environ.get('N8N_URL', '')
+N8N_API_KEY     = os.environ.get('N8N_API_KEY', '')
 
 # ── Scraping Alternatives (all have free monthly tiers) ──────────
 SCRAPINGBEE_KEY = os.environ.get('SCRAPINGBEE_KEY', '')   # 1,000 free req/mo — scrapingbee.com
@@ -138,7 +143,7 @@ CONFIG_FILE = os.path.join(LEADGEN_HOME, 'config.json')
 
 def load_config():
     """Load config from disk, fall back to defaults."""
-    global GOOGLE_API_KEY, SERPER_KEY, GEMINI_KEY, CLAUDE_KEY, REPLICATE_TOKEN, IMAGINE_ART_KEY, OXYLABS_KEY, RESEND_KEY, FROM_EMAIL, FROM_NAME, HERE_API_KEY, SCRAPINGBEE_KEY, ZENROWS_KEY, SCRAPINGDOG_KEY, FIRECRAWL_KEY, EBAY_CLIENT_ID, EBAY_CLIENT_SECRET, REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, FREELANCER_API_KEY, MILLIONVERIFIER_KEY, PUBLIC_BASE_URL, COMPANY_NAME, COMPANY_ADDRESS, RESEND_WEBHOOK_SECRET, IMAP_HOST, IMAP_USER, IMAP_PASS
+    global GOOGLE_API_KEY, SERPER_KEY, GEMINI_KEY, CLAUDE_KEY, REPLICATE_TOKEN, IMAGINE_ART_KEY, OXYLABS_KEY, RESEND_KEY, FROM_EMAIL, FROM_NAME, HERE_API_KEY, SCRAPINGBEE_KEY, ZENROWS_KEY, SCRAPINGDOG_KEY, FIRECRAWL_KEY, EBAY_CLIENT_ID, EBAY_CLIENT_SECRET, REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, FREELANCER_API_KEY, MILLIONVERIFIER_KEY, PUBLIC_BASE_URL, COMPANY_NAME, COMPANY_ADDRESS, RESEND_WEBHOOK_SECRET, IMAP_HOST, IMAP_USER, IMAP_PASS, N8N_WEBHOOK_URL, N8N_URL, N8N_API_KEY
     try:
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, 'r') as f:
@@ -174,6 +179,9 @@ def load_config():
                 'imap_host':           'IMAP_HOST',
                 'imap_user':           'IMAP_USER',
                 'imap_pass':           'IMAP_PASS',
+                'n8n_webhook_url':     'N8N_WEBHOOK_URL',
+                'n8n_url':             'N8N_URL',
+                'n8n_api_key':         'N8N_API_KEY',
             }
             for key, var_name in keys_map.items():
                 if key in saved and saved[key]:
@@ -219,6 +227,9 @@ def save_config():
             'imap_host':            IMAP_HOST,
             'imap_user':            IMAP_USER,
             'imap_pass':            IMAP_PASS,
+            'n8n_webhook_url':      N8N_WEBHOOK_URL,
+            'n8n_url':              N8N_URL,
+            'n8n_api_key':          N8N_API_KEY,
             'config':          CONFIG,
         }
         with open(CONFIG_FILE, 'w') as f:
@@ -236,11 +247,12 @@ API_KEY_NAMES = ['google_api_key', 'serper_key', 'gemini_key', 'claude_key',
                  'reddit_client_id', 'reddit_client_secret', 'freelancer_api_key',
                  'millionverifier_key',
                  'public_base_url', 'company_name', 'company_address',
-                 'resend_webhook_secret', 'imap_host', 'imap_user', 'imap_pass']
+                 'resend_webhook_secret', 'imap_host', 'imap_user', 'imap_pass',
+                 'n8n_webhook_url', 'n8n_url', 'n8n_api_key']
 
 def update_api_key(name, value):
     """Update an API key and save."""
-    global GOOGLE_API_KEY, SERPER_KEY, GEMINI_KEY, CLAUDE_KEY, REPLICATE_TOKEN, IMAGINE_ART_KEY, OXYLABS_KEY, RESEND_KEY, FROM_EMAIL, FROM_NAME, HERE_API_KEY, SCRAPINGBEE_KEY, ZENROWS_KEY, SCRAPINGDOG_KEY, FIRECRAWL_KEY, EBAY_CLIENT_ID, EBAY_CLIENT_SECRET, REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, FREELANCER_API_KEY, MILLIONVERIFIER_KEY, PUBLIC_BASE_URL, COMPANY_NAME, COMPANY_ADDRESS, RESEND_WEBHOOK_SECRET, IMAP_HOST, IMAP_USER, IMAP_PASS
+    global GOOGLE_API_KEY, SERPER_KEY, GEMINI_KEY, CLAUDE_KEY, REPLICATE_TOKEN, IMAGINE_ART_KEY, OXYLABS_KEY, RESEND_KEY, FROM_EMAIL, FROM_NAME, HERE_API_KEY, SCRAPINGBEE_KEY, ZENROWS_KEY, SCRAPINGDOG_KEY, FIRECRAWL_KEY, EBAY_CLIENT_ID, EBAY_CLIENT_SECRET, REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, FREELANCER_API_KEY, MILLIONVERIFIER_KEY, PUBLIC_BASE_URL, COMPANY_NAME, COMPANY_ADDRESS, RESEND_WEBHOOK_SECRET, IMAP_HOST, IMAP_USER, IMAP_PASS, N8N_WEBHOOK_URL, N8N_URL, N8N_API_KEY
     name_lower = name.lower()
     if name_lower not in API_KEY_NAMES: return False
     var_name = name_lower.upper()
@@ -255,7 +267,7 @@ def update_api_keys_bulk(pairs):
     Unrecognized names are reported back, not silently dropped. Saves once
     at the end regardless of how many keys were updated.
     Returns (updated_names, skipped_names)."""
-    global GOOGLE_API_KEY, SERPER_KEY, GEMINI_KEY, CLAUDE_KEY, REPLICATE_TOKEN, IMAGINE_ART_KEY, OXYLABS_KEY, RESEND_KEY, FROM_EMAIL, FROM_NAME, HERE_API_KEY, SCRAPINGBEE_KEY, ZENROWS_KEY, SCRAPINGDOG_KEY, FIRECRAWL_KEY, EBAY_CLIENT_ID, EBAY_CLIENT_SECRET, REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, FREELANCER_API_KEY, MILLIONVERIFIER_KEY, PUBLIC_BASE_URL, COMPANY_NAME, COMPANY_ADDRESS, RESEND_WEBHOOK_SECRET, IMAP_HOST, IMAP_USER, IMAP_PASS
+    global GOOGLE_API_KEY, SERPER_KEY, GEMINI_KEY, CLAUDE_KEY, REPLICATE_TOKEN, IMAGINE_ART_KEY, OXYLABS_KEY, RESEND_KEY, FROM_EMAIL, FROM_NAME, HERE_API_KEY, SCRAPINGBEE_KEY, ZENROWS_KEY, SCRAPINGDOG_KEY, FIRECRAWL_KEY, EBAY_CLIENT_ID, EBAY_CLIENT_SECRET, REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, FREELANCER_API_KEY, MILLIONVERIFIER_KEY, PUBLIC_BASE_URL, COMPANY_NAME, COMPANY_ADDRESS, RESEND_WEBHOOK_SECRET, IMAP_HOST, IMAP_USER, IMAP_PASS, N8N_WEBHOOK_URL, N8N_URL, N8N_API_KEY
     updated, skipped = [], []
     for name, value in (pairs or {}).items():
         name_lower = (name or '').strip().lower()
@@ -307,6 +319,9 @@ def get_api_keys_masked():
         'imap_host':            {'set': bool(IMAP_HOST), 'preview': IMAP_HOST},
         'imap_user':            {'set': bool(IMAP_USER), 'preview': IMAP_USER},
         'imap_pass':            mask(IMAP_PASS),
+        'n8n_webhook_url':      {'set': bool(N8N_WEBHOOK_URL), 'preview': N8N_WEBHOOK_URL},
+        'n8n_url':              {'set': bool(N8N_URL), 'preview': N8N_URL},
+        'n8n_api_key':          mask(N8N_API_KEY),
     }
 
 # Load saved config at startup
@@ -7235,8 +7250,12 @@ def outreach_automation_loop():
         except Exception as e:
             print(f'[outreach-automation] loop error: {e}')
 
-def send_lead_email(lead_id):
-    """Send the prepared email for a specific lead."""
+def send_lead_email(lead_id, forced_domain_id=None):
+    """Send the prepared email for a specific lead. forced_domain_id (M13:
+    workflow builder's Send Email node) pins a specific sending_domains row
+    instead of letting pick_sending_domain() auto-rotate — an explicit
+    per-workflow choice, so it's honored as-is (blocked only if that exact
+    domain is gone or paused) rather than silently falling back to another."""
     conn = db_conn(); cur = conn.cursor()
     cur.execute("""
         SELECT l.id, l.business_name, l.niche, l.city,
@@ -7286,12 +7305,23 @@ def send_lead_email(lead_id):
     body_html = f"""<html><body style="font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: 15px; line-height: 1.6; color: #333; max-width: 600px; padding: 16px;">{body_html}</body></html>"""
 
     unsub_token = get_or_create_unsub_token(lead_id)
-    # M11: rotate across configured sending domains when any are set up;
-    # falls back to the single global FROM_EMAIL/FROM_NAME otherwise.
-    sd = pick_sending_domain()
-    if not sd and has_sending_domains_configured():
-        return {"success": False, "error": "Blocked: all sending domains are paused or at their "
-                                           "daily cap — check Settings → Sending Domains"}
+    if forced_domain_id:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("SELECT id, domain, from_email, from_name, is_active FROM sending_domains WHERE id=%s",
+                    (forced_domain_id,))
+        drow = cur.fetchone(); cur.close(); conn.close()
+        if not drow:
+            return {"success": False, "error": "The sending domain selected for this step no longer exists"}
+        if not drow[4]:
+            return {"success": False, "error": f"Sending domain {drow[1]} is paused — pick another or resume it in Settings"}
+        sd = {'id': drow[0], 'domain': drow[1], 'from_email': drow[2], 'from_name': drow[3]}
+    else:
+        # M11: rotate across configured sending domains when any are set up;
+        # falls back to the single global FROM_EMAIL/FROM_NAME otherwise.
+        sd = pick_sending_domain()
+        if not sd and has_sending_domains_configured():
+            return {"success": False, "error": "Blocked: all sending domains are paused or at their "
+                                               "daily cap — check Settings → Sending Domains"}
     result = send_email_via_resend(email, subj, body, body_html,
                                    from_email=sd['from_email'] if sd else None,
                                    from_name=sd['from_name'] if sd else None,
@@ -7309,6 +7339,250 @@ def send_lead_email(lead_id):
         conn.commit()
         cur.close(); conn.close()
     return result
+
+# ──────────────────────────────────────────────────────────────
+#  M13: WORKFLOW BUILDER — user-defined pipelines (search -> enrich ->
+#  score -> generate assets -> send email), executed as a DAG. Each node
+#  type is a thin wrapper around functions that already exist elsewhere
+#  in this file, scoped to a specific list of lead ids instead of "all
+#  pending leads" so data genuinely flows node-to-node like the canvas
+#  implies, rather than a node picking up unrelated leads platform-wide.
+# ──────────────────────────────────────────────────────────────
+def ensure_workflow_tables():
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS workflows (
+            id SERIAL PRIMARY KEY,
+            name VARCHAR(200) NOT NULL,
+            graph JSONB NOT NULL DEFAULT '{"nodes": [], "edges": []}',
+            is_active BOOLEAN NOT NULL DEFAULT TRUE,
+            created_by VARCHAR(80),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )""")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS workflow_runs (
+            id SERIAL PRIMARY KEY,
+            workflow_id INTEGER NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+            started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            finished_at TIMESTAMPTZ,
+            status VARCHAR(20) NOT NULL DEFAULT 'running',
+            log TEXT,
+            node_results JSONB
+        )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_workflow_runs_wf ON workflow_runs(workflow_id)")
+    conn.commit(); cur.close(); conn.close()
+
+def wf_search(config, input_ids, log_fn):
+    """Search node — ignores input_ids (it's a source node); returns the ids
+    of leads genuinely newly discovered by this call (before/after max-id
+    diff — same best-effort approach the ICP engine already uses)."""
+    niche = (config.get('niche') or '').strip()
+    city = (config.get('city') or '').strip()
+    if not niche or not city:
+        log_fn('  Search node needs both a niche and a city — skipped')
+        return []
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("SELECT COALESCE(MAX(id),0) FROM leads")
+    before_max = cur.fetchone()[0]
+    cur.close(); conn.close()
+    discover_leads_smart(niche=niche, city=city, country=(config.get('country') or '').strip(),
+                         original_query=niche, filter_mode=config.get('filter_mode', 'all'),
+                         density=config.get('density', 'standard'), find_more=False, job_id=None)
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("SELECT id FROM leads WHERE id > %s ORDER BY id ASC", (before_max,))
+    new_ids = [r[0] for r in cur.fetchall()]
+    cur.close(); conn.close()
+    log_fn(f'  found {len(new_ids)} new lead(s)')
+    return new_ids
+
+def wf_enrich(config, input_ids, log_fn):
+    if not input_ids: return []
+    strategy = config.get('strategy') or CONFIG.get('enrichment_strategy', 'serper_then_oxylabs')
+    providers = {'serper_only': ['serper'], 'oxylabs_only': ['oxylabs'],
+                 'serper_then_oxylabs': ['serper', 'oxylabs'],
+                 'free_only': ['serper', 'permutator']}.get(strategy, ['serper'])
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("""SELECT id, business_name, city, phone, niche, COALESCE(website,'')
+                   FROM leads WHERE id = ANY(%s)""", (input_ids,))
+    leads = cur.fetchall(); cur.close(); conn.close()
+    for lead_id, bname, city, phone, niche, website in leads:
+        try:
+            save_enrichment(enrich_lead(str(lead_id), bname, city, phone, niche, providers, website=website))
+        except Exception as e:
+            log_fn(f'  enrich failed for lead {lead_id}: {str(e)[:100]}')
+    log_fn(f'  enriched {len(leads)} lead(s)')
+    return input_ids
+
+def wf_score(config, input_ids, log_fn):
+    if not input_ids: return []
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("""SELECT l.id, l.business_name, l.niche, l.city, l.phone, c.email, c.linkedin_url
+                   FROM leads l LEFT JOIN contacts c ON c.lead_id = l.id
+                   WHERE l.id = ANY(%s) AND l.ai_score IS NULL""", (input_ids,))
+    leads = cur.fetchall()
+    for lead_id, bname, niche, city, phone, email, linkedin in leads:
+        try:
+            s = gemini_score(bname, niche, city, phone, bool(email), bool(linkedin))
+            cur.execute("UPDATE leads SET ai_score=%s, score_reason=%s WHERE id=%s",
+                       (int(s.get('score', 5)), str(s.get('reason', ''))[:500], lead_id))
+            conn.commit()
+        except Exception as e:
+            log_fn(f'  score failed for lead {lead_id}: {str(e)[:100]}')
+    cur.close(); conn.close()
+    log_fn(f'  scored {len(leads)} lead(s)')
+    return input_ids
+
+def wf_filter_score(config, input_ids, log_fn):
+    """Keeps only leads at/above min_score (0-10 scale, matches ai_score)
+    — lets a workflow branch/prune instead of every node seeing every lead."""
+    if not input_ids: return []
+    min_score = int(config.get('min_score', 6))
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("SELECT id FROM leads WHERE id = ANY(%s) AND COALESCE(ai_score, 0) >= %s",
+                (input_ids, min_score))
+    kept = [r[0] for r in cur.fetchall()]
+    cur.close(); conn.close()
+    log_fn(f'  kept {len(kept)}/{len(input_ids)} leads scoring >= {min_score}')
+    return kept
+
+def wf_generate_assets(config, input_ids, log_fn):
+    if not input_ids: return []
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("""SELECT l.id, l.business_name, l.niche, l.city, c.full_name FROM leads l
+                   LEFT JOIN contacts c ON c.lead_id = l.id
+                   WHERE l.id = ANY(%s)
+                     AND NOT EXISTS (SELECT 1 FROM assets WHERE lead_id=l.id AND asset_type='email_body')""",
+                (input_ids,))
+    leads = cur.fetchall(); made = 0
+    for lead_id, bname, niche, city, owner in leads:
+        try:
+            email = generate_email_copy(bname, niche, city, owner, research=get_lead_research(lead_id))
+            if email:
+                cur.execute("INSERT INTO assets(lead_id,asset_type,content,model_used) VALUES(%s,'email_subject',%s,'claude')",
+                           (lead_id, email.get('subject', '')))
+                cur.execute("INSERT INTO assets(lead_id,asset_type,content,model_used) VALUES(%s,'email_body',%s,'claude')",
+                           (lead_id, email.get('body', '')))
+                cur.execute("UPDATE leads SET status='ready' WHERE id=%s", (lead_id,))
+                conn.commit(); made += 1
+        except Exception as e:
+            log_fn(f'  asset generation failed for lead {lead_id}: {str(e)[:100]}')
+    cur.close(); conn.close()
+    log_fn(f'  generated copy for {made}/{len(leads)} lead(s) needing it')
+    return input_ids
+
+def wf_send_email(config, input_ids, log_fn):
+    if not input_ids: return []
+    domain_id = config.get('domain_id') or None
+    sent = 0
+    for lead_id in input_ids:
+        try:
+            r = send_lead_email(lead_id, forced_domain_id=domain_id)
+            if r.get('success'): sent += 1
+            else: log_fn(f'  lead {lead_id}: {r.get("error")}')
+        except Exception as e:
+            log_fn(f'  lead {lead_id} send error: {str(e)[:100]}')
+    log_fn(f'  sent {sent}/{len(input_ids)}')
+    return input_ids
+
+WORKFLOW_NODE_HANDLERS = {
+    'search': wf_search, 'enrich': wf_enrich, 'score': wf_score,
+    'filter_score': wf_filter_score, 'generate_assets': wf_generate_assets,
+    'send_email': wf_send_email,
+}
+
+def run_workflow_bg(job_id, workflow_id):
+    """Executes a saved workflow's node graph in topological order (Kahn's
+    algorithm), threading each node's output lead ids into every node it
+    connects to. A cycle just means the cyclic nodes never reach in-degree
+    zero — they're reported and skipped rather than hanging the run."""
+    log_lines = []
+    def log(msg):
+        log_lines.append(str(msg))
+        if job_id in JOBS:
+            JOBS[job_id]['log'] = (JOBS[job_id]['log'][-40:] + [str(msg)])
+    run_row_id = None
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("SELECT name, graph FROM workflows WHERE id=%s", (workflow_id,))
+        row = cur.fetchone()
+        if not row:
+            if job_id in JOBS:
+                JOBS[job_id]['status'] = 'failed'; JOBS[job_id]['error'] = 'Workflow not found'
+            cur.close(); conn.close()
+            return
+        name, graph = row
+        cur.execute("INSERT INTO workflow_runs (workflow_id) VALUES (%s) RETURNING id", (workflow_id,))
+        run_row_id = cur.fetchone()[0]
+        conn.commit(); cur.close(); conn.close()
+
+        nodes = {n['id']: n for n in (graph or {}).get('nodes', [])}
+        edges = [e for e in (graph or {}).get('edges', []) if e.get('source') in nodes and e.get('target') in nodes]
+        preds = {nid: [] for nid in nodes}
+        succs = {nid: [] for nid in nodes}
+        for e in edges:
+            succs[e['source']].append(e['target'])
+            preds[e['target']].append(e['source'])
+
+        indeg = {nid: len(preds[nid]) for nid in nodes}
+        queue = [nid for nid in nodes if indeg[nid] == 0]
+        order = []
+        indeg_copy = dict(indeg)
+        while queue:
+            nid = queue.pop(0)
+            order.append(nid)
+            for s in succs[nid]:
+                indeg_copy[s] -= 1
+                if indeg_copy[s] == 0:
+                    queue.append(s)
+        if len(order) != len(nodes):
+            log(f'Warning: {len(nodes) - len(order)} node(s) are part of a cycle and were skipped')
+
+        log(f'Workflow "{name}": {len(order)} step(s)')
+        outputs = {}
+        total_steps = max(len(order), 1)
+        for i, nid in enumerate(order):
+            node = nodes[nid]
+            ntype = node.get('type')
+            config = node.get('config') or {}
+            input_ids = []
+            for p in preds[nid]:
+                input_ids.extend(outputs.get(p, []))
+            input_ids = list(dict.fromkeys(input_ids))
+            log(f'[{i+1}/{total_steps}] {node.get("label") or ntype}')
+            handler = WORKFLOW_NODE_HANDLERS.get(ntype)
+            if not handler:
+                log(f'  unknown node type "{ntype}" — skipped')
+                outputs[nid] = input_ids
+            else:
+                try:
+                    outputs[nid] = handler(config, input_ids, log) or []
+                except Exception as e:
+                    log(f'  ERROR: {str(e)[:200]}')
+                    outputs[nid] = []
+            if job_id in JOBS:
+                JOBS[job_id]['progress'] = min(int((i + 1) / total_steps * 100), 95)
+
+        result_counts = {nid: len(v) for nid, v in outputs.items()}
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("UPDATE workflow_runs SET finished_at=NOW(), status='completed', log=%s, node_results=%s WHERE id=%s",
+                    ('\n'.join(log_lines[-200:]), json.dumps(result_counts), run_row_id))
+        conn.commit(); cur.close(); conn.close()
+        if job_id in JOBS:
+            JOBS[job_id]['status'] = 'completed'; JOBS[job_id]['progress'] = 100
+            JOBS[job_id]['results'] = result_counts
+        log('Workflow completed')
+    except Exception as e:
+        try:
+            if run_row_id:
+                conn = db_conn(); cur = conn.cursor()
+                cur.execute("UPDATE workflow_runs SET finished_at=NOW(), status='failed', log=%s WHERE id=%s",
+                            ('\n'.join(log_lines[-200:]) + f'\nFATAL: {e}', run_row_id))
+                conn.commit(); cur.close(); conn.close()
+        except Exception:
+            pass
+        if job_id in JOBS:
+            JOBS[job_id]['status'] = 'failed'; JOBS[job_id]['error'] = str(e)
 
 def approve_lead(lead_id):
     conn = db_conn(); cur = conn.cursor()
@@ -7839,6 +8113,39 @@ class Handler(BaseHTTPRequestHandler):
                 })
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
+
+        elif p == '/workflows':
+            try:
+                conn = db_conn(); cur = conn.cursor()
+                cur.execute("""SELECT w.id, w.name, w.graph, w.is_active, w.created_by,
+                                      to_char(w.updated_at,'YYYY-MM-DD HH24:MI'),
+                                      (SELECT status FROM workflow_runs WHERE workflow_id=w.id ORDER BY id DESC LIMIT 1),
+                                      to_char((SELECT started_at FROM workflow_runs WHERE workflow_id=w.id ORDER BY id DESC LIMIT 1),'YYYY-MM-DD HH24:MI')
+                               FROM workflows w ORDER BY w.id DESC""")
+                rows = cur.fetchall(); cur.close(); conn.close()
+                self.send_json(200, {'workflows': [dict(zip(
+                    ['id','name','graph','is_active','created_by','updated_at','last_run_status','last_run_at'], r
+                )) for r in rows]})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p == '/n8n/workflows':
+            if not self.require_admin(): return
+            try:
+                if not N8N_URL or not N8N_API_KEY:
+                    self.send_json(200, {'workflows': [], 'configured': False}); return
+                req = urllib.request.Request(
+                    N8N_URL.rstrip('/') + '/api/v1/workflows',
+                    headers={'X-N8N-API-KEY': N8N_API_KEY, 'Accept': 'application/json'}
+                )
+                resp = urllib.request.urlopen(req, timeout=10)
+                data = json.loads(resp.read().decode())
+                items = data.get('data', data) if isinstance(data, dict) else data
+                workflows = [{'id': w.get('id'), 'name': w.get('name'), 'active': bool(w.get('active')),
+                             'updated_at': w.get('updatedAt')} for w in (items or [])]
+                self.send_json(200, {'workflows': workflows, 'configured': True, 'n8n_url': N8N_URL})
+            except Exception as e:
+                self.send_json(200, {'workflows': [], 'configured': True, 'error': str(e)})
 
         elif p == '/cost-stats':
             try:
@@ -8450,6 +8757,46 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
+        elif p == '/workflows/save':
+            try:
+                wid = body.get('id')
+                name = (body.get('name') or '').strip() or 'Untitled workflow'
+                graph = body.get('graph') or {'nodes': [], 'edges': []}
+                conn = db_conn(); cur = conn.cursor()
+                if wid:
+                    cur.execute("UPDATE workflows SET name=%s, graph=%s, updated_at=NOW() WHERE id=%s",
+                                (name, json.dumps(graph), wid))
+                else:
+                    cur.execute("INSERT INTO workflows (name, graph, created_by) VALUES (%s,%s,%s) RETURNING id",
+                                (name, json.dumps(graph), get_current_user()))
+                    wid = cur.fetchone()[0]
+                conn.commit(); cur.close(); conn.close()
+                self.send_json(200, {'success': True, 'id': wid})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p.startswith('/workflows/') and p.endswith('/delete'):
+            try:
+                wid = p.split('/')[2]
+                conn = db_conn(); cur = conn.cursor()
+                cur.execute("DELETE FROM workflows WHERE id=%s", (wid,))
+                conn.commit(); cur.close(); conn.close()
+                self.send_json(200, {'success': True})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p == '/workflows/run':
+            try:
+                wid = body.get('id')
+                if not wid:
+                    self.send_json(400, {'error': 'id required'}); return
+                job_id = f'job_{int(time.time() * 1000)}'
+                JOBS[job_id] = {'status': 'running', 'progress': 0, 'log': ['Starting workflow…'], 'step': 'Workflow'}
+                _bg_thread(run_workflow_bg, job_id, wid)
+                self.send_json(200, {'job_id': job_id, 'status': 'started'})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
         elif p == '/sequence/enroll':
             try:
                 lead_ids = body.get('lead_ids') or ([body['lead_id']] if body.get('lead_id') else [])
@@ -8942,6 +9289,7 @@ if __name__ == '__main__':
         ensure_crm_tables()
         ensure_phase2_columns()
         ensure_sending_domains_table()
+        ensure_workflow_tables()
         print('Schema migration: OK')
     except Exception as e:
         print(f'Schema migration warning (non-fatal): {e}')

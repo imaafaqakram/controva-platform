@@ -189,6 +189,7 @@ const ICONS = {
   Play:          'M5 3l14 9-14 9z',
   Star:          'M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01z',
   UserPlus:      'M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2M8.5 11a4 4 0 100-8 4 4 0 000 8zM20 8v6M23 11h-6',
+  Plus:          'M12 5v14M5 12h14',
   Settings2:     'M20 7h-9M14 17H5M17 14a3 3 0 100 6 3 3 0 000-6zM7 4a3 3 0 100 6 3 3 0 000-6z',
   Send:          'M22 2L11 13M22 2L15 22L11 13M22 2L2 9L11 13',
   Inbox:         'M22 12h-6l-2 3h-4l-2-3H2M5.45 5.11L2 12v6a2 2 0 002 2h16a2 2 0 002-2v-6l-3.45-6.89A2 2 0 0016.76 4H7.24a2 2 0 00-1.79 1.11z',
@@ -3413,6 +3414,9 @@ const ApiKeyEditor = () => {
     imap_host:            'IMAP Host (reply detection, e.g. imap.gmail.com)',
     imap_user:            'IMAP Username (your reply mailbox)',
     imap_pass:            'IMAP Password (app password)',
+    n8n_webhook_url:      'N8N Webhook URL (fires after every search — Sheets/Drive logging)',
+    n8n_url:              'N8N Instance URL (e.g. https://n8n.yourdomain.com)',
+    n8n_api_key:          'N8N API Key (n8n Settings → API → create a key)',
   };
 
   return (
@@ -4762,6 +4766,418 @@ const ICPPage = ({ setPage }) => {
 };
 
 // ─────────────────────────────────────────────────
+//  Workflow Builder (M13) - visual pipeline: search -> enrich -> score ->
+//  generate assets -> send email. Custom SVG + mouse-drag canvas (no
+//  bundler in this app, so no React Flow / node-graph library available).
+// ─────────────────────────────────────────────────
+const WF_NODE_W = 170, WF_NODE_H = 64;
+
+const WF_NODE_TYPES = {
+  search:          { label: 'Search Leads',      icon: 'Search',     fields: [
+    { key: 'niche', label: 'Niche / business type', type: 'text', placeholder: 'dental clinics' },
+    { key: 'city', label: 'City', type: 'text', placeholder: 'Dubai' },
+    { key: 'country', label: 'Country code (optional)', type: 'text', placeholder: 'AE' },
+    { key: 'filter_mode', label: 'Website filter', type: 'select', options: [['all', 'All'], ['no_website', 'No website'], ['with_website', 'Has website']] },
+    { key: 'density', label: 'Density', type: 'select', options: [['standard', 'Standard'], ['low', 'Low'], ['high', 'High']] },
+  ] },
+  enrich:          { label: 'Enrich',             icon: 'Zap',        fields: [
+    { key: 'strategy', label: 'Strategy', type: 'select', options: [['serper_then_oxylabs', 'Smart (Serper → Oxylabs)'], ['serper_only', 'Serper only'], ['oxylabs_only', 'Oxylabs only'], ['free_only', '100% free']] },
+  ] },
+  score:           { label: 'AI Score',           icon: 'Star',       fields: [] },
+  filter_score:    { label: 'Filter by Score',    icon: 'ListFilter', fields: [
+    { key: 'min_score', label: 'Minimum score (0-10)', type: 'number', placeholder: '6' },
+  ] },
+  generate_assets: { label: 'Generate Email Copy', icon: 'Edit3',     fields: [] },
+  send_email:      { label: 'Send Email',         icon: 'Send',       fields: [
+    { key: 'domain_id', label: 'Sending domain', type: 'domain_select' },
+  ] },
+};
+
+const wfNodeSummary = (node) => {
+  if (node.type === 'search') return [node.config.niche, node.config.city].filter(Boolean).join(' · ') || 'not configured';
+  if (node.type === 'enrich') return (WF_NODE_TYPES.enrich.fields[0].options.find(o => o[0] === (node.config.strategy || 'serper_then_oxylabs')) || [, 'Smart'])[1];
+  if (node.type === 'filter_score') return `score ≥ ${node.config.min_score ?? 6}`;
+  if (node.type === 'send_email') return node.config.domain_id ? `domain #${node.config.domain_id}` : 'auto-rotate domain';
+  return '';
+};
+
+const WorkflowCanvasEditor = ({ workflow, onClose, onSaved }) => {
+  const [name, setName] = useState(workflow.name || 'Untitled workflow');
+  const [nodes, setNodes] = useState((workflow.graph && workflow.graph.nodes) || []);
+  const [edges, setEdges] = useState((workflow.graph && workflow.graph.edges) || []);
+  const [selectedNodeId, setSelectedNodeId] = useState(null);
+  const [selectedEdgeId, setSelectedEdgeId] = useState(null);
+  const [editingNodeId, setEditingNodeId] = useState(null);
+  const [connecting, setConnecting] = useState(null);
+  const [pan, setPan] = useState({ x: 40, y: 40 });
+  const [zoom, setZoom] = useState(1);
+  const [domains, setDomains] = useState([]);
+  const [saving, setSaving] = useState(false);
+  const canvasRef = useRef(null);
+  const { showToast } = useToast();
+
+  useEffect(() => { api.get('/sending-domains').then(d => setDomains(d.domains || [])).catch(() => {}); }, []);
+
+  const toCanvasPoint = (clientX, clientY) => {
+    const rect = canvasRef.current.getBoundingClientRect();
+    return { x: (clientX - rect.left - pan.x) / zoom, y: (clientY - rect.top - pan.y) / zoom };
+  };
+
+  const addNode = (type) => {
+    const id = 'n' + Date.now() + Math.floor(Math.random() * 1000);
+    const count = nodes.length;
+    setNodes(ns => [...ns, { id, type, x: 40 + (count % 4) * 200, y: 40 + Math.floor(count / 4) * 140, config: {} }]);
+  };
+
+  const deleteSelected = () => {
+    if (selectedNodeId) {
+      setNodes(ns => ns.filter(n => n.id !== selectedNodeId));
+      setEdges(es => es.filter(e => e.source !== selectedNodeId && e.target !== selectedNodeId));
+      setSelectedNodeId(null);
+    } else if (selectedEdgeId) {
+      setEdges(es => es.filter(e => e.id !== selectedEdgeId));
+      setSelectedEdgeId(null);
+    }
+  };
+
+  const onNodeMouseDown = (e, nodeId) => {
+    e.stopPropagation();
+    const node = nodes.find(n => n.id === nodeId);
+    const startX = e.clientX, startY = e.clientY;
+    const origX = node.x, origY = node.y;
+    let moved = false;
+    const onMove = (ev) => {
+      if (Math.abs(ev.clientX - startX) > 4 || Math.abs(ev.clientY - startY) > 4) moved = true;
+      const dx = (ev.clientX - startX) / zoom, dy = (ev.clientY - startY) / zoom;
+      setNodes(ns => ns.map(n => n.id === nodeId ? { ...n, x: origX + dx, y: origY + dy } : n));
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      setSelectedNodeId(nodeId); setSelectedEdgeId(null);
+      if (!moved) setEditingNodeId(nodeId);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
+  const onOutputMouseDown = (e, nodeId) => {
+    e.stopPropagation();
+    const start = toCanvasPoint(e.clientX, e.clientY);
+    setConnecting({ sourceId: nodeId, x: start.x, y: start.y });
+    const onMove = (ev) => {
+      const p = toCanvasPoint(ev.clientX, ev.clientY);
+      setConnecting(c => c ? { ...c, x: p.x, y: p.y } : null);
+    };
+    const onUp = (ev) => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      const el = document.elementFromPoint(ev.clientX, ev.clientY);
+      const handle = el && el.closest('[data-input-handle]');
+      const targetId = handle ? handle.getAttribute('data-input-handle') : null;
+      if (targetId && targetId !== nodeId) {
+        setEdges(es => es.some(ed => ed.source === nodeId && ed.target === targetId)
+          ? es : [...es, { id: 'e' + Date.now(), source: nodeId, target: targetId }]);
+      }
+      setConnecting(null);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
+  const onCanvasMouseDown = (e) => {
+    if (e.target !== e.currentTarget) return;
+    setSelectedNodeId(null); setSelectedEdgeId(null);
+    const startX = e.clientX, startY = e.clientY;
+    const origPan = { ...pan };
+    const onMove = (ev) => setPan({ x: origPan.x + (ev.clientX - startX), y: origPan.y + (ev.clientY - startY) });
+    const onUp = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
+  const nodeAnchor = (n, side) => side === 'out' ? { x: n.x + WF_NODE_W, y: n.y + WF_NODE_H / 2 } : { x: n.x, y: n.y + WF_NODE_H / 2 };
+  const bezier = (p1, p2) => {
+    const dx = Math.max(Math.abs(p2.x - p1.x) * 0.5, 40);
+    return `M ${p1.x} ${p1.y} C ${p1.x + dx} ${p1.y}, ${p2.x - dx} ${p2.y}, ${p2.x} ${p2.y}`;
+  };
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      const r = await api.post('/workflows/save', { id: workflow.id, name, graph: { nodes, edges } });
+      showToast('Workflow saved');
+      onSaved && onSaved(r.id);
+    } catch (e) { showToast('Save failed: ' + e.message, 'error'); }
+    setSaving(false);
+  };
+
+  const editingNode = nodes.find(n => n.id === editingNodeId);
+  const setNodeConfig = (key, val) => setNodes(ns => ns.map(n => n.id === editingNodeId ? { ...n, config: { ...n.config, [key]: val } } : n));
+
+  return (
+    <div className="fixed inset-0 z-50 bg-white dark:bg-slate-950 flex flex-col">
+      <div className="flex items-center justify-between gap-2 p-3 border-b border-slate-200 dark:border-slate-800">
+        <div className="flex items-center gap-2 min-w-0">
+          <Button variant="ghost" icon="X" onClick={onClose}>Close</Button>
+          <Input value={name} onChange={setName} className="w-64" placeholder="Workflow name" />
+        </div>
+        <div className="flex items-center gap-2">
+          {(selectedNodeId || selectedEdgeId) && (
+            <Button variant="danger" size="sm" icon="Trash2" onClick={deleteSelected}>Delete selected</Button>
+          )}
+          <Button variant="ghost" size="sm" onClick={() => setZoom(z => Math.max(0.4, z - 0.15))}>−</Button>
+          <span className="text-xs text-slate-500 w-10 text-center">{Math.round(zoom * 100)}%</span>
+          <Button variant="ghost" size="sm" onClick={() => setZoom(z => Math.min(2, z + 0.15))}>+</Button>
+          <Button variant="ghost" size="sm" onClick={() => { setZoom(1); setPan({ x: 40, y: 40 }); }}>Reset view</Button>
+          <Button variant="primary" icon="Check" onClick={save} disabled={saving}>{saving ? <Spinner /> : 'Save'}</Button>
+        </div>
+      </div>
+      <div className="flex flex-1 min-h-0">
+        <div className="w-48 border-r border-slate-200 dark:border-slate-800 p-3 space-y-1.5 overflow-y-auto scrollbar-thin">
+          <p className="text-[10px] font-semibold text-slate-400 uppercase mb-1">Add a step</p>
+          {Object.entries(WF_NODE_TYPES).map(([type, def]) => (
+            <button key={type} onClick={() => addNode(type)}
+              className="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs font-medium text-left bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700">
+              <Icon name={def.icon} className="w-3.5 h-3.5 flex-shrink-0" /> {def.label}
+            </button>
+          ))}
+          <p className="text-[10px] text-slate-400 mt-3">Drag from a node's right dot to another node's left dot to connect them. Click a node to configure it.</p>
+        </div>
+        <div ref={canvasRef} onMouseDown={onCanvasMouseDown}
+          className="flex-1 relative overflow-hidden bg-slate-50 dark:bg-slate-900 cursor-grab"
+          style={{ backgroundImage: 'radial-gradient(circle, #cbd5e1 1px, transparent 1px)', backgroundSize: '20px 20px' }}>
+          <div style={{ position: 'absolute', left: 0, top: 0, transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: '0 0' }}>
+            <svg style={{ position: 'absolute', overflow: 'visible', pointerEvents: 'none', width: 1, height: 1 }}>
+              {edges.map(e => {
+                const s = nodes.find(n => n.id === e.source), t = nodes.find(n => n.id === e.target);
+                if (!s || !t) return null;
+                return <path key={e.id} d={bezier(nodeAnchor(s, 'out'), nodeAnchor(t, 'in'))}
+                  stroke={selectedEdgeId === e.id ? '#f43f5e' : '#94a3b8'} strokeWidth={2} fill="none"
+                  style={{ pointerEvents: 'stroke', cursor: 'pointer' }}
+                  onMouseDown={(ev) => { ev.stopPropagation(); setSelectedEdgeId(e.id); setSelectedNodeId(null); }} />;
+              })}
+              {connecting && (() => {
+                const s = nodes.find(n => n.id === connecting.sourceId);
+                return s ? <path d={bezier(nodeAnchor(s, 'out'), { x: connecting.x, y: connecting.y })}
+                  stroke="#f43f5e" strokeWidth={2} strokeDasharray="4 4" fill="none" /> : null;
+              })()}
+            </svg>
+            {nodes.map(n => (
+              <div key={n.id} onMouseDown={(e) => onNodeMouseDown(e, n.id)}
+                style={{ position: 'absolute', left: n.x, top: n.y, width: WF_NODE_W, height: WF_NODE_H }}
+                className={'rounded-lg border-2 bg-white dark:bg-slate-800 shadow-sm px-3 py-2 cursor-move select-none ' +
+                  (selectedNodeId === n.id ? 'border-accent-500' : 'border-slate-200 dark:border-slate-700')}>
+                <div className="flex items-center gap-1.5 text-xs font-semibold">
+                  <Icon name={WF_NODE_TYPES[n.type]?.icon || 'Workflow'} className="w-3.5 h-3.5 flex-shrink-0" />
+                  <span className="truncate">{WF_NODE_TYPES[n.type]?.label || n.type}</span>
+                </div>
+                <div className="text-[10px] text-slate-500 mt-1 truncate">{wfNodeSummary(n)}</div>
+                <div data-input-handle={n.id} title="Input"
+                  style={{ position: 'absolute', left: -7, top: '50%', transform: 'translateY(-50%)', width: 14, height: 14, borderRadius: '50%', background: '#94a3b8', border: '2px solid white' }} />
+                <div onMouseDown={(e) => onOutputMouseDown(e, n.id)} title="Drag to connect"
+                  style={{ position: 'absolute', right: -7, top: '50%', transform: 'translateY(-50%)', width: 14, height: 14, borderRadius: '50%', background: '#f43f5e', border: '2px solid white', cursor: 'crosshair' }} />
+              </div>
+            ))}
+          </div>
+          {nodes.length === 0 && (
+            <div className="absolute inset-0 flex items-center justify-center text-sm text-slate-400 pointer-events-none">
+              Add a step from the left to get started
+            </div>
+          )}
+        </div>
+        {editingNode && (
+          <div className="w-72 border-l border-slate-200 dark:border-slate-800 p-3 space-y-3 overflow-y-auto scrollbar-thin">
+            <div className="flex items-center justify-between">
+              <h3 className="font-semibold text-sm">{WF_NODE_TYPES[editingNode.type]?.label}</h3>
+              <Button variant="ghost" size="sm" icon="X" onClick={() => setEditingNodeId(null)} />
+            </div>
+            {(WF_NODE_TYPES[editingNode.type]?.fields || []).length === 0 && (
+              <p className="text-xs text-slate-400">This step needs no configuration.</p>
+            )}
+            {(WF_NODE_TYPES[editingNode.type]?.fields || []).map(f => (
+              <div key={f.key}>
+                <label className="text-xs font-medium text-slate-500 block mb-1">{f.label}</label>
+                {f.type === 'select' ? (
+                  <select value={editingNode.config[f.key] || f.options[0][0]} onChange={e => setNodeConfig(f.key, e.target.value)}
+                    className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg px-2 py-1.5 text-xs">
+                    {f.options.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                  </select>
+                ) : f.type === 'domain_select' ? (
+                  <select value={editingNode.config[f.key] || ''} onChange={e => setNodeConfig(f.key, e.target.value)}
+                    className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg px-2 py-1.5 text-xs">
+                    <option value="">Auto (rotate active domains)</option>
+                    {domains.map(d => <option key={d.id} value={d.id}>{d.from_email}</option>)}
+                  </select>
+                ) : (
+                  <Input value={editingNode.config[f.key] || ''} onChange={v => setNodeConfig(f.key, f.type === 'number' ? v.replace(/[^0-9]/g, '') : v)}
+                    placeholder={f.placeholder} />
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+const WorkflowsPage = () => {
+  const [workflows, setWorkflows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [editing, setEditing] = useState(null);
+  const [runJob, setRunJob] = useState(null);
+  const { showToast } = useToast();
+
+  const refresh = () => {
+    setLoading(true);
+    api.get('/workflows').then(d => { setWorkflows(d.workflows || []); setLoading(false); }).catch(() => setLoading(false));
+  };
+  useEffect(refresh, []);
+
+  useEffect(() => {
+    if (!runJob) return;
+    const startedAt = Date.now();
+    const t = setInterval(() => {
+      if (Date.now() - startedAt > 5 * 60 * 1000) { clearInterval(t); setRunJob(null); refresh(); return; }
+      api.get('/job-status?job_id=' + runJob.job_id).then(j => {
+        setRunJob(j);
+        if (j.status === 'completed' || j.status === 'failed') { clearInterval(t); refresh(); }
+      }).catch(() => {});
+    }, 2500);
+    return () => clearInterval(t);
+  }, [runJob && runJob.job_id]);
+
+  const run = async (w) => {
+    const r = await api.post('/workflows/run', { id: w.id });
+    if (r.job_id) { setRunJob({ job_id: r.job_id, status: 'running', progress: 0, log: [] }); showToast('Workflow started'); }
+  };
+  const del = async (w) => {
+    if (!confirm(`Delete workflow "${w.name}"?`)) return;
+    await api.post('/workflows/' + w.id + '/delete', {}); refresh();
+  };
+
+  return (
+    <div className="space-y-6 fade-in">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div>
+          <h1 className="text-2xl font-bold">Workflows</h1>
+          <p className="text-sm text-slate-500 mt-1">Build your own pipeline — search, enrich, score, and send, wired together your way.</p>
+        </div>
+        <Button variant="primary" icon="Plus" onClick={() => setEditing({ name: 'Untitled workflow', graph: { nodes: [], edges: [] } })}>
+          New Workflow
+        </Button>
+      </div>
+
+      {runJob && (runJob.status === 'running' || runJob.log?.length > 0) && (
+        <Card className="border-2 border-amber-300">
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="font-semibold text-sm flex items-center gap-2"><Spinner /> Workflow run in progress</h3>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-slate-500">{runJob.progress || 0}%</span>
+              <Button size="sm" variant="ghost" icon="RefreshCw" onClick={() => { setRunJob(null); refresh(); }}>Looks stuck? Refresh</Button>
+            </div>
+          </div>
+          <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden mb-2">
+            <div className="h-full bg-amber-400 rounded-full transition-all" style={{ width: (runJob.progress || 0) + '%' }}></div>
+          </div>
+          <div className="text-xs font-mono space-y-0.5 max-h-40 overflow-y-auto">
+            {(runJob.log || []).slice(-8).map((l, i) => <div key={i} className="text-slate-500">{l}</div>)}
+          </div>
+        </Card>
+      )}
+
+      {loading ? (
+        <div className="py-16 text-center"><Spinner size="w-6 h-6" /></div>
+      ) : workflows.length === 0 ? (
+        <Card><div className="py-12 text-center text-slate-500">
+          <Icon name="Workflow" className="w-12 h-12 mx-auto mb-3 opacity-30" />
+          <p className="font-medium">No workflows yet</p>
+          <p className="text-sm mt-1">Build one: Search → Enrich → Score → Generate Copy → Send.</p>
+          <Button variant="primary" className="mt-4" onClick={() => setEditing({ name: 'Untitled workflow', graph: { nodes: [], edges: [] } })}>Create your first workflow</Button>
+        </div></Card>
+      ) : (
+        <div className="grid gap-4 md:grid-cols-2">
+          {workflows.map(w => (
+            <Card key={w.id}>
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <h3 className="font-semibold truncate">{w.name}</h3>
+                  <p className="text-xs text-slate-500 mt-0.5">{(w.graph?.nodes || []).length} step(s) · updated {w.updated_at}</p>
+                </div>
+                {w.last_run_status && <Badge variant={w.last_run_status === 'completed' ? 'success' : w.last_run_status === 'failed' ? 'danger' : 'info'}>{w.last_run_status}</Badge>}
+              </div>
+              <div className="flex gap-2 mt-3">
+                <Button size="sm" variant="primary" icon="Play" onClick={() => run(w)} disabled={runJob?.status === 'running'}>Run</Button>
+                <Button size="sm" variant="secondary" icon="Edit3" onClick={() => setEditing(w)}>Edit</Button>
+                <Button size="sm" variant="ghost" className="ml-auto text-red-500" icon="Trash2" onClick={() => del(w)}> </Button>
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
+
+      {editing && (
+        <WorkflowCanvasEditor workflow={editing} onClose={() => setEditing(null)}
+          onSaved={() => { setEditing(null); refresh(); }} />
+      )}
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────
+//  N8N Workflows (M13) - read-only view of your n8n instance's workflows;
+//  n8n remains the engine, this just gives visibility from one place.
+// ─────────────────────────────────────────────────
+const N8nWorkflowsPage = () => {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    api.get('/n8n/workflows').then(d => { setData(d); setLoading(false); }).catch(() => setLoading(false));
+  }, []);
+
+  return (
+    <div className="space-y-6 fade-in">
+      <div>
+        <h1 className="text-2xl font-bold">N8N Workflows</h1>
+        <p className="text-sm text-slate-500 mt-1">Read-only view of workflows on your n8n instance. Open n8n itself to create, edit, or run them.</p>
+      </div>
+      {loading ? (
+        <div className="py-16 text-center"><Spinner size="w-6 h-6" /></div>
+      ) : !data || !data.configured ? (
+        <Card><div className="py-12 text-center text-slate-500">
+          <Icon name="Workflow" className="w-12 h-12 mx-auto mb-3 opacity-30" />
+          <p className="font-medium">N8N isn't connected yet</p>
+          <p className="text-sm mt-1">Add your N8N Instance URL and API Key in Settings → API Keys.</p>
+        </div></Card>
+      ) : data.error ? (
+        <Card><p className="text-sm text-red-500">Couldn't reach n8n: {data.error}</p></Card>
+      ) : data.workflows.length === 0 ? (
+        <Card><p className="text-sm text-slate-500 py-6 text-center">No workflows found on your n8n instance.</p></Card>
+      ) : (
+        <div className="grid gap-3 md:grid-cols-2">
+          {data.workflows.map(w => (
+            <Card key={w.id}>
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <h3 className="font-semibold truncate">{w.name}</h3>
+                  <p className="text-xs text-slate-500 mt-0.5">{w.updated_at ? new Date(w.updated_at).toLocaleString() : ''}</p>
+                </div>
+                <Badge variant={w.active ? 'success' : 'grey'}>{w.active ? 'Active' : 'Inactive'}</Badge>
+              </div>
+              <a href={`${data.n8n_url.replace(/\/$/, '')}/workflow/${w.id}`} target="_blank" rel="noopener noreferrer" className="mt-3 inline-block">
+                <Button size="sm" variant="secondary" icon="ExternalLink">Open in N8N</Button>
+              </a>
+            </Card>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────
 //  Outreach Page - Ready-to-send queue
 // ─────────────────────────────────────────────────
 const OutreachPage = () => {
@@ -5112,6 +5528,7 @@ const App = ({ role = 'admin' }) => {
     { id: 'icp',       label: 'ICP',        icon: 'Target' },
     { id: 'leads',     label: 'Leads',     icon: 'Users' },
     { id: 'pipeline',  label: 'Pipeline',  icon: 'Workflow' },
+    { id: 'workflows', label: 'Workflows', icon: 'Repeat' },
     { id: 'outreach',  label: 'Outreach',  icon: 'Send' },
     { id: 'analytics', label: 'Analytics', icon: 'Activity' },
     { id: 'divider1' },
@@ -5123,6 +5540,7 @@ const App = ({ role = 'admin' }) => {
     { id: 'ecommerce',   label: 'E-commerce',  icon: 'ShoppingBag' },
     { id: 'divider2' },
     { id: 'activity',  label: 'Activity Log', icon: 'History', adminOnly: true },
+    { id: 'n8n',       label: 'N8N Workflows', icon: 'Globe', adminOnly: true },
     { id: 'settings',  label: 'Settings',  icon: 'Settings', adminOnly: true },
   ].filter(item => isAdmin || !item.adminOnly);
 
@@ -5136,10 +5554,12 @@ const App = ({ role = 'admin' }) => {
   else if (page === 'people') CurrentPage = PeoplePage;
   else if (page === 'social') CurrentPage = SocialPage;
   else if (page === 'ecommerce') CurrentPage = EcommercePage;
+  else if (page === 'workflows') CurrentPage = WorkflowsPage;
   else if (page === 'outreach') CurrentPage = OutreachPage;
   else if (page === 'analytics') CurrentPage = AnalyticsPage;
   else if (page === 'intent') CurrentPage = IntentPage;
   else if (page === 'activity' && isAdmin) CurrentPage = ActivityLogPage;
+  else if (page === 'n8n' && isAdmin) CurrentPage = N8nWorkflowsPage;
   else if (page === 'settings' && isAdmin) CurrentPage = SettingsPage;
 
   return (

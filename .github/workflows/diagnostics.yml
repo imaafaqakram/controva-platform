@@ -1,5 +1,5 @@
 name: VM Diagnostics
-# retry: investigate stuck ICP run (>5min, no completion)
+# retry: check latest ICP run results + Activity Log attribution
 
 on:
   push:
@@ -20,10 +20,8 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
-            echo "### STUCK ICP RUN INVESTIGATION ###"
-            echo "--- when did leadgen-api last (re)start? (a restart mid-run would kill the in-memory job silently) ---"
-            systemctl show leadgen-api --property=ActiveEnterTimestamp --no-pager
-            echo "--- most recent icp_runs rows (status/timestamps/log) ---"
+            echo "### LATEST ICP RUN + ACTIVITY LOG ATTRIBUTION CHECK ###"
+            echo "--- most recent icp_runs rows (status/timestamps/counts) ---"
             docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
               "SELECT id, icp_id, started_at, finished_at, status, leads_found, leads_new FROM icp_runs ORDER BY id DESC LIMIT 5;" 2>&1
             echo "--- full log of the most recent run ---"
@@ -31,15 +29,19 @@ jobs:
               "SELECT log FROM icp_runs ORDER BY id DESC LIMIT 1;" 2>&1
             echo "--- the ICP profile that run belongs to ---"
             docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
-              "SELECT p.id, p.name, p.industries, p.geos FROM icp_profiles p ORDER BY p.id DESC LIMIT 3;" 2>&1
-            echo "--- is the process actually busy right now, or idle? (CPU%% over 1s sample) ---"
-            top -bn1 -o %CPU | head -15
-            echo "--- leadgen-api logs from the last 15 minutes (errors/exceptions/tracebacks) ---"
-            journalctl -u leadgen-api --since "15 minutes ago" --no-pager | grep -iE "error|exception|traceback|timeout|refused|reset" || echo "(no error-looking lines in the last 15 minutes)"
-            echo "--- full leadgen-api log tail (last 15 min, unfiltered) ---"
-            journalctl -u leadgen-api --since "15 minutes ago" --no-pager | tail -100
-            echo "--- is the API still responsive at all? ---"
-            curl -s --max-time 8 http://localhost:8080/health || echo "NOT RESPONDING"
+              "SELECT p.id, p.name, p.industries, p.geos, p.min_lead_score FROM icp_profiles p ORDER BY p.id DESC LIMIT 3;" 2>&1
+            echo "--- the actual leads that ICP run found (most recently touched profile) ---"
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
+              "SELECT l.id, l.business_name, l.niche, l.city, l.ai_score, l.icp_score, l.status, l.website, l.phone \
+               FROM leads l WHERE l.icp_id = (SELECT icp_id FROM icp_runs ORDER BY id DESC LIMIT 1) \
+               ORDER BY l.id DESC LIMIT 20;" 2>&1
+            echo "--- most recent api_usage rows (does M12 attribution actually work on a real run?) ---"
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
+              "SELECT created_at, username, provider, endpoint, cost, meta FROM api_usage ORDER BY id DESC LIMIT 25;" 2>&1
+            echo "--- api_usage username breakdown, last 2 hours (any NULLs where a real user should be attributed?) ---"
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
+              "SELECT COALESCE(username,'(NULL)') as username, COUNT(*), SUM(cost) FROM api_usage \
+               WHERE created_at > NOW() - INTERVAL '2 hours' GROUP BY username ORDER BY COUNT(*) DESC;" 2>&1
             echo
 
             echo "### ROOT CAUSE TEST: does deploy.yml's plain (non-sudo) systemctl restart actually work over SSH? ###"

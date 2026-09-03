@@ -5,7 +5,7 @@ Complete documentation of all 45+ endpoints.
 **Base URL:** `http://YOUR_SERVER_IP:8080`
 **Authentication:** Most endpoints are open. For production, add a reverse proxy with HTTP basic auth, or use the `/auth/login` token.
 **Content-Type:** `application/json` for all POST requests.
-**Version:** 8.2
+**Version:** 8.3
 
 ---
 
@@ -443,6 +443,49 @@ loops) rather than a logged-in user's click. Attribution is automatic — every 
 
 ---
 
+## Workflow Builder + N8N (M13)
+
+### GET /workflows
+List saved workflows: `id`, `name`, `graph` ({nodes, edges}), `is_active`, `created_by`,
+`updated_at`, and the most recent run's `last_run_status`/`last_run_at`.
+
+### POST /workflows/save
+Create or update a workflow. Omit `id` to create.
+
+```json
+{"id": null, "name": "Signage prospecting", "graph": {
+  "nodes": [{"id": "n1", "type": "search", "x": 40, "y": 40, "config": {"niche": "signage", "city": "Chicago"}},
+            {"id": "n2", "type": "send_email", "x": 300, "y": 40, "config": {"domain_id": ""}}],
+  "edges": [{"id": "e1", "source": "n1", "target": "n2"}]
+}}
+```
+
+Node `type` is one of `search`, `enrich`, `score`, `filter_score`, `generate_assets`,
+`send_email` — each takes the config shape shown in the dashboard's node config panel.
+`send_email`'s `domain_id` is optional; blank/omitted means auto-rotate across active sending
+domains (same as a manual send), same as M11.
+
+### POST /workflows/{id}/delete
+Remove a workflow (cascades to its run history).
+
+### POST /workflows/run
+Executes the saved graph as a DAG (topological order, so branches and fan-in both work) —
+each node acts only on the lead ids that flowed to it from its predecessor node(s), not on
+every matching lead platform-wide. Returns a `job_id` — poll `/job-status?job_id=...` same as
+any other background job (ICP runs, discovery, etc.).
+
+```json
+{"id": 1}
+```
+
+### GET /n8n/workflows
+Read-only proxy to your n8n instance's `GET /api/v1/workflows` (requires `n8n_url` +
+`n8n_api_key` set in Settings → API Keys). Admin only. Returns `{workflows: [...], configured,
+n8n_url}` — each workflow has `id`, `name`, `active`, `updated_at`. n8n itself is never
+modified by this endpoint.
+
+---
+
 ## SEO Intelligence
 
 ### POST /keywords
@@ -715,10 +758,10 @@ When you hit a limit, the API returns an error in the response body explaining w
 
 ## Versioning
 
-Current API version: **8.2** — adds AI research (M7), pain-aware scoring (M8), CRM push
-(M9), the phase-2 suite (M10), multi-domain sending + outreach automation (M11), and the
-admin activity log (M12). Fully backwards-compatible with 7.0 clients — all new fields
-are additive.
+Current API version: **8.3** — adds AI research (M7), pain-aware scoring (M8), CRM push
+(M9), the phase-2 suite (M10), multi-domain sending + outreach automation (M11), the
+admin activity log (M12), and the visual workflow builder + n8n panel (M13). Fully
+backwards-compatible with 7.0 clients — all new fields are additive.
 
 Check `/health` for the version your server is running.
 
