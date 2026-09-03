@@ -5,7 +5,7 @@ Complete documentation of all 45+ endpoints.
 **Base URL:** `http://YOUR_SERVER_IP:8080`
 **Authentication:** Most endpoints are open. For production, add a reverse proxy with HTTP basic auth, or use the `/auth/login` token.
 **Content-Type:** `application/json` for all POST requests.
-**Version:** 8.1
+**Version:** 8.2
 
 ---
 
@@ -412,6 +412,37 @@ click uses.
 
 ---
 
+## Activity Log (M12)
+
+### GET /admin/activity
+Paginated, filterable view over `api_usage` — who called which API, when, and at what cost.
+Admin only.
+
+Query params (all optional): `days` (`1`/`7`/`30`/`all`, default `30`), `username` (exact
+match), `provider` (exact match, e.g. `claude`), `limit` (default 100, max 500), `offset`.
+
+```
+GET /admin/activity?days=7&provider=claude&limit=50
+```
+
+Response:
+```json
+{
+  "rows": [{"time": "2026-09-03T03:16:10Z", "username": "admin", "provider": "serper",
+            "endpoint": "search", "cost": 0.001, "meta": "signs Dubai"}],
+  "total_count": 42, "total_cost": 1.23,
+  "by_provider": [{"provider": "claude", "count": 10, "cost": 0.9}],
+  "by_user": [{"username": "admin", "count": 30, "cost": 1.0}],
+  "limit": 100, "offset": 0
+}
+```
+
+`username` is `"(system)"` for calls made by a background scheduler (ICP/digest/sequence
+loops) rather than a logged-in user's click. Attribution is automatic — every existing
+`log_api_usage()` call site picks it up with no changes needed at the call site itself.
+
+---
+
 ## SEO Intelligence
 
 ### POST /keywords
@@ -684,9 +715,10 @@ When you hit a limit, the API returns an error in the response body explaining w
 
 ## Versioning
 
-Current API version: **8.1** — adds AI research (M7), pain-aware scoring (M8), CRM push
-(M9), the phase-2 suite (M10), and multi-domain sending + outreach automation (M11).
-Fully backwards-compatible with 7.0 clients — all new fields are additive.
+Current API version: **8.2** — adds AI research (M7), pain-aware scoring (M8), CRM push
+(M9), the phase-2 suite (M10), multi-domain sending + outreach automation (M11), and the
+admin activity log (M12). Fully backwards-compatible with 7.0 clients — all new fields
+are additive.
 
 Check `/health` for the version your server is running.
 

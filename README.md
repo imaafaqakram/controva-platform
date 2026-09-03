@@ -36,14 +36,15 @@ real Pipedrive/Calendly accounts.
 10. [CRM Integration (M9)](#crm-integration-m9)
 11. [Phase-2 Suite & White-Label (M10)](#phase-2-suite--white-label-m10)
 12. [Multi-Domain Sending & Outreach Automation (M11)](#multi-domain-sending--outreach-automation-m11)
-13. [Deployment & CI/CD](#deployment--cicd)
-14. [Configuration & API Keys](#configuration--api-keys)
-15. [Architecture](#architecture)
-16. [Database Schema](#database-schema)
-17. [Troubleshooting](#troubleshooting)
-18. [User Roles](#user-roles)
-19. [Security Checklist](#security-checklist)
-20. [Changelog](#changelog)
+13. [Activity Log (M12)](#activity-log-m12)
+14. [Deployment & CI/CD](#deployment--cicd)
+15. [Configuration & API Keys](#configuration--api-keys)
+16. [Architecture](#architecture)
+17. [Database Schema](#database-schema)
+18. [Troubleshooting](#troubleshooting)
+19. [User Roles](#user-roles)
+20. [Security Checklist](#security-checklist)
+21. [Changelog](#changelog)
 
 ---
 
@@ -425,6 +426,24 @@ those across sending domains too and adds the option to automate the *initial* s
 
 ---
 
+## Activity Log (M12)
+
+Admin-only page (nav → **Activity Log**) answering "who used what, when, and at what cost" —
+every paid API call (Serper, Gemini, Claude, Oxylabs, Resend, Google Places, Replicate,
+imagine.art, MillionVerifier) already gets logged to `api_usage` for cost tracking; M12 adds
+**who** triggered it.
+
+| Capability | Configure | What happens |
+|---|---|---|
+| **Per-call user attribution** | Nothing — automatic | Every authenticated request stamps a thread-local "current user" that `log_api_usage()` picks up automatically. Background jobs (ICP runs, research, discovery, enrichment, ...) spawned from a click inherit that same username into their own thread via a small `_bg_thread()` wrapper, so a long-running job still attributes correctly instead of showing blank. Rows with no user (scheduler loops, not a click) show as `(system)`. |
+| **Filterable log** | Activity Log page → date range / user / API filters | `GET /admin/activity` returns matching rows plus cost totals broken down by API and by user for the same filtered window. |
+
+Not built: attribution for the handful of pre-existing background schedulers that run on a timer
+rather than from a user click (sequence follow-ups, the ICP/digest schedulers) — those correctly
+show as `(system)` since no user triggered them.
+
+---
+
 ## Deployment & CI/CD
 
 ### Auto-deploy (GitHub Actions)
@@ -566,7 +585,8 @@ controva-platform/
     │   ├── 009_crm.sql          ← M9: CRM connections + push log
     │   ├── 010_phase2.sql       ← M10: reply classification, meeting booking
     │   ├── 011_roles.sql        ← Role-based access — admin / client accounts
-    │   └── 012_sending_domains.sql ← M11: multi-domain sending + automation
+    │   ├── 012_sending_domains.sql ← M11: multi-domain sending + automation
+    │   └── 013_activity_log.sql ← M12: attribute api_usage rows to a user
     ├── controva_api.py          ← Separate public REST API (port 8081, X-API-Key auth)
     ├── leadgen-api.service      ← Systemd unit
     └── setup.sh                 ← One-click installer
@@ -589,6 +609,7 @@ controva-platform/
 | `lead_research` *(M7)* | AI research dossier per lead — web_findings, reviews_summary, tech_stack, hiring_signals, social_presence, pain_points (evidence + severity), needs_summary, recommended_angle, sources |
 | `crm_connections` / `crm_push_log` *(M9)* | Configured CRM targets (Pipedrive / webhook) + per-lead push history and retry status |
 | `sending_domains` *(M11)* | Verified outbound sending identities — domain, from_email/name, daily_cap, is_active, paused_reason |
+| `api_usage` *(M5, username added M12)* | Every paid API call — provider, endpoint, cost, username (who triggered it — NULL for scheduler-initiated calls), created_at |
 
 ### Key columns on `leads`
 
@@ -675,6 +696,18 @@ Before going to production:
 ---
 
 ## Changelog
+
+### v8.2 — September 2026 (M12, ICP fixes)
+
+**New features**
+- **Activity Log (M12)** — admin-only page showing every paid API call with who triggered it, when, which tool/API, and what it cost, with date/user/API filters and cost-by-provider and cost-by-user breakdowns. See [Activity Log](#activity-log-m12).
+- **Sending Domains / CRM Connections: real edit** — both editors only supported add/delete before; fixing a typo meant deleting and recreating the entry. Both now support editing in place, matching the pattern already used by the ICP builder.
+- **Outreach automation interval** — `outreach_automation_interval_sec` existed in config but had no UI; now a slider under Outreach Automation → Fully Automatic.
+- **Bulk API key import** — Settings → API Keys → upload or paste a `.env`/JSON file to fill in all 27 keys at once, plus a downloadable blank template. Blank fields are always skipped so an incomplete file can't wipe a key it doesn't mention.
+
+**Bug fixes**
+- **ICP edit modal closed on any click inside it** — the modal wrapped its content in `<Card onClick={...}>`, but `Card`'s definition never forwards `onClick` to the DOM element it renders, so the intended `stopPropagation()` never attached. Every click (typing, toggling a checkbox, dragging the slider) bubbled to the backdrop and closed the modal. Reproduced and verified fixed in a real headless browser before and after. Matched the plain-`<div>` pattern the app's three other modals already use correctly.
+- **ICP run-progress UI could get stuck showing "running"** — a reported stuck run turned out to have completed successfully server-side in ~90s; the frontend's polling loop just never observed the transition. Added a 3-minute safety timeout that falls back to the ICP list (the real source of truth) plus a manual "Looks stuck? Refresh" button.
 
 ### v8.1 — September 2026 (M11, ops fixes)
 
