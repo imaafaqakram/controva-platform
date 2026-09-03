@@ -3951,6 +3951,124 @@ const SendingDomainsEditor = () => {
   );
 };
 
+// ─────────────────────────────────────────────────
+//  Activity Log - who used which API/tool, when, and at what cost (M12)
+// ─────────────────────────────────────────────────
+const ActivityLogPage = () => {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [days, setDays] = useState('30');
+  const [username, setUsername] = useState('');
+  const [provider, setProvider] = useState('');
+
+  const load = () => {
+    setLoading(true);
+    const qs = new URLSearchParams({ days, limit: '200' });
+    if (username) qs.set('username', username);
+    if (provider) qs.set('provider', provider);
+    api.get('/admin/activity?' + qs.toString()).then(d => { setData(d); setLoading(false); }).catch(() => setLoading(false));
+  };
+  useEffect(load, [days, username, provider]);
+
+  const fmtCost = (c) => '$' + (c || 0).toFixed(c < 0.01 && c > 0 ? 4 : 2);
+  const fmtTime = (t) => t ? new Date(t).toLocaleString() : '';
+
+  return (
+    <div className="space-y-6 fade-in">
+      <div>
+        <h1 className="text-2xl font-bold">Activity Log</h1>
+        <p className="text-sm text-slate-500 mt-1">Every paid API call — who triggered it, which tool, and what it cost.</p>
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        <select value={days} onChange={e => setDays(e.target.value)}
+          className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-2 text-sm">
+          <option value="1">Today</option>
+          <option value="7">Last 7 days</option>
+          <option value="30">Last 30 days</option>
+          <option value="all">All time</option>
+        </select>
+        <Input value={username} onChange={setUsername} placeholder="Filter by user (exact username)" className="w-56" />
+        <Input value={provider} onChange={setProvider} placeholder="Filter by API (e.g. claude, serper)" className="w-56" />
+        <Button variant="ghost" icon="RefreshCw" onClick={load}>Refresh</Button>
+      </div>
+
+      {loading || !data ? (
+        <div className="py-16 text-center"><Spinner size="w-6 h-6" /></div>
+      ) : (
+        <>
+          <div className="grid gap-4 md:grid-cols-3">
+            <Card>
+              <p className="text-xs text-slate-500 uppercase">Total spend</p>
+              <p className="text-2xl font-bold mt-1">{fmtCost(data.total_cost)}</p>
+              <p className="text-xs text-slate-500 mt-1">{data.total_count} calls</p>
+            </Card>
+            <Card>
+              <p className="text-xs text-slate-500 uppercase mb-2">By API</p>
+              <div className="space-y-1 max-h-28 overflow-y-auto scrollbar-thin">
+                {(data.by_provider || []).map(r => (
+                  <div key={r.provider} className="flex justify-between text-sm">
+                    <span className="text-slate-600 dark:text-slate-400">{r.provider}</span>
+                    <span className="font-medium">{fmtCost(r.cost)} · {r.count}</span>
+                  </div>
+                ))}
+                {(data.by_provider || []).length === 0 && <p className="text-xs text-slate-400">No calls in this window</p>}
+              </div>
+            </Card>
+            <Card>
+              <p className="text-xs text-slate-500 uppercase mb-2">By user</p>
+              <div className="space-y-1 max-h-28 overflow-y-auto scrollbar-thin">
+                {(data.by_user || []).map(r => (
+                  <div key={r.username} className="flex justify-between text-sm">
+                    <span className="text-slate-600 dark:text-slate-400">{r.username}</span>
+                    <span className="font-medium">{fmtCost(r.cost)} · {r.count}</span>
+                  </div>
+                ))}
+                {(data.by_user || []).length === 0 && <p className="text-xs text-slate-400">No calls in this window</p>}
+              </div>
+            </Card>
+          </div>
+
+          <Card noPad>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-slate-200 dark:border-slate-800 text-left text-xs text-slate-500 uppercase">
+                    <th className="px-4 py-2">Time</th>
+                    <th className="px-4 py-2">User</th>
+                    <th className="px-4 py-2">API</th>
+                    <th className="px-4 py-2">Action</th>
+                    <th className="px-4 py-2">Cost</th>
+                    <th className="px-4 py-2">Details</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(data.rows || []).map((r, i) => (
+                    <tr key={i} className="border-b border-slate-100 dark:border-slate-800/50">
+                      <td className="px-4 py-2 whitespace-nowrap text-xs text-slate-500">{fmtTime(r.time)}</td>
+                      <td className="px-4 py-2"><Badge variant={r.username === '(system)' ? 'grey' : 'info'}>{r.username}</Badge></td>
+                      <td className="px-4 py-2">{r.provider}</td>
+                      <td className="px-4 py-2 text-slate-500">{r.endpoint}</td>
+                      <td className="px-4 py-2 font-mono text-xs">{fmtCost(r.cost)}</td>
+                      <td className="px-4 py-2 text-xs text-slate-400 truncate max-w-xs">{r.meta}</td>
+                    </tr>
+                  ))}
+                  {(data.rows || []).length === 0 && (
+                    <tr><td colSpan="6" className="px-4 py-8 text-center text-slate-400">No activity in this window</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </Card>
+          {data.rows && data.rows.length >= 200 && (
+            <p className="text-xs text-slate-400 text-center">Showing the most recent 200 — narrow the filters above to see more specific results.</p>
+          )}
+        </>
+      )}
+    </div>
+  );
+};
+
 const SettingsPage = () => {
   const [config, setConfig] = useState(null);
   const { showToast } = useToast();
@@ -5004,6 +5122,7 @@ const App = ({ role = 'admin' }) => {
     { id: 'social',      label: 'Social',      icon: 'Share2' },
     { id: 'ecommerce',   label: 'E-commerce',  icon: 'ShoppingBag' },
     { id: 'divider2' },
+    { id: 'activity',  label: 'Activity Log', icon: 'History', adminOnly: true },
     { id: 'settings',  label: 'Settings',  icon: 'Settings', adminOnly: true },
   ].filter(item => isAdmin || !item.adminOnly);
 
@@ -5020,6 +5139,7 @@ const App = ({ role = 'admin' }) => {
   else if (page === 'outreach') CurrentPage = OutreachPage;
   else if (page === 'analytics') CurrentPage = AnalyticsPage;
   else if (page === 'intent') CurrentPage = IntentPage;
+  else if (page === 'activity' && isAdmin) CurrentPage = ActivityLogPage;
   else if (page === 'settings' && isAdmin) CurrentPage = SettingsPage;
 
   return (

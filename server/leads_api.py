@@ -6515,6 +6515,32 @@ COST_PER_CALL = {
     'imagine_art': 0.005, 'resend': 0.0005, 'millionverifier': 0.001,
 }
 
+# M12: per-request user attribution for the admin activity log. Thread-local
+# because ThreadingServer runs each request on its own thread; require_auth()
+# sets this at the start of every request, so log_api_usage() can pick up
+# "who" without threading a username through every one of its ~15 call sites.
+_user_ctx = threading.local()
+
+def set_current_user(username):
+    _user_ctx.username = username
+
+def get_current_user():
+    return getattr(_user_ctx, 'username', None)
+
+def _bg_thread(target, *args, **kwargs):
+    """Spawn a daemon background thread that carries the CURRENT request's
+    username into its own thread-local context (thread-locals don't inherit
+    across threads otherwise), so api_usage rows logged from inside a
+    background job (ICP run, research, discovery, ...) attribute to the user
+    who clicked the button instead of showing blank/system."""
+    username = get_current_user()
+    def runner():
+        set_current_user(username)
+        target(*args, **kwargs)
+    t = threading.Thread(target=runner, daemon=True)
+    t.start()
+    return t
+
 def ensure_m5_tables():
     conn = db_conn(); cur = conn.cursor()
     cur.execute("""
@@ -6527,6 +6553,8 @@ def ensure_m5_tables():
             created_at  TIMESTAMPTZ DEFAULT NOW()
         )""")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_api_usage_time ON api_usage(created_at DESC)")
+    cur.execute("ALTER TABLE api_usage ADD COLUMN IF NOT EXISTS username VARCHAR(80)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_api_usage_username ON api_usage(username)")
     conn.commit(); cur.close(); conn.close()
 
 def log_api_usage(provider, endpoint='', cost=None, meta=''):
@@ -6534,8 +6562,8 @@ def log_api_usage(provider, endpoint='', cost=None, meta=''):
     try:
         c = COST_PER_CALL.get(provider, 0) if cost is None else cost
         conn = db_conn(); cur = conn.cursor()
-        cur.execute("INSERT INTO api_usage (provider, endpoint, cost, meta) VALUES (%s,%s,%s,%s)",
-                    (provider, endpoint[:120], c, (meta or '')[:300]))
+        cur.execute("INSERT INTO api_usage (provider, endpoint, cost, meta, username) VALUES (%s,%s,%s,%s,%s)",
+                    (provider, endpoint[:120], c, (meta or '')[:300], get_current_user()))
         conn.commit(); cur.close(); conn.close()
     except Exception:
         pass
@@ -7493,12 +7521,16 @@ class Handler(BaseHTTPRequestHandler):
         p = self.path.split('?')[0]
         if self.command == 'GET':
             if p in self.PUBLIC_GET_PATHS or p.startswith(self.PUBLIC_GET_PREFIXES):
+                set_current_user(None)
                 return True
         elif self.command == 'POST' and p in self.PUBLIC_POST_PATHS:
+            set_current_user(None)
             return True
         tenant_id, _ = self.check_auth()
         if tenant_id:
+            set_current_user(self.current_username())
             return True
+        set_current_user(None)
         self.send_json(401, {'error': 'Unauthorized — log in first'})
         return False
 
@@ -7739,6 +7771,47 @@ class Handler(BaseHTTPRequestHandler):
                 domains = [dict(zip(['id','domain','from_email','from_name','daily_cap','is_active',
                                      'paused_reason','sent_today','sent_7d','bad_7d'], r)) for r in rows]
                 self.send_json(200, {'domains': domains, 'automation_mode': CONFIG.get('outreach_automation_mode', 'off')})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p == '/admin/activity':
+            if not self.require_admin(): return
+            try:
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                days_param = qs.get('days', ['30'])[0]
+                username_f = (qs.get('username', [''])[0] or '').strip() or None
+                provider_f = (qs.get('provider', [''])[0] or '').strip() or None
+                limit = max(1, min(int(qs.get('limit', ['100'])[0]), 500))
+                offset = max(0, int(qs.get('offset', ['0'])[0]))
+
+                where, params = [], []
+                if days_param != 'all':
+                    where.append("created_at > NOW() - INTERVAL '%s days'" % int(days_param))
+                if username_f:
+                    where.append("username = %s"); params.append(username_f)
+                if provider_f:
+                    where.append("provider = %s"); params.append(provider_f)
+                where_sql = ('WHERE ' + ' AND '.join(where)) if where else ''
+
+                conn = db_conn(); cur = conn.cursor()
+                cur.execute(f"""SELECT created_at, COALESCE(username, '(system)'), provider, endpoint, cost, meta
+                               FROM api_usage {where_sql} ORDER BY created_at DESC LIMIT %s OFFSET %s""",
+                            params + [limit, offset])
+                rows = [{'time': r[0].isoformat() if r[0] else None, 'username': r[1], 'provider': r[2],
+                         'endpoint': r[3], 'cost': float(r[4] or 0), 'meta': r[5]} for r in cur.fetchall()]
+
+                cur.execute(f"SELECT COUNT(*), COALESCE(SUM(cost),0) FROM api_usage {where_sql}", params)
+                total_count, total_cost = cur.fetchone()
+                cur.execute(f"""SELECT provider, COUNT(*), COALESCE(SUM(cost),0) FROM api_usage {where_sql}
+                               GROUP BY provider ORDER BY SUM(cost) DESC""", params)
+                by_provider = [{'provider': r[0], 'count': r[1], 'cost': float(r[2] or 0)} for r in cur.fetchall()]
+                cur.execute(f"""SELECT COALESCE(username, '(system)'), COUNT(*), COALESCE(SUM(cost),0) FROM api_usage {where_sql}
+                               GROUP BY username ORDER BY SUM(cost) DESC""", params)
+                by_user = [{'username': r[0], 'count': r[1], 'cost': float(r[2] or 0)} for r in cur.fetchall()]
+                cur.close(); conn.close()
+
+                self.send_json(200, {'rows': rows, 'total_count': total_count, 'total_cost': float(total_cost or 0),
+                                     'by_provider': by_provider, 'by_user': by_user, 'limit': limit, 'offset': offset})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
@@ -8094,10 +8167,9 @@ class Handler(BaseHTTPRequestHandler):
                 JOBS[job_id] = {'status': 'running', 'progress': 0,
                                 'log': [f'Parsing "{query}" → {parsed.get("niche")} in {where}'],
                                 'step': 'Discover'}
-                t = threading.Thread(target=run_discover_bg, args=(
+                _bg_thread(run_discover_bg,
                     job_id, parsed['niche'], parsed['city'], parsed.get('country', ''),
-                    filter_mode, density, find_more, query, state_cities, tenant_id, user_id))
-                t.daemon = True; t.start()
+                    filter_mode, density, find_more, query, state_cities, tenant_id, user_id)
                 self.send_json(200, {'job_id': job_id, 'status': 'started',
                                      'parsed': parsed, 'find_more': find_more})
             except Exception as e:
@@ -8165,9 +8237,8 @@ class Handler(BaseHTTPRequestHandler):
                 job_id = f'job_{int(time.time() * 1000)}'
                 JOBS[job_id] = {'status': 'running', 'progress': 0,
                                 'log': [f'Discovering "{niche}" in {city}…'], 'step': 'Discover'}
-                t = threading.Thread(target=run_discover_bg, args=(
-                    job_id, niche, city, country, filter_mode, density, find_more, '', state_cities))
-                t.daemon = True; t.start()
+                _bg_thread(run_discover_bg,
+                    job_id, niche, city, country, filter_mode, density, find_more, '', state_cities)
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
@@ -8177,8 +8248,7 @@ class Handler(BaseHTTPRequestHandler):
                 strategy = body.get('provider', 'serper_then_oxylabs')
                 job_id = f'job_{int(time.time())}'
                 JOBS[job_id] = {'status': 'running', 'progress': 0, 'log': ['Checking which leads need enriching...'], 'step': 'Enrich'}
-                t = threading.Thread(target=run_enrich_bg, args=(job_id, strategy))
-                t.daemon = True; t.start()
+                _bg_thread(run_enrich_bg, job_id, strategy)
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
@@ -8214,8 +8284,7 @@ class Handler(BaseHTTPRequestHandler):
                 job_id = f'job_{int(time.time() * 1000)}'
                 JOBS[job_id] = {'status': 'running', 'progress': 0,
                                 'log': [], 'step': 'CSV Enrich'}
-                t = threading.Thread(target=run_csv_enrich_bg, args=(job_id, rows, strategy))
-                t.daemon = True; t.start()
+                _bg_thread(run_csv_enrich_bg, job_id, rows, strategy)
                 self.send_json(200, {'job_id': job_id, 'total': len(rows)})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
@@ -8226,8 +8295,7 @@ class Handler(BaseHTTPRequestHandler):
                 job_id = f'job_{int(time.time())}'
                 JOBS[job_id] = {'status': 'running', 'progress': 0,
                                 'log': ['Starting website verification…'], 'step': 'Verify Websites'}
-                t = threading.Thread(target=run_verify_websites_bg, args=(job_id, lead_ids))
-                t.daemon = True; t.start()
+                _bg_thread(run_verify_websites_bg, job_id, lead_ids)
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
@@ -8335,8 +8403,7 @@ class Handler(BaseHTTPRequestHandler):
                 job_id = f'job_{int(time.time() * 1000)}'
                 JOBS[job_id] = {'status': 'running', 'progress': 0,
                                 'log': [f'Pushing {len(lead_ids)} lead(s)…'], 'step': 'CRM Push'}
-                t = threading.Thread(target=run_crm_push_bg, args=(job_id, lead_ids, connection_id))
-                t.daemon = True; t.start()
+                _bg_thread(run_crm_push_bg, job_id, lead_ids, connection_id)
                 self.send_json(200, {'job_id': job_id, 'status': 'started', 'count': len(lead_ids)})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
@@ -8378,8 +8445,7 @@ class Handler(BaseHTTPRequestHandler):
                 pid = body.get('id')
                 job_id = f'job_{int(time.time() * 1000)}'
                 JOBS[job_id] = {'status': 'running', 'progress': 0, 'log': ['Starting ICP run…'], 'step': 'ICP Discovery'}
-                t = threading.Thread(target=run_icp_bg, args=(job_id, pid))
-                t.daemon = True; t.start()
+                _bg_thread(run_icp_bg, job_id, pid)
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
@@ -8418,8 +8484,7 @@ class Handler(BaseHTTPRequestHandler):
         elif p == '/check-replies':
             try:
                 job_id = f'job_{int(time.time() * 1000)}'
-                t = threading.Thread(target=run_check_replies_bg, args=(job_id,))
-                t.daemon = True; t.start()
+                _bg_thread(run_check_replies_bg, job_id)
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
@@ -8428,8 +8493,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 only_stale = bool(body.get('only_stale', False))
                 job_id = f'job_{int(time.time() * 1000)}'
-                t = threading.Thread(target=run_verify_emails_bg, args=(job_id, only_stale))
-                t.daemon = True; t.start()
+                _bg_thread(run_verify_emails_bg, job_id, only_stale)
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
@@ -8438,8 +8502,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 strategy = body.get('provider_strategy', 'oxylabs_only')
                 job_id = f'job_{int(time.time() * 1000)}'
-                t = threading.Thread(target=run_reenrich_bg, args=(job_id, strategy))
-                t.daemon = True; t.start()
+                _bg_thread(run_reenrich_bg, job_id, strategy)
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
@@ -8448,8 +8511,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 job_id = f'job_{int(time.time())}'
                 JOBS[job_id] = {'status': 'running', 'progress': 0, 'log': ['Starting: AI score leads...'], 'step': 'AI Score'}
-                t = threading.Thread(target=run_step_bg, args=(job_id, score_all_enriched, 'AI score leads'))
-                t.daemon = True; t.start()
+                _bg_thread(run_step_bg, job_id, score_all_enriched, 'AI score leads')
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
@@ -8461,8 +8523,7 @@ class Handler(BaseHTTPRequestHandler):
                 min_score = body.get('min_score', 5)
                 job_id = f'job_{int(time.time())}'
                 JOBS[job_id] = {'status': 'running', 'progress': 0, 'log': ['Starting: Generate email copy & assets...'], 'step': 'Generate Assets'}
-                t = threading.Thread(target=run_step_bg, args=(job_id, generate_assets_for_top_leads, 'Generate email copy & assets', min_score))
-                t.daemon = True; t.start()
+                _bg_thread(run_step_bg, job_id, generate_assets_for_top_leads, 'Generate email copy & assets', min_score)
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
@@ -8612,8 +8673,7 @@ class Handler(BaseHTTPRequestHandler):
                 strategy = body.get('provider', 'serper_then_oxylabs')
                 gen_images = body.get('generate_images', False)
                 job_id = f'job_{int(time.time())}'
-                t = threading.Thread(target=run_pipeline_bg, args=(job_id, strategy, gen_images))
-                t.daemon = True; t.start()
+                _bg_thread(run_pipeline_bg, job_id, strategy, gen_images)
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
@@ -8811,8 +8871,7 @@ class Handler(BaseHTTPRequestHandler):
                 job_id = f'job_{int(time.time() * 1000)}'
                 JOBS[job_id] = {'status': 'running', 'progress': 0,
                                 'log': ['Starting research…'], 'step': 'AI Research'}
-                t = threading.Thread(target=run_research_bg, args=(job_id, [lead_id]))
-                t.daemon = True; t.start()
+                _bg_thread(run_research_bg, job_id, [lead_id])
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
@@ -8838,8 +8897,7 @@ class Handler(BaseHTTPRequestHandler):
                 job_id = f'job_{int(time.time() * 1000)}'
                 JOBS[job_id] = {'status': 'running', 'progress': 0,
                                 'log': [f'Queued {len(lead_ids)} lead(s) for research…'], 'step': 'AI Research'}
-                t = threading.Thread(target=run_research_bg, args=(job_id, lead_ids))
-                t.daemon = True; t.start()
+                _bg_thread(run_research_bg, job_id, lead_ids)
                 self.send_json(200, {'job_id': job_id, 'status': 'started', 'count': len(lead_ids)})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
