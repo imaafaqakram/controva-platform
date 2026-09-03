@@ -633,7 +633,7 @@ controva-platform/
 | `crm_connections` / `crm_push_log` *(M9)* | Configured CRM targets (Pipedrive / webhook) + per-lead push history and retry status |
 | `sending_domains` *(M11)* | Verified outbound sending identities — domain, from_email/name, daily_cap, is_active, paused_reason |
 | `api_usage` *(M5, username added M12)* | Every paid API call — provider, endpoint, cost, username (who triggered it — NULL for scheduler-initiated calls), created_at |
-| `workflows` / `workflow_runs` *(M13)* | Saved node graphs (JSONB: nodes + edges) for the visual workflow builder, and their run history (status, log, per-node result counts) |
+| `workflows` / `wf_canvas_runs` *(M13)* | Saved node graphs (JSONB: nodes + edges) for the visual workflow builder, and their run history (status, log, per-node result counts). Named `wf_canvas_runs`, not `workflow_runs` — that name was already taken by the older, currently-unused table below. |
 
 ### Key columns on `leads`
 
