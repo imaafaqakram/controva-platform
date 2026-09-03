@@ -3299,9 +3299,73 @@ const ApiKeyEditor = () => {
   const [keys, setKeys] = useState({});
   const [editing, setEditing] = useState({});
   const [values, setValues] = useState({});
+  const [pasteMode, setPasteMode] = useState(false);
+  const [pasteText, setPasteText] = useState('');
+  const [importing, setImporting] = useState(false);
+  const fileInputRef = useRef(null);
   const { showToast } = useToast();
 
-  useEffect(() => { api.get('/api-keys').then(setKeys).catch(() => {}); }, []);
+  const refreshKeys = () => api.get('/api-keys').then(setKeys).catch(() => {});
+  useEffect(() => { refreshKeys(); }, []);
+
+  // Accepts either JSON ({"google_api_key": "..."}) or .env-style lines
+  // (GOOGLE_API_KEY=..., one per line, # comments and blank lines ignored,
+  // optional "export " prefix and quotes around the value both stripped).
+  const parseKeyText = (text) => {
+    const trimmed = (text || '').trim();
+    try {
+      const obj = JSON.parse(trimmed);
+      if (obj && typeof obj === 'object' && !Array.isArray(obj)) return obj;
+    } catch (e) { /* not JSON — fall through to .env parsing */ }
+    const pairs = {};
+    trimmed.split('\n').forEach(line => {
+      line = line.trim();
+      if (!line || line.startsWith('#')) return;
+      if (/^export\s+/i.test(line)) line = line.replace(/^export\s+/i, '');
+      const eq = line.indexOf('=');
+      if (eq === -1) return;
+      const key = line.slice(0, eq).trim();
+      let val = line.slice(eq + 1).trim();
+      if (val.length >= 2 && ((val[0] === '"' && val[val.length - 1] === '"') || (val[0] === "'" && val[val.length - 1] === "'"))) {
+        val = val.slice(1, -1);
+      }
+      if (key) pairs[key] = val;
+    });
+    return pairs;
+  };
+
+  const runImport = async (pairs) => {
+    const nonEmpty = Object.fromEntries(Object.entries(pairs || {}).filter(([k, v]) => (v || '').toString().trim()));
+    if (Object.keys(nonEmpty).length === 0) { showToast('No key=value pairs found', 'error'); return; }
+    setImporting(true);
+    try {
+      const r = await api.post('/api-keys/bulk-update', { pairs: nonEmpty });
+      showToast(`Imported ${r.updated.length} key(s)` + (r.skipped.length ? ` — skipped ${r.skipped.length} unrecognized name(s)` : ''),
+        r.updated.length ? 'success' : 'error');
+      setPasteText(''); setPasteMode(false);
+      refreshKeys();
+    } catch (e) { showToast('Import failed: ' + e.message, 'error'); }
+    setImporting(false);
+  };
+
+  const handleFilePicked = (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => runImport(parseKeyText(ev.target.result));
+    reader.readAsText(file);
+    e.target.value = '';   // allow re-selecting the same file later
+  };
+
+  const downloadTemplate = () => {
+    const lines = Object.entries(labels).map(([k, label]) => `# ${label}\n${k.toUpperCase()}=`).join('\n\n');
+    const blob = new Blob([lines + '\n'], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'controva-api-keys.env';
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  };
 
   const startEdit = (k) => { setEditing({...editing, [k]: true}); setValues({...values, [k]: ''}); };
   const cancelEdit = (k) => { setEditing({...editing, [k]: false}); setValues({...values, [k]: ''}); };
@@ -3313,8 +3377,7 @@ const ApiKeyEditor = () => {
       if (r.success) {
         showToast('Updated ' + k);
         setEditing({...editing, [k]: false});
-        // Refresh
-        api.get('/api-keys').then(setKeys).catch(() => {});
+        refreshKeys();
       } else {
         showToast('Failed', 'error');
       }
@@ -3353,7 +3416,37 @@ const ApiKeyEditor = () => {
   };
 
   return (
-    <div className="space-y-2">
+    <div className="space-y-4">
+      <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg space-y-2">
+        <p className="text-xs font-semibold">Bulk import</p>
+        <p className="text-[11px] text-slate-500">
+          Fill in every key at once from a file instead of one at a time — accepts a .env file
+          (<code>KEY=value</code> per line) or JSON. Blank lines/fields are skipped, so a
+          partially-filled file never wipes keys it doesn't mention.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <input ref={fileInputRef} type="file" accept=".env,.txt,.json" className="hidden" onChange={handleFilePicked} />
+          <Button size="sm" variant="primary" icon="Download" onClick={() => fileInputRef.current && fileInputRef.current.click()} disabled={importing}>
+            Upload File
+          </Button>
+          <Button size="sm" variant="secondary" onClick={() => setPasteMode(!pasteMode)} disabled={importing}>
+            {pasteMode ? 'Cancel Paste' : 'Or Paste Instead'}
+          </Button>
+          <Button size="sm" variant="ghost" icon="ExternalLink" onClick={downloadTemplate}>
+            Download Blank Template
+          </Button>
+        </div>
+        {pasteMode && (
+          <div className="space-y-2">
+            <textarea value={pasteText} onChange={e => setPasteText(e.target.value)}
+              placeholder={'GOOGLE_API_KEY=...\nSERPER_KEY=...\nCLAUDE_KEY=...'}
+              className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-2 text-xs font-mono min-h-[120px]" />
+            <Button size="sm" onClick={() => runImport(parseKeyText(pasteText))} disabled={importing || !pasteText.trim()}>
+              {importing ? <Spinner /> : 'Import'}
+            </Button>
+          </div>
+        )}
+      </div>
       {Object.entries(labels).map(([key, label]) => {
         const k = keys[key] || { set: false, preview: '' };
         const isEditing = editing[key];

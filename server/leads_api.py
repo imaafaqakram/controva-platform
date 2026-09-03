@@ -228,23 +228,48 @@ def save_config():
         print(f'Config save error: {e}')
         return False
 
+API_KEY_NAMES = ['google_api_key', 'serper_key', 'gemini_key', 'claude_key',
+                 'replicate_token', 'imagine_art_key', 'oxylabs_key', 'resend_key',
+                 'from_email', 'from_name', 'here_api_key',
+                 'scrapingbee_key', 'zenrows_key', 'scrapingdog_key', 'firecrawl_key',
+                 'ebay_client_id', 'ebay_client_secret',
+                 'reddit_client_id', 'reddit_client_secret', 'freelancer_api_key',
+                 'millionverifier_key',
+                 'public_base_url', 'company_name', 'company_address',
+                 'resend_webhook_secret', 'imap_host', 'imap_user', 'imap_pass']
+
 def update_api_key(name, value):
     """Update an API key and save."""
     global GOOGLE_API_KEY, SERPER_KEY, GEMINI_KEY, CLAUDE_KEY, REPLICATE_TOKEN, IMAGINE_ART_KEY, OXYLABS_KEY, RESEND_KEY, FROM_EMAIL, FROM_NAME, HERE_API_KEY, SCRAPINGBEE_KEY, ZENROWS_KEY, SCRAPINGDOG_KEY, FIRECRAWL_KEY, EBAY_CLIENT_ID, EBAY_CLIENT_SECRET, REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, FREELANCER_API_KEY, MILLIONVERIFIER_KEY, PUBLIC_BASE_URL, COMPANY_NAME, COMPANY_ADDRESS, RESEND_WEBHOOK_SECRET, IMAP_HOST, IMAP_USER, IMAP_PASS
     name_lower = name.lower()
-    valid_keys = ['google_api_key', 'serper_key', 'gemini_key', 'claude_key',
-                  'replicate_token', 'imagine_art_key', 'oxylabs_key', 'resend_key',
-                  'from_email', 'from_name', 'here_api_key',
-                  'scrapingbee_key', 'zenrows_key', 'scrapingdog_key', 'firecrawl_key',
-                  'ebay_client_id', 'ebay_client_secret',
-                  'reddit_client_id', 'reddit_client_secret', 'freelancer_api_key',
-                  'millionverifier_key',
-                  'public_base_url', 'company_name', 'company_address',
-                  'resend_webhook_secret', 'imap_host', 'imap_user', 'imap_pass']
-    if name_lower not in valid_keys: return False
+    if name_lower not in API_KEY_NAMES: return False
     var_name = name_lower.upper()
     globals()[var_name] = value
     return save_config()
+
+def update_api_keys_bulk(pairs):
+    """Update many API keys/config values in one pass — powers the Settings
+    bulk-import (upload or paste a .env/JSON file instead of setting each of
+    the 25+ fields one at a time). Blank values are never applied, so an
+    incomplete file can't accidentally wipe keys it didn't mean to touch.
+    Unrecognized names are reported back, not silently dropped. Saves once
+    at the end regardless of how many keys were updated.
+    Returns (updated_names, skipped_names)."""
+    global GOOGLE_API_KEY, SERPER_KEY, GEMINI_KEY, CLAUDE_KEY, REPLICATE_TOKEN, IMAGINE_ART_KEY, OXYLABS_KEY, RESEND_KEY, FROM_EMAIL, FROM_NAME, HERE_API_KEY, SCRAPINGBEE_KEY, ZENROWS_KEY, SCRAPINGDOG_KEY, FIRECRAWL_KEY, EBAY_CLIENT_ID, EBAY_CLIENT_SECRET, REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, FREELANCER_API_KEY, MILLIONVERIFIER_KEY, PUBLIC_BASE_URL, COMPANY_NAME, COMPANY_ADDRESS, RESEND_WEBHOOK_SECRET, IMAP_HOST, IMAP_USER, IMAP_PASS
+    updated, skipped = [], []
+    for name, value in (pairs or {}).items():
+        name_lower = (name or '').strip().lower()
+        value = value if isinstance(value, str) else ('' if value is None else str(value))
+        if not value.strip():
+            continue
+        if name_lower not in API_KEY_NAMES:
+            skipped.append(name)
+            continue
+        globals()[name_lower.upper()] = value
+        updated.append(name_lower)
+    if updated:
+        save_config()
+    return updated, skipped
 
 def get_api_keys_masked():
     """Return current API keys with values masked except last 4 chars."""
@@ -8568,6 +8593,17 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json(200, {'success': True, 'message': f'{key_name} updated'})
                 else:
                     self.send_json(400, {'success': False, 'error': 'Invalid key name'})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p == '/api-keys/bulk-update':
+            if not self.require_admin(): return
+            try:
+                pairs = body.get('pairs')
+                if not isinstance(pairs, dict) or not pairs:
+                    self.send_json(400, {'error': 'pairs (object of name: value) required'}); return
+                updated, skipped = update_api_keys_bulk(pairs)
+                self.send_json(200, {'success': True, 'updated': updated, 'skipped': skipped})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 

@@ -540,13 +540,25 @@ Update settings. All values are persisted to disk at `/opt/leadgen/config.json`.
 Get API key status (masked, shows last 4 chars only).
 
 ### POST /api-keys/update
-Update an API key (persists to disk and memory).
+Update one API key (persists to disk and memory).
 
 ```json
 {"key": "here_api_key", "value": "your-here-key-here"}
 ```
 
-**Valid keys:** `google_api_key`, `serper_key`, `gemini_key`, `claude_key`, `replicate_token`, `imagine_art_key`, `oxylabs_key`, `resend_key`, `from_email`, `from_name`, `here_api_key`.
+**Valid keys:** `google_api_key`, `serper_key`, `gemini_key`, `claude_key`, `replicate_token`, `imagine_art_key`, `oxylabs_key`, `resend_key`, `from_email`, `from_name`, `here_api_key`, `scrapingbee_key`, `zenrows_key`, `scrapingdog_key`, `firecrawl_key`, `ebay_client_id`, `ebay_client_secret`, `reddit_client_id`, `reddit_client_secret`, `freelancer_api_key`, `millionverifier_key`, `public_base_url`, `company_name`, `company_address`, `resend_webhook_secret`, `imap_host`, `imap_user`, `imap_pass`.
+
+### POST /api-keys/bulk-update
+Update many keys in one call — powers the Settings "Bulk import" (upload/paste a `.env` or
+JSON file instead of setting 25+ fields one at a time). Blank values in `pairs` are ignored
+(never wipes a key it doesn't mention); names not in the valid-keys list above are reported
+back in `skipped` rather than silently dropped. Persists once, admin only.
+
+```json
+{"pairs": {"GOOGLE_API_KEY": "AIza...", "serper_key": "abc123"}}
+```
+
+Response: `{"success": true, "updated": ["google_api_key", "serper_key"], "skipped": []}`
 
 ---
 
