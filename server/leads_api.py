@@ -7349,6 +7349,13 @@ def send_lead_email(lead_id, forced_domain_id=None):
 #  implies, rather than a node picking up unrelated leads platform-wide.
 # ──────────────────────────────────────────────────────────────
 def ensure_workflow_tables():
+    # Named wf_canvas_runs, not workflow_runs: init.sql already defines an
+    # unrelated (and currently unused) workflow_runs table for "n8n workflow
+    # executions" — confirmed live in production with 0 rows and referenced
+    # nowhere in this file. Reusing that name collided (CREATE TABLE IF NOT
+    # EXISTS silently no-opped against its incompatible columns, then the
+    # index creation below failed loudly). Left that table untouched since
+    # its actual purpose/consumers aren't established — this one is ours.
     conn = db_conn(); cur = conn.cursor()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS workflows (
@@ -7361,7 +7368,7 @@ def ensure_workflow_tables():
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )""")
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS workflow_runs (
+        CREATE TABLE IF NOT EXISTS wf_canvas_runs (
             id SERIAL PRIMARY KEY,
             workflow_id INTEGER NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
             started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -7370,7 +7377,7 @@ def ensure_workflow_tables():
             log TEXT,
             node_results JSONB
         )""")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_workflow_runs_wf ON workflow_runs(workflow_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_wf_canvas_runs_workflow_id ON wf_canvas_runs(workflow_id)")
     conn.commit(); cur.close(); conn.close()
 
 def wf_search(config, input_ids, log_fn):
@@ -7512,7 +7519,7 @@ def run_workflow_bg(job_id, workflow_id):
             cur.close(); conn.close()
             return
         name, graph = row
-        cur.execute("INSERT INTO workflow_runs (workflow_id) VALUES (%s) RETURNING id", (workflow_id,))
+        cur.execute("INSERT INTO wf_canvas_runs (workflow_id) VALUES (%s) RETURNING id", (workflow_id,))
         run_row_id = cur.fetchone()[0]
         conn.commit(); cur.close(); conn.close()
 
@@ -7565,7 +7572,7 @@ def run_workflow_bg(job_id, workflow_id):
 
         result_counts = {nid: len(v) for nid, v in outputs.items()}
         conn = db_conn(); cur = conn.cursor()
-        cur.execute("UPDATE workflow_runs SET finished_at=NOW(), status='completed', log=%s, node_results=%s WHERE id=%s",
+        cur.execute("UPDATE wf_canvas_runs SET finished_at=NOW(), status='completed', log=%s, node_results=%s WHERE id=%s",
                     ('\n'.join(log_lines[-200:]), json.dumps(result_counts), run_row_id))
         conn.commit(); cur.close(); conn.close()
         if job_id in JOBS:
@@ -7576,7 +7583,7 @@ def run_workflow_bg(job_id, workflow_id):
         try:
             if run_row_id:
                 conn = db_conn(); cur = conn.cursor()
-                cur.execute("UPDATE workflow_runs SET finished_at=NOW(), status='failed', log=%s WHERE id=%s",
+                cur.execute("UPDATE wf_canvas_runs SET finished_at=NOW(), status='failed', log=%s WHERE id=%s",
                             ('\n'.join(log_lines[-200:]) + f'\nFATAL: {e}', run_row_id))
                 conn.commit(); cur.close(); conn.close()
         except Exception:
@@ -8119,8 +8126,8 @@ class Handler(BaseHTTPRequestHandler):
                 conn = db_conn(); cur = conn.cursor()
                 cur.execute("""SELECT w.id, w.name, w.graph, w.is_active, w.created_by,
                                       to_char(w.updated_at,'YYYY-MM-DD HH24:MI'),
-                                      (SELECT status FROM workflow_runs WHERE workflow_id=w.id ORDER BY id DESC LIMIT 1),
-                                      to_char((SELECT started_at FROM workflow_runs WHERE workflow_id=w.id ORDER BY id DESC LIMIT 1),'YYYY-MM-DD HH24:MI')
+                                      (SELECT status FROM wf_canvas_runs WHERE workflow_id=w.id ORDER BY id DESC LIMIT 1),
+                                      to_char((SELECT started_at FROM wf_canvas_runs WHERE workflow_id=w.id ORDER BY id DESC LIMIT 1),'YYYY-MM-DD HH24:MI')
                                FROM workflows w ORDER BY w.id DESC""")
                 rows = cur.fetchall(); cur.close(); conn.close()
                 self.send_json(200, {'workflows': [dict(zip(
