@@ -471,7 +471,7 @@ Remove a workflow (cascades to its run history).
 ### POST /workflows/run
 Executes the saved graph as a DAG (topological order, so branches and fan-in both work) —
 each node acts only on the lead ids that flowed to it from its predecessor node(s), not on
-every matching lead platform-wide. Returns a `job_id` — poll `/job-status?job_id=...` same as
+every matching lead platform-wide. Returns a `job_id` — poll `/job/{job_id}` same as
 any other background job (ICP runs, discovery, etc.).
 
 ```json

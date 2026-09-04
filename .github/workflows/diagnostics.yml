@@ -42,7 +42,7 @@ jobs:
                 echo "job id: $JOB_ID"
                 for i in 1 2 3 4 5; do
                   sleep 1
-                  STATUS_RESP=$(curl -s "http://localhost:8080/job-status?job_id=$JOB_ID" -H "Authorization: Bearer $TOKEN")
+                  STATUS_RESP=$(curl -s "http://localhost:8080/job/$JOB_ID" -H "Authorization: Bearer $TOKEN")
                   echo "poll $i: $STATUS_RESP"
                   echo "$STATUS_RESP" | grep -q '"status": *"completed"' && break
                 done

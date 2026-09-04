@@ -4595,7 +4595,7 @@ const ICPPage = ({ setPage }) => {
         clearInterval(t); setRunJob(null); refresh();
         return;
       }
-      api.get('/job-status?job_id=' + runJob.job_id).then(j => {
+      api.get('/job/' + runJob.job_id).then(j => {
         setRunJob(j);
         if (j.status === 'completed' || j.status === 'failed') { clearInterval(t); refresh(); }
       }).catch(() => {});
@@ -5040,7 +5040,7 @@ const WorkflowsPage = () => {
     const startedAt = Date.now();
     const t = setInterval(() => {
       if (Date.now() - startedAt > 5 * 60 * 1000) { clearInterval(t); setRunJob(null); refresh(); return; }
-      api.get('/job-status?job_id=' + runJob.job_id).then(j => {
+      api.get('/job/' + runJob.job_id).then(j => {
         setRunJob(j);
         if (j.status === 'completed' || j.status === 'failed') { clearInterval(t); refresh(); }
       }).catch(() => {});
