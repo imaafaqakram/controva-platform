@@ -85,6 +85,17 @@ jobs:
             getent hosts n8n.controvallc.com || echo "n8n.controvallc.com does not resolve from this VM"
             echo
 
+            echo "### CAN N8N'S OWN EDITOR BE IFRAME-EMBEDDED IN OUR DASHBOARD? ###"
+            echo "--- is n8n_url / n8n_api_key currently configured in our app? ---"
+            python3 -c "import json; d=json.load(open('/opt/leadgen/config.json')); print('n8n_url:', repr(d.get('n8n_url',''))); print('n8n_api_key set:', bool(d.get('n8n_api_key')))" 2>/dev/null || echo "(could not read config.json)"
+            echo "--- response headers from n8n's own editor root (X-Frame-Options / CSP frame-ancestors decide if an <iframe> is even possible) ---"
+            curl -sI --max-time 5 http://localhost:5678/ 2>&1 | grep -iE 'x-frame-options|content-security-policy|^HTTP' || echo "(no response / nothing on 5678)"
+            if [ -n "$N8N_CONTAINER" ]; then
+              echo "--- does the n8n container set N8N_EDITOR_BASE_URL, N8N_SECURE_COOKIE, or any frame/embed-related env? ---"
+              docker inspect "$N8N_CONTAINER" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>&1 | grep -iE 'FRAME|EMBED|EDITOR_BASE|SECURE_COOKIE|N8N_PATH' || echo "(none set — n8n defaults apply)"
+            fi
+            echo
+
             echo "### WORKFLOW_RUNS SCHEMA INVESTIGATION ###"
             echo "--- does 'workflows' table exist, and what does it look like? ---"
             docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "\d workflows" 2>&1
