@@ -8306,7 +8306,7 @@ class Handler(BaseHTTPRequestHandler):
                              'updated_at': w.get('updatedAt')} for w in (items or [])]
                 self.send_json(200, {'workflows': workflows, 'configured': True, 'n8n_url': N8N_URL})
             except Exception as e:
-                self.send_json(200, {'workflows': [], 'configured': True, 'error': str(e)})
+                self.send_json(200, {'workflows': [], 'configured': True, 'error': str(e), 'n8n_url': N8N_URL})
 
         elif p == '/cost-stats':
             try:
