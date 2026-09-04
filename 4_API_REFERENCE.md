@@ -5,7 +5,7 @@ Complete documentation of all 45+ endpoints.
 **Base URL:** `http://YOUR_SERVER_IP:8080`
 **Authentication:** Most endpoints are open. For production, add a reverse proxy with HTTP basic auth, or use the `/auth/login` token.
 **Content-Type:** `application/json` for all POST requests.
-**Version:** 8.3
+**Version:** 8.4
 
 ---
 
@@ -460,10 +460,26 @@ Create or update a workflow. Omit `id` to create.
 }}
 ```
 
-Node `type` is one of `search`, `enrich`, `score`, `filter_score`, `generate_assets`,
-`send_email` — each takes the config shape shown in the dashboard's node config panel.
-`send_email`'s `domain_id` is optional; blank/omitted means auto-rotate across active sending
-domains (same as a manual send), same as M11.
+Node `type` is one of the twelve below — each takes the config shape shown in the dashboard's
+node config panel. Every handler is `(config, input_ids, log_fn) -> output_ids`; a "source" node
+ignores `input_ids` and returns whatever it newly found, an "annotate" node updates the DB and
+passes every input id through unchanged, and `filter_score` is the only node that narrows the
+chain.
+
+| `type` | Config keys | Behavior |
+|---|---|---|
+| `search` | `niche`, `city`, `country`, `filter_mode`, `density` | Source — one discovery call, returns newly-found lead ids. |
+| `icp_search` | `icp_id` | Source — runs one saved ICP profile's industry × geo combos (same engine as `/icp/run`), returns newly-found ids. |
+| `intent_search` | `query`, `direction` (`demand`/`supply`), `location`, `recency_days`, `min_confidence`, `max_results` | Source — runs the Intent Engine, returns the ids it saved. |
+| `enrich` | `strategy` | Enriches each input lead in place; passes ids through. |
+| `verify_websites` | *(none)* | Annotate — HEAD/GET-checks stored URLs, Serper-searches leads with none; passes ids through. |
+| `verify_emails` | *(none)* | Annotate — checks deliverability of each input lead's stored contact email; passes ids through. |
+| `score` | *(none)* | Annotate — AI-scores input leads that don't have a score yet; passes ids through. |
+| `filter_score` | `min_score` | Filter — keeps only ids at/above `min_score` (0-10). |
+| `research` | *(none)* | Annotate — builds the AI research / pain-point dossier (M7) for each input lead; passes ids through. |
+| `generate_assets` | *(none)* | Annotate — generates email subject/body copy for input leads that don't have it yet; passes ids through. |
+| `crm_push` | `connection_id` | Annotate — pushes each input lead to the chosen CRM connection (M9); passes ids through. |
+| `send_email` | `domain_id` | Sends to each input lead. `domain_id` is optional; blank/omitted means auto-rotate across active sending domains (same as a manual send), same as M11. |
 
 ### POST /workflows/{id}/delete
 Remove a workflow (cascades to its run history).
@@ -471,7 +487,7 @@ Remove a workflow (cascades to its run history).
 ### POST /workflows/run
 Executes the saved graph as a DAG (topological order, so branches and fan-in both work) —
 each node acts only on the lead ids that flowed to it from its predecessor node(s), not on
-every matching lead platform-wide. Returns a `job_id` — poll `/job-status?job_id=...` same as
+every matching lead platform-wide. Returns a `job_id` — poll `/job/{job_id}` same as
 any other background job (ICP runs, discovery, etc.).
 
 ```json
@@ -758,10 +774,11 @@ When you hit a limit, the API returns an error in the response body explaining w
 
 ## Versioning
 
-Current API version: **8.3** — adds AI research (M7), pain-aware scoring (M8), CRM push
+Current API version: **8.4** — adds AI research (M7), pain-aware scoring (M8), CRM push
 (M9), the phase-2 suite (M10), multi-domain sending + outreach automation (M11), the
-admin activity log (M12), and the visual workflow builder + n8n panel (M13). Fully
-backwards-compatible with 7.0 clients — all new fields are additive.
+admin activity log (M12), the visual workflow builder + n8n panel (M13), and its six
+additional node types + job-polling fix (v8.4). Fully backwards-compatible with 7.0
+clients — all new fields are additive.
 
 Check `/health` for the version your server is running.
 

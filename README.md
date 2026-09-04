@@ -452,7 +452,7 @@ inside Controva, and separately, see your existing n8n workflows without leaving
 
 | Capability | Configure | What happens |
 |---|---|---|
-| **Visual workflow builder** | Nav → **Workflows** → New Workflow | A drag-and-drop canvas (custom-built — no bundler in this app, so no third-party node-graph library) for wiring up a pipeline from six step types: **Search Leads**, **Enrich**, **AI Score**, **Filter by Score**, **Generate Email Copy**, **Send Email**. Drag from a node's right dot to another node's left dot to connect them; click a node to configure it; drag a node to reposition it. |
+| **Visual workflow builder** | Nav → **Workflows** → New Workflow | A drag-and-drop canvas (custom-built — no bundler in this app, so no third-party node-graph library) for wiring up a pipeline from twelve step types, covering essentially every standalone platform capability: **Search Leads**, **ICP Search** (run a saved ICP profile's industry × geo combos), **Intent Search** (buyer/seller signal search), **Enrich**, **Verify Websites**, **Verify Emails**, **AI Score**, **Filter by Score**, **AI Research** (pain-point dossier), **Generate Email Copy**, **Push to CRM**, **Send Email**. Drag from a node's right dot to another node's left dot to connect them; click a node to configure it; drag a node to reposition it. |
 | **Data actually flows node-to-node** | — | Each step only acts on the leads that flowed to it from the step(s) before it (a fresh `wf_*` handler per node type, scoped to that specific lead-id list) — not "every pending lead platform-wide," which is what naively reusing the existing bulk functions would have done. |
 | **Domain choice on Send Email** | Node config → Sending domain | Pick a specific verified sending domain for that node, or leave it on **Auto** to use the same M11 rotation-by-headroom logic as every other send. |
 | **Run** | Click **Run** on a saved workflow | Executes the graph in topological order (a DAG, not just a straight line — supports branching/fan-in). Manual trigger only for now; no schedule yet. |
@@ -461,8 +461,10 @@ inside Controva, and separately, see your existing n8n workflows without leaving
 
 Not built (intentionally, to keep this a real, tested feature rather than a sprawling one):
 scroll-wheel zoom (button zoom in/out/reset only), scheduled/event-triggered workflow runs (manual
-only, matching what was asked for), and node types beyond the six above (no CRM push, delay, or
-reply-based branching node yet — natural fast-follows if needed).
+only, matching what was asked for), and a couple of node types that don't fit the lead-id-chain
+model cleanly: no delay/wait node, no reply-based branching, no check-replies node (inbox-wide,
+not scoped to specific leads), and no CSV-upload enrich node (a different input shape entirely).
+Natural fast-follows if needed.
 
 ---
 
@@ -720,6 +722,14 @@ Before going to production:
 ---
 
 ## Changelog
+
+### v8.4 — September 2026 (M13 workflow nodes + polling fix)
+
+**New features**
+- **Six more workflow node types** — the visual workflow builder now covers essentially every standalone platform capability: **ICP Search** (run a saved ICP profile's industry × geo combos), **Intent Search** (buyer/seller signal search), **Verify Websites**, **Verify Emails**, **AI Research** (M7 pain-point dossier), and **Push to CRM** (M9), alongside the original six. Each follows the same rule as every other node — it only acts on the lead ids that flowed to it from earlier steps. Not added: a delay/wait node, reply-based branching, a check-replies node (inbox-wide, not scoped to specific leads), and a CSV-upload enrich node (different input shape) — these don't fit the lead-id-chain model cleanly.
+
+**Bug fixes**
+- **Workflow/ICP run-progress polling silently never worked** — `ICPPage` and `WorkflowsPage` polled `/job-status?job_id=...`, a route the backend never implements (the real route is path-based, `/job/{job_id}`). Every poll attempt 404'd and was swallowed by a `.catch(() => {})`, so progress only ever recovered via the timeout fallback, never by observing real completion — very likely the deeper explanation for the v8.2 "ICP run looks stuck" report. Also fixed the same wrong URL in the public API's (`controva_api.py`) job-status proxy (its external contract is unchanged) and in the API docs. Verified live: polling now reports `completed` on the very first attempt instead of 5/5 failed attempts.
 
 ### v8.3 — September 2026 (M13)
 

@@ -7492,10 +7492,164 @@ def wf_send_email(config, input_ids, log_fn):
     log_fn(f'  sent {sent}/{len(input_ids)}')
     return input_ids
 
+def wf_icp_search(config, input_ids, log_fn):
+    """ICP Search node — ignores input_ids (source node); runs one saved ICP
+    profile's industry x geo combinations same as the standalone ICP engine
+    (run_icp_bg), returning the ids of leads newly discovered."""
+    icp_id = config.get('icp_id')
+    if not icp_id:
+        log_fn('  ICP Search node needs a profile selected — skipped')
+        return []
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("SELECT name, industries, geos, keywords, exclusions FROM icp_profiles WHERE id=%s", (icp_id,))
+    row = cur.fetchone()
+    if not row:
+        cur.close(); conn.close()
+        log_fn('  selected ICP profile no longer exists — skipped')
+        return []
+    name, industries, geos, keywords, exclusions = row
+    cur.execute("SELECT COALESCE(MAX(id),0) FROM leads")
+    before_max = cur.fetchone()[0]
+    cur.close(); conn.close()
+    combos = [(ind, g) for ind in _split_list(industries) for g in _split_list(geos)][:int(CONFIG.get('icp_daily_cap', 40))]
+    for industry, geo in combos:
+        city, country = _parse_geo(geo)
+        q = industry + (' ' + keywords if keywords else '') + (' ' + exclusions if exclusions else '')
+        try:
+            discover_leads_smart(niche=industry, city=city, country=country,
+                                 original_query=q, filter_mode='all',
+                                 density='standard', find_more=False, job_id=None)
+            tag_leads_for_icp(industry, city, icp_id)
+        except Exception as e:
+            log_fn(f'  {industry} · {city}: ERROR {str(e)[:80]}')
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("SELECT id FROM leads WHERE id > %s ORDER BY id ASC", (before_max,))
+    new_ids = [r[0] for r in cur.fetchall()]
+    cur.close(); conn.close()
+    log_fn(f'  ICP "{name}": {len(combos)} combo(s), {len(new_ids)} new lead(s)')
+    return new_ids
+
+def wf_intent_search(config, input_ids, log_fn):
+    """Intent Search node — ignores input_ids (source node); runs the Intent
+    Engine (buyer/seller signal search) and returns the ids of saved leads."""
+    query = (config.get('query') or '').strip()
+    if not query:
+        log_fn('  Intent Search node needs a query — skipped')
+        return []
+    direction = config.get('direction') if config.get('direction') in ('demand', 'supply') else 'demand'
+    try:
+        saved, status = intent_search(
+            query, direction=direction,
+            location=(config.get('location') or '').strip(),
+            recency_days=int(config.get('recency_days') or 30),
+            min_confidence=int(config.get('min_confidence') or 55),
+            max_results=int(config.get('max_results') or 30))
+    except Exception as e:
+        log_fn(f'  intent search failed: {str(e)[:100]}')
+        return []
+    ids = [int(s['lead_id']) for s in saved if str(s.get('lead_id', '')).isdigit()]
+    log_fn(f'  found {len(ids)} {direction} lead(s) ({status})')
+    return ids
+
+def wf_verify_websites(config, input_ids, log_fn):
+    """Checks whether each input lead has a live website (HEAD/GET ping, or a
+    Serper fallback search when no URL is stored). Annotates in place — every
+    input id passes through unchanged, this node never filters the chain."""
+    if not input_ids: return []
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("SELECT id, business_name, city, COALESCE(website,'') FROM leads WHERE id = ANY(%s)", (input_ids,))
+    rows = cur.fetchall(); cur.close(); conn.close()
+    skip_domains = ('facebook.com', 'instagram.com', 'yelp.com', 'tripadvisor', 'yellowpages',
+                     'foursquare', 'linkedin.com', 'google.com', 'maps.google', 'apple.com',
+                     'trustpilot', 'bbb.org')
+    has_w = no_w = 0
+    for lid, bname, city, stored_url in rows:
+        website, alive = stored_url, False
+        if stored_url:
+            try:
+                req = urllib.request.Request(stored_url, method='HEAD', headers={'User-Agent': 'Mozilla/5.0'})
+                alive = urllib.request.urlopen(req, timeout=6).status < 400
+            except Exception:
+                try:
+                    req2 = urllib.request.Request(stored_url, headers={'User-Agent': 'Mozilla/5.0'})
+                    alive = urllib.request.urlopen(req2, timeout=6).status < 400
+                except Exception:
+                    alive = False
+        if not alive:
+            try:
+                data = serper_search(f'"{bname}" {city} official website', 5)
+                for item in data.get('organic', []):
+                    link = item.get('link', '')
+                    if link and not any(s in link for s in skip_domains):
+                        website = link.split('?')[0]; alive = True; break
+            except Exception:
+                pass
+        try:
+            conn2 = db_conn(); cur2 = conn2.cursor()
+            cur2.execute("UPDATE leads SET website=%s, website_verified=TRUE, updated_at=NOW() WHERE id=%s",
+                        (website if alive else None, lid))
+            conn2.commit(); cur2.close(); conn2.close()
+        except Exception as e:
+            log_fn(f'  DB update failed for lead {lid}: {str(e)[:80]}')
+        if alive: has_w += 1
+        else: no_w += 1
+    log_fn(f'  {has_w} have a live website, {no_w} do not')
+    return input_ids
+
+def wf_verify_emails(config, input_ids, log_fn):
+    """Verifies deliverability of stored contact emails for the input leads."""
+    if not input_ids: return []
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("SELECT lead_id::text, email FROM contacts WHERE lead_id = ANY(%s) AND COALESCE(email,'') != ''",
+                (input_ids,))
+    rows = cur.fetchall(); cur.close(); conn.close()
+    stats = {}
+    for lead_id, email in rows:
+        try:
+            vr = verify_and_store_contact_email(lead_id, email)
+            stats[vr['status']] = stats.get(vr['status'], 0) + 1
+        except Exception as e:
+            log_fn(f'  verify failed for {email}: {str(e)[:80]}')
+    log_fn(f'  checked {len(rows)} email(s): ' + (', '.join(f'{k}={v}' for k, v in stats.items()) or 'none had an email on file'))
+    return input_ids
+
+def wf_research(config, input_ids, log_fn):
+    """Builds the AI research / pain-point dossier for each input lead (M7)."""
+    if not input_ids: return []
+    with_pain = 0
+    for lid in input_ids:
+        try:
+            r = research_lead(lid)
+            if r.get('pain_points'): with_pain += 1
+        except Exception as e:
+            log_fn(f'  research failed for lead {lid}: {str(e)[:100]}')
+    log_fn(f'  researched {len(input_ids)} lead(s), {with_pain} with pain points found')
+    return input_ids
+
+def wf_crm_push(config, input_ids, log_fn):
+    """Pushes input leads to a configured CRM connection (M9)."""
+    if not input_ids: return []
+    connection_id = config.get('connection_id')
+    if not connection_id:
+        log_fn('  CRM Push node needs a connection selected — skipped')
+        return input_ids
+    ok_count = 0
+    for lid in input_ids:
+        try:
+            ok, ext_id, resp = crm_push_lead(lid, connection_id)
+            if ok: ok_count += 1
+            else: log_fn(f'  lead {lid} push failed: {str(resp)[:80]}')
+        except Exception as e:
+            log_fn(f'  lead {lid} push error: {str(e)[:80]}')
+    log_fn(f'  pushed {ok_count}/{len(input_ids)} to CRM')
+    return input_ids
+
 WORKFLOW_NODE_HANDLERS = {
     'search': wf_search, 'enrich': wf_enrich, 'score': wf_score,
     'filter_score': wf_filter_score, 'generate_assets': wf_generate_assets,
-    'send_email': wf_send_email,
+    'send_email': wf_send_email, 'icp_search': wf_icp_search,
+    'intent_search': wf_intent_search, 'verify_websites': wf_verify_websites,
+    'verify_emails': wf_verify_emails, 'research': wf_research, 'crm_push': wf_crm_push,
 }
 
 def run_workflow_bg(job_id, workflow_id):

@@ -551,7 +551,7 @@ class H(BaseHTTPRequestHandler):
     def get_job(self, job_id):
         try:
             req = urllib.request.Request(
-                f'{PLATFORM}/job-status?job_id={job_id}',
+                f'{PLATFORM}/job/{job_id}',
                 headers={'Authorization': 'Bearer ' + SERVICE_TOKEN})
             resp = urllib.request.urlopen(req, timeout=10)
             r = json.loads(resp.read().decode())

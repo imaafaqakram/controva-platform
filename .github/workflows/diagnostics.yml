@@ -1,5 +1,5 @@
 name: VM Diagnostics
-# retry: investigate workflow_runs migration error ("column workflow_id does not exist")
+# retry: real end-to-end workflow-engine test against the live API (safe: empty graph)
 
 on:
   push:
@@ -20,6 +20,84 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
+            echo "### END-TO-END WORKFLOW ENGINE TEST (live API, all 12 node types, disconnected so every node takes its safe/zero-cost early-return branch — no leads touched, no cost) ###"
+            TOKEN=$(python3 -c "import json; print(json.load(open('/opt/leadgen/config.json')).get('service_token',''))" 2>/dev/null)
+            if [ -z "$TOKEN" ]; then
+              echo "no service_token found in config.json — skipping live API test"
+            else
+              echo "--- creating a throwaway test workflow (all 12 node types, no edges — each hits its cheapest branch: missing config or empty input_ids) ---"
+              SAVE_RESP=$(curl -s -X POST http://localhost:8080/workflows/save \
+                -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+                -d '{"name":"_diagnostic_e2e_test_delete_me","graph":{"nodes":[{"id":"n1","type":"search","x":0,"y":0,"config":{}},{"id":"n2","type":"icp_search","x":0,"y":0,"config":{}},{"id":"n3","type":"intent_search","x":0,"y":0,"config":{}},{"id":"n4","type":"enrich","x":0,"y":0,"config":{}},{"id":"n5","type":"verify_websites","x":0,"y":0,"config":{}},{"id":"n6","type":"verify_emails","x":0,"y":0,"config":{}},{"id":"n7","type":"score","x":0,"y":0,"config":{}},{"id":"n8","type":"filter_score","x":0,"y":0,"config":{}},{"id":"n9","type":"research","x":0,"y":0,"config":{}},{"id":"n10","type":"generate_assets","x":0,"y":0,"config":{}},{"id":"n11","type":"crm_push","x":0,"y":0,"config":{}},{"id":"n12","type":"send_email","x":0,"y":0,"config":{}}],"edges":[]}}')
+              echo "save response: $SAVE_RESP"
+              WF_ID=$(echo "$SAVE_RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
+              echo "workflow id: $WF_ID"
+              if [ -n "$WF_ID" ]; then
+                echo "--- running it ---"
+                RUN_RESP=$(curl -s -X POST http://localhost:8080/workflows/run \
+                  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+                  -d "{\"id\": $WF_ID}")
+                echo "run response: $RUN_RESP"
+                JOB_ID=$(echo "$RUN_RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('job_id',''))" 2>/dev/null)
+                echo "job id: $JOB_ID"
+                for i in 1 2 3 4 5; do
+                  sleep 1
+                  STATUS_RESP=$(curl -s "http://localhost:8080/job/$JOB_ID" -H "Authorization: Bearer $TOKEN")
+                  echo "poll $i: $STATUS_RESP"
+                  echo "$STATUS_RESP" | grep -q '"status": *"completed"' && break
+                done
+                echo "--- any per-node ERROR lines? (would mean one of the 6 new handlers has a bug — e.g. a typo'd function name) ---"
+                echo "$STATUS_RESP" | grep -o '"ERROR[^"]*"' || echo "(none — all 12 node types executed cleanly)"
+                echo "--- confirming the run actually landed in wf_canvas_runs, with all 12 nodes present in node_results ---"
+                docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
+                  "SELECT id, workflow_id, status, started_at, finished_at, node_results FROM wf_canvas_runs WHERE workflow_id=$WF_ID;" 2>&1
+                echo "--- confirming GET /workflows reflects it ---"
+                curl -s "http://localhost:8080/workflows" -H "Authorization: Bearer $TOKEN" | python3 -c "import json,sys; d=json.load(sys.stdin); m=[w for w in d.get('workflows',[]) if w['id']==$WF_ID]; print('found:', m[0] if m else 'NOT FOUND')"
+                echo "--- cleaning up the test workflow ---"
+                curl -s -X POST "http://localhost:8080/workflows/$WF_ID/delete" -H "Authorization: Bearer $TOKEN"
+                echo
+                echo "--- confirming cleanup (cascade should remove the wf_canvas_runs row too) ---"
+                docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
+                  "SELECT COUNT(*) FROM workflows WHERE id=$WF_ID; SELECT COUNT(*) FROM wf_canvas_runs WHERE workflow_id=$WF_ID;" 2>&1
+              fi
+            fi
+            unset TOKEN SAVE_RESP RUN_RESP STATUS_RESP
+            echo
+
+            echo "### FIND N8N ON THIS VM ###"
+            echo "--- docker containers (any n8n?) ---"
+            docker ps -a --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' 2>&1
+            echo "--- systemd services mentioning n8n ---"
+            systemctl list-units --all 2>/dev/null | grep -i n8n || echo "(no systemd unit named n8n)"
+            echo "--- is anything listening that looks like n8n's default port 5678? ---"
+            sudo ss -tlnp 2>/dev/null | grep -E ':5678|n8n' || echo "(nothing on 5678)"
+            echo "--- n8n container env (if found) — look for N8N_API_KEY / auth config / port, secrets redacted ---"
+            N8N_CONTAINER=$(docker ps -a --format '{{.Names}}' | grep -i n8n | head -1)
+            echo "n8n container name: ${N8N_CONTAINER:-none found}"
+            if [ -n "$N8N_CONTAINER" ]; then
+              docker inspect "$N8N_CONTAINER" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>&1 | grep -iE 'N8N_|PORT|HOST|PROTOCOL' | sed -E 's/(KEY|SECRET|PASSWORD|TOKEN)=.*/\1=***REDACTED***/'
+              echo "--- n8n container port mapping ---"
+              docker port "$N8N_CONTAINER" 2>&1
+              echo "--- can we reach n8n's REST API locally at all (unauthenticated ping) ---"
+              curl -s -o /dev/null -w "http://localhost:5678/ -> HTTP %{http_code}\n" --max-time 5 http://localhost:5678/ || true
+              echo "--- does this n8n have ANY existing api key stored in its own db (n8n uses sqlite by default unless configured otherwise)? ---"
+              docker exec "$N8N_CONTAINER" sh -c 'find / -maxdepth 4 -iname "*.sqlite*" 2>/dev/null' 2>&1 || true
+            fi
+            echo "--- does app.controvallc.com's DNS sibling n8n.controvallc.com resolve, and to what? (may be a DIFFERENT server per earlier session notes) ---"
+            getent hosts n8n.controvallc.com || echo "n8n.controvallc.com does not resolve from this VM"
+            echo
+
+            echo "### CAN N8N'S OWN EDITOR BE IFRAME-EMBEDDED IN OUR DASHBOARD? ###"
+            echo "--- is n8n_url / n8n_api_key currently configured in our app? ---"
+            python3 -c "import json; d=json.load(open('/opt/leadgen/config.json')); print('n8n_url:', repr(d.get('n8n_url',''))); print('n8n_api_key set:', bool(d.get('n8n_api_key')))" 2>/dev/null || echo "(could not read config.json)"
+            echo "--- response headers from n8n's own editor root (X-Frame-Options / CSP frame-ancestors decide if an <iframe> is even possible) ---"
+            curl -sI --max-time 5 http://localhost:5678/ 2>&1 | grep -iE 'x-frame-options|content-security-policy|^HTTP' || echo "(no response / nothing on 5678)"
+            if [ -n "$N8N_CONTAINER" ]; then
+              echo "--- does the n8n container set N8N_EDITOR_BASE_URL, N8N_SECURE_COOKIE, or any frame/embed-related env? ---"
+              docker inspect "$N8N_CONTAINER" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>&1 | grep -iE 'FRAME|EMBED|EDITOR_BASE|SECURE_COOKIE|N8N_PATH' || echo "(none set — n8n defaults apply)"
+            fi
+            echo
+
             echo "### WORKFLOW_RUNS SCHEMA INVESTIGATION ###"
             echo "--- does 'workflows' table exist, and what does it look like? ---"
             docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "\d workflows" 2>&1
