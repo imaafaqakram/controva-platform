@@ -1,5 +1,5 @@
 name: VM Diagnostics
-# retry: find n8n on the VM — URL, port, whether an API key already exists
+# retry: real end-to-end workflow-engine test against the live API (safe: empty graph)
 
 on:
   push:
@@ -20,6 +20,48 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
+            echo "### END-TO-END WORKFLOW ENGINE TEST (live API, safe: empty graph, no leads touched, no cost) ###"
+            TOKEN=$(python3 -c "import json; print(json.load(open('/opt/leadgen/config.json')).get('service_token',''))" 2>/dev/null)
+            if [ -z "$TOKEN" ]; then
+              echo "no service_token found in config.json — skipping live API test"
+            else
+              echo "--- creating a throwaway test workflow (empty graph) ---"
+              SAVE_RESP=$(curl -s -X POST http://localhost:8080/workflows/save \
+                -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+                -d '{"name":"_diagnostic_e2e_test_delete_me","graph":{"nodes":[],"edges":[]}}')
+              echo "save response: $SAVE_RESP"
+              WF_ID=$(echo "$SAVE_RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
+              echo "workflow id: $WF_ID"
+              if [ -n "$WF_ID" ]; then
+                echo "--- running it ---"
+                RUN_RESP=$(curl -s -X POST http://localhost:8080/workflows/run \
+                  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+                  -d "{\"id\": $WF_ID}")
+                echo "run response: $RUN_RESP"
+                JOB_ID=$(echo "$RUN_RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('job_id',''))" 2>/dev/null)
+                echo "job id: $JOB_ID"
+                for i in 1 2 3 4 5; do
+                  sleep 1
+                  STATUS_RESP=$(curl -s "http://localhost:8080/job-status?job_id=$JOB_ID" -H "Authorization: Bearer $TOKEN")
+                  echo "poll $i: $STATUS_RESP"
+                  echo "$STATUS_RESP" | grep -q '"status": *"completed"' && break
+                done
+                echo "--- confirming the run actually landed in wf_canvas_runs ---"
+                docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
+                  "SELECT id, workflow_id, status, started_at, finished_at, node_results FROM wf_canvas_runs WHERE workflow_id=$WF_ID;" 2>&1
+                echo "--- confirming GET /workflows reflects it ---"
+                curl -s "http://localhost:8080/workflows" -H "Authorization: Bearer $TOKEN" | python3 -c "import json,sys; d=json.load(sys.stdin); m=[w for w in d.get('workflows',[]) if w['id']==$WF_ID]; print('found:', m[0] if m else 'NOT FOUND')"
+                echo "--- cleaning up the test workflow ---"
+                curl -s -X POST "http://localhost:8080/workflows/$WF_ID/delete" -H "Authorization: Bearer $TOKEN"
+                echo
+                echo "--- confirming cleanup (cascade should remove the wf_canvas_runs row too) ---"
+                docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
+                  "SELECT COUNT(*) FROM workflows WHERE id=$WF_ID; SELECT COUNT(*) FROM wf_canvas_runs WHERE workflow_id=$WF_ID;" 2>&1
+              fi
+            fi
+            unset TOKEN SAVE_RESP RUN_RESP STATUS_RESP
+            echo
+
             echo "### FIND N8N ON THIS VM ###"
             echo "--- docker containers (any n8n?) ---"
             docker ps -a --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' 2>&1
