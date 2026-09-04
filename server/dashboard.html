@@ -4791,6 +4791,21 @@ const WF_NODE_TYPES = {
   send_email:      { label: 'Send Email',         icon: 'Send',       fields: [
     { key: 'domain_id', label: 'Sending domain', type: 'domain_select' },
   ] },
+  icp_search:      { label: 'ICP Search',         icon: 'Target',     fields: [
+    { key: 'icp_id', label: 'ICP profile', type: 'icp_select' },
+  ] },
+  intent_search:   { label: 'Intent Search',      icon: 'Activity',   fields: [
+    { key: 'query', label: 'Search query', type: 'text', placeholder: 'hiring a plumber' },
+    { key: 'direction', label: 'Direction', type: 'select', options: [['demand', 'Demand (who needs this)'], ['supply', 'Supply (who provides this)']] },
+    { key: 'location', label: 'Location (optional)', type: 'text', placeholder: 'Dubai' },
+    { key: 'max_results', label: 'Max results', type: 'number', placeholder: '30' },
+  ] },
+  verify_websites: { label: 'Verify Websites',    icon: 'Globe',      fields: [] },
+  verify_emails:   { label: 'Verify Emails',      icon: 'ShieldCheck',fields: [] },
+  research:        { label: 'AI Research',        icon: 'Sparkles',   fields: [] },
+  crm_push:        { label: 'Push to CRM',        icon: 'Share2',     fields: [
+    { key: 'connection_id', label: 'CRM connection', type: 'crm_select' },
+  ] },
 };
 
 const wfNodeSummary = (node) => {
@@ -4798,6 +4813,9 @@ const wfNodeSummary = (node) => {
   if (node.type === 'enrich') return (WF_NODE_TYPES.enrich.fields[0].options.find(o => o[0] === (node.config.strategy || 'serper_then_oxylabs')) || [, 'Smart'])[1];
   if (node.type === 'filter_score') return `score ≥ ${node.config.min_score ?? 6}`;
   if (node.type === 'send_email') return node.config.domain_id ? `domain #${node.config.domain_id}` : 'auto-rotate domain';
+  if (node.type === 'icp_search') return node.config.icp_id ? `profile #${node.config.icp_id}` : 'not configured';
+  if (node.type === 'intent_search') return [node.config.direction || 'demand', node.config.query].filter(Boolean).join(' · ') || 'not configured';
+  if (node.type === 'crm_push') return node.config.connection_id ? `connection #${node.config.connection_id}` : 'not configured';
   return '';
 };
 
@@ -4812,11 +4830,15 @@ const WorkflowCanvasEditor = ({ workflow, onClose, onSaved }) => {
   const [pan, setPan] = useState({ x: 40, y: 40 });
   const [zoom, setZoom] = useState(1);
   const [domains, setDomains] = useState([]);
+  const [icpProfiles, setIcpProfiles] = useState([]);
+  const [crmConnections, setCrmConnections] = useState([]);
   const [saving, setSaving] = useState(false);
   const canvasRef = useRef(null);
   const { showToast } = useToast();
 
   useEffect(() => { api.get('/sending-domains').then(d => setDomains(d.domains || [])).catch(() => {}); }, []);
+  useEffect(() => { api.get('/icp').then(d => setIcpProfiles(d.profiles || [])).catch(() => {}); }, []);
+  useEffect(() => { api.get('/crm/connections').then(d => setCrmConnections(d.connections || [])).catch(() => {}); }, []);
 
   const toCanvasPoint = (clientX, clientY) => {
     const rect = canvasRef.current.getBoundingClientRect();
@@ -5008,6 +5030,18 @@ const WorkflowCanvasEditor = ({ workflow, onClose, onSaved }) => {
                     className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg px-2 py-1.5 text-xs">
                     <option value="">Auto (rotate active domains)</option>
                     {domains.map(d => <option key={d.id} value={d.id}>{d.from_email}</option>)}
+                  </select>
+                ) : f.type === 'icp_select' ? (
+                  <select value={editingNode.config[f.key] || ''} onChange={e => setNodeConfig(f.key, e.target.value)}
+                    className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg px-2 py-1.5 text-xs">
+                    <option value="">{icpProfiles.length ? 'Select a profile…' : 'No ICP profiles yet — create one on the ICP page'}</option>
+                    {icpProfiles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                  </select>
+                ) : f.type === 'crm_select' ? (
+                  <select value={editingNode.config[f.key] || ''} onChange={e => setNodeConfig(f.key, e.target.value)}
+                    className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg px-2 py-1.5 text-xs">
+                    <option value="">{crmConnections.length ? 'Select a connection…' : 'No CRM connections yet — add one in Settings'}</option>
+                    {crmConnections.map(c => <option key={c.id} value={c.id}>{c.name || c.type}</option>)}
                   </select>
                 ) : (
                   <Input value={editingNode.config[f.key] || ''} onChange={v => setNodeConfig(f.key, f.type === 'number' ? v.replace(/[^0-9]/g, '') : v)}

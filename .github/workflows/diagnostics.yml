@@ -20,15 +20,15 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
-            echo "### END-TO-END WORKFLOW ENGINE TEST (live API, safe: empty graph, no leads touched, no cost) ###"
+            echo "### END-TO-END WORKFLOW ENGINE TEST (live API, all 12 node types, disconnected so every node takes its safe/zero-cost early-return branch — no leads touched, no cost) ###"
             TOKEN=$(python3 -c "import json; print(json.load(open('/opt/leadgen/config.json')).get('service_token',''))" 2>/dev/null)
             if [ -z "$TOKEN" ]; then
               echo "no service_token found in config.json — skipping live API test"
             else
-              echo "--- creating a throwaway test workflow (empty graph) ---"
+              echo "--- creating a throwaway test workflow (all 12 node types, no edges — each hits its cheapest branch: missing config or empty input_ids) ---"
               SAVE_RESP=$(curl -s -X POST http://localhost:8080/workflows/save \
                 -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-                -d '{"name":"_diagnostic_e2e_test_delete_me","graph":{"nodes":[],"edges":[]}}')
+                -d '{"name":"_diagnostic_e2e_test_delete_me","graph":{"nodes":[{"id":"n1","type":"search","x":0,"y":0,"config":{}},{"id":"n2","type":"icp_search","x":0,"y":0,"config":{}},{"id":"n3","type":"intent_search","x":0,"y":0,"config":{}},{"id":"n4","type":"enrich","x":0,"y":0,"config":{}},{"id":"n5","type":"verify_websites","x":0,"y":0,"config":{}},{"id":"n6","type":"verify_emails","x":0,"y":0,"config":{}},{"id":"n7","type":"score","x":0,"y":0,"config":{}},{"id":"n8","type":"filter_score","x":0,"y":0,"config":{}},{"id":"n9","type":"research","x":0,"y":0,"config":{}},{"id":"n10","type":"generate_assets","x":0,"y":0,"config":{}},{"id":"n11","type":"crm_push","x":0,"y":0,"config":{}},{"id":"n12","type":"send_email","x":0,"y":0,"config":{}}],"edges":[]}}')
               echo "save response: $SAVE_RESP"
               WF_ID=$(echo "$SAVE_RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
               echo "workflow id: $WF_ID"
@@ -46,7 +46,9 @@ jobs:
                   echo "poll $i: $STATUS_RESP"
                   echo "$STATUS_RESP" | grep -q '"status": *"completed"' && break
                 done
-                echo "--- confirming the run actually landed in wf_canvas_runs ---"
+                echo "--- any per-node ERROR lines? (would mean one of the 6 new handlers has a bug — e.g. a typo'd function name) ---"
+                echo "$STATUS_RESP" | grep -o '"ERROR[^"]*"' || echo "(none — all 12 node types executed cleanly)"
+                echo "--- confirming the run actually landed in wf_canvas_runs, with all 12 nodes present in node_results ---"
                 docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
                   "SELECT id, workflow_id, status, started_at, finished_at, node_results FROM wf_canvas_runs WHERE workflow_id=$WF_ID;" 2>&1
                 echo "--- confirming GET /workflows reflects it ---"
