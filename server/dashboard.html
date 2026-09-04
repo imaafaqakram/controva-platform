@@ -5173,9 +5173,16 @@ const N8nWorkflowsPage = () => {
 
   return (
     <div className="space-y-6 fade-in">
-      <div>
-        <h1 className="text-2xl font-bold">N8N Workflows</h1>
-        <p className="text-sm text-slate-500 mt-1">Read-only view of workflows on your n8n instance. Open n8n itself to create, edit, or run them.</p>
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div>
+          <h1 className="text-2xl font-bold">N8N Workflows</h1>
+          <p className="text-sm text-slate-500 mt-1">Read-only view of workflows on your n8n instance. Open n8n itself to create, edit, or run them.</p>
+        </div>
+        {data && data.n8n_url && (
+          <a href={`${data.n8n_url.replace(/\/$/, '')}/workflow/new`} target="_blank" rel="noopener noreferrer">
+            <Button variant="primary" icon="ExternalLink">New Workflow in N8N</Button>
+          </a>
+        )}
       </div>
       {loading ? (
         <div className="py-16 text-center"><Spinner size="w-6 h-6" /></div>

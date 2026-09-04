@@ -1,5 +1,6 @@
 name: VM Diagnostics
-# retry: real end-to-end workflow-engine test against the live API (safe: empty graph)
+# retry: re-verify all 12 workflow node types now that PR #27 (job-status fix +
+# 6 new node types) is merged and deployed to the live API
 
 on:
   push:
