@@ -28,27 +28,45 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
-            echo "### TENANT ISOLATION SCHEMA AUDIT (read-only) — do NOT infer this from init.sql, the live DB may have drifted ###"
-            echo "--- does auth_users have a tenant_id column already? full column list: ---"
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "\d auth_users" 2>&1
-            echo "--- current accounts (username/role only, no secrets) ---"
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "SELECT username, role, created_at FROM auth_users ORDER BY created_at;" 2>&1
-            echo "--- does the leads table actually have a tenant_id column live? ---"
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "\d leads" 2>&1 | grep -i "tenant\|Table \"public"
-            echo "--- does a 'tenants' table exist live, and if so what's in it? ---"
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "\d tenants" 2>&1
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "SELECT * FROM tenants;" 2>&1
-            echo "--- does a separate 'users' table exist live (distinct from auth_users)? ---"
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "\d users" 2>&1
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "SELECT COUNT(*) FROM users;" 2>&1
-            echo "--- does tenant_leads exist, and does it have any rows? for which tenant_id values? ---"
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "SELECT tenant_id, COUNT(*) FROM tenant_leads GROUP BY tenant_id;" 2>&1
-            echo "--- how many leads actually have a non-null tenant_id today? (confirms whether it has ever been set) ---"
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "SELECT COUNT(*) FILTER (WHERE tenant_id IS NOT NULL) as tagged, COUNT(*) as total FROM leads;" 2>&1
-            echo "--- any FK constraints on leads.tenant_id / tenant_search_history.user_id that INSERTs must satisfy? ---"
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "SELECT conname, conrelid::regclass, confrelid::regclass, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid IN ('leads'::regclass, 'tenant_search_history'::regclass, 'credit_usage'::regclass) AND contype='f';" 2>&1
-            echo "--- is uuid_generate_v4() available (uuid-ossp extension)? ---"
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "SELECT extname FROM pg_extension;" 2>&1
+            echo "### TENANT ISOLATION LIVE VERIFICATION — does the fix actually isolate a client account? ###"
+            TOKEN=$(python3 -c "import json; print(json.load(open('/opt/leadgen/config.json')).get('service_token',''))" 2>/dev/null)
+            echo "--- auth_users: does every account now have its own distinct tenant_id? ---"
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "SELECT username, role, tenant_id FROM auth_users ORDER BY username;" 2>&1
+            echo "--- tenants table: one row per account now? ---"
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "SELECT id, name, created_at FROM tenants ORDER BY created_at;" 2>&1
+            echo "--- creating a throwaway test client account via the new admin-only endpoint ---"
+            CREATE_RESP=$(curl -s -X POST http://localhost:8080/users/create \
+              -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+              -d '{"username":"_diag_test_client","password":"Diag-Test-Pass-987654"}')
+            echo "create response: $CREATE_RESP"
+            LOGIN_RESP=$(curl -s -X POST http://localhost:8080/auth/login \
+              -H "Content-Type: application/json" \
+              -d '{"username":"_diag_test_client","password":"Diag-Test-Pass-987654"}')
+            CLIENT_TOKEN=$(echo "$LOGIN_RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('token',''))" 2>/dev/null)
+            echo "got client token: $([ -n \"$CLIENT_TOKEN\" ] && echo yes || echo NO)"
+            TEST_TENANT=$(docker exec leadgen_postgres psql -U leadgen -d leadgen_db -t -A -c "SELECT tenant_id FROM auth_users WHERE username='_diag_test_client';" 2>/dev/null)
+            echo "test client's tenant_id: $TEST_TENANT"
+            echo "--- /leads as the brand-new test client, before anything is tagged to them — MUST be 0 ---"
+            curl -s "http://localhost:8080/leads" -H "Authorization: Bearer $CLIENT_TOKEN" | python3 -c "import json,sys; d=json.load(sys.stdin); print('total:', d.get('total'))" 2>&1
+            echo "--- /config as the test client — MUST NOT contain enrichment_strategy or other internal keys ---"
+            curl -s "http://localhost:8080/config" -H "Authorization: Bearer $CLIENT_TOKEN"
+            echo
+            echo "--- /cost-stats as the test client — MUST be rejected (admin-only) ---"
+            curl -s -o /dev/null -w "http_code: %{http_code}\n" "http://localhost:8080/cost-stats" -H "Authorization: Bearer $CLIENT_TOKEN"
+            ONE_LEAD=$(docker exec leadgen_postgres psql -U leadgen -d leadgen_db -t -A -c "SELECT id FROM leads WHERE lead_type IS NULL LIMIT 1;" 2>/dev/null)
+            echo "--- tagging exactly one pre-existing (admin's) lead to the test tenant via direct SQL, to prove filtering works without spending real API credits ---"
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "UPDATE leads SET tenant_id='$TEST_TENANT' WHERE id='$ONE_LEAD';" 2>&1
+            echo "--- /leads as the test client AFTER tagging — MUST now be exactly 1 ---"
+            curl -s "http://localhost:8080/leads" -H "Authorization: Bearer $CLIENT_TOKEN" | python3 -c "import json,sys; d=json.load(sys.stdin); print('total:', d.get('total'))" 2>&1
+            echo "--- /leads with the service token (unscoped/admin-equivalent) — MUST be the full, unaffected total ---"
+            curl -s "http://localhost:8080/leads" -H "Authorization: Bearer $TOKEN" | python3 -c "import json,sys; d=json.load(sys.stdin); print('total:', d.get('total'))" 2>&1
+            echo "--- cleanup: untag the lead, delete the test account ---"
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "UPDATE leads SET tenant_id=NULL WHERE id='$ONE_LEAD';" 2>&1
+            curl -s -X POST "http://localhost:8080/users/_diag_test_client/delete" -H "Authorization: Bearer $TOKEN"
+            echo
+            echo "--- confirming cleanup ---"
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "SELECT COUNT(*) FROM auth_users WHERE username='_diag_test_client';" 2>&1
+            unset TOKEN CREATE_RESP LOGIN_RESP CLIENT_TOKEN TEST_TENANT ONE_LEAD
 
             echo "### END-TO-END WORKFLOW ENGINE TEST (live API, all 12 node types, disconnected so every node takes its safe/zero-cost early-return branch — no leads touched, no cost) ###"
             TOKEN=$(python3 -c "import json; print(json.load(open('/opt/leadgen/config.json')).get('service_token',''))" 2>/dev/null)

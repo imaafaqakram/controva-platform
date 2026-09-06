@@ -1540,6 +1540,25 @@ const SEOPage = () => {
   );
 };
 
+// Client accounts shouldn't see which third-party vendor does the enriching —
+// only admin needs that level of detail (cost/debugging). Same strategy ids,
+// generic wording for anyone who isn't 'admin'.
+const CLIENT_STRATEGY_TEXT = {
+  free_first:          { label: 'Balanced (Recommended)', desc: 'Best mix of speed, coverage, and cost' },
+  serper_only:         { label: 'Fast',                   desc: 'Quickest turnaround' },
+  serper_then_oxylabs: { label: 'Smart',                  desc: 'A fast pass first, then a deeper pass for anything still missing' },
+  oxylabs_only:        { label: 'Deep Search',            desc: 'Most thorough — best for hard-to-find contacts' },
+};
+const stratOpts = (opts) => {
+  const isClient = (localStorage.getItem('auth_role') || 'admin') === 'client';
+  if (!isClient) return opts;
+  return opts.map(o => ({ ...o, ...(CLIENT_STRATEGY_TEXT[o.id] || {}) }));
+};
+const stratLabel = (id, fallback) => {
+  const isClient = (localStorage.getItem('auth_role') || 'admin') === 'client';
+  return (isClient && CLIENT_STRATEGY_TEXT[id]) ? CLIENT_STRATEGY_TEXT[id].label : fallback;
+};
+
 const PipelinePage = () => {
   const [provider, setProvider] = useState('free_first');
   const [reenrichProvider, setReenrichProvider] = useState('free_first');
@@ -1815,12 +1834,12 @@ const PipelinePage = () => {
         <div className="mb-4">
           <label className="text-xs font-medium text-slate-500 mb-1.5 block">Enrichment Strategy</label>
           <div className="grid grid-cols-2 gap-2">
-            {[
+            {stratOpts([
               { id: 'free_first', label: 'Free First (Recommended)', desc: 'Website scrape → permutator → Serper → Oxylabs', icon: 'Gift' },
               { id: 'serper_only', label: 'Serper Only', desc: 'Fast Serper search', icon: 'Zap' },
               { id: 'serper_then_oxylabs', label: 'Smart (Serper + Oxylabs)', desc: 'Serper first, Oxylabs fills gaps', icon: 'Sparkles' },
               { id: 'oxylabs_only', label: 'Oxylabs Deep', desc: 'Most thorough, costs credits', icon: 'Shield' },
-            ].map(opt => (
+            ]).map(opt => (
               <label key={opt.id} className={'flex items-start gap-2 p-2.5 rounded-lg border-2 cursor-pointer text-sm ' + (
                 qeStrategy === opt.id ? 'border-accent-500 bg-accent-50 dark:bg-accent-900/20' : 'border-slate-200 dark:border-slate-700'
               )}>
@@ -1953,18 +1972,19 @@ const PipelinePage = () => {
                 {pStats.enriched_no_contact} leads enriched — no contact info found
               </h3>
               <p className="text-xs text-slate-600 dark:text-slate-400 mt-1">
-                Serper searched these leads but couldn't find an email or LinkedIn profile.
-                Run Oxylabs deep scrape or a different strategy to try harder.
+                {(localStorage.getItem('auth_role') || 'admin') === 'client'
+                  ? 'The first pass searched these leads but couldn\'t find an email or LinkedIn profile. Run a deeper pass or a different strategy to try harder.'
+                  : 'Serper searched these leads but couldn\'t find an email or LinkedIn profile. Run Oxylabs deep scrape or a different strategy to try harder.'}
               </p>
             </div>
           </div>
           <div className="space-y-2 mb-4">
-            {[
+            {stratOpts([
               { id: 'free_first', label: 'Free First', desc: 'Website scrape → permutator → Serper → Oxylabs', icon: 'Gift' },
               { id: 'serper_only', label: 'Serper Only', desc: 'Fast Google-based search — no Oxylabs, doesn\'t need it available', icon: 'Zap' },
               { id: 'serper_then_oxylabs', label: 'Smart (Serper → Oxylabs)', desc: 'Try Serper first, then Oxylabs for remaining', icon: 'Sparkles' },
               { id: 'oxylabs_only', label: 'Oxylabs Deep', desc: 'Deep web scrape — best for finding hidden contact info', icon: 'Shield' },
-            ].map(opt => (
+            ]).map(opt => (
               <label key={opt.id} className={'flex items-start gap-3 p-3 rounded-lg border-2 cursor-pointer bg-white dark:bg-slate-900 ' + (
                 reenrichProvider === opt.id ? 'border-orange-500' : 'border-slate-200 dark:border-slate-800'
               )}>
@@ -1979,10 +1999,11 @@ const PipelinePage = () => {
           <Button variant="primary" icon="RefreshCw" size="lg" className="w-full"
             onClick={() => runStep('/reenrich-missing-emails', 'Re-Enrich (no contact)', { provider_strategy: reenrichProvider })}>
             Re-Enrich {pStats.enriched_no_contact} Leads with {
-              reenrichProvider === 'oxylabs_only' ? 'Oxylabs' :
-              reenrichProvider === 'serper_then_oxylabs' ? 'Smart Strategy' :
-              reenrichProvider === 'serper_only' ? 'Serper Only' :
-              reenrichProvider === 'free_first' ? 'Free First' : 'Free Strategy'
+              stratLabel(reenrichProvider,
+                reenrichProvider === 'oxylabs_only' ? 'Oxylabs' :
+                reenrichProvider === 'serper_then_oxylabs' ? 'Smart Strategy' :
+                reenrichProvider === 'serper_only' ? 'Serper Only' :
+                reenrichProvider === 'free_first' ? 'Free First' : 'Free Strategy')
             }
           </Button>
         </Card>
@@ -2030,12 +2051,12 @@ const PipelinePage = () => {
         <h3 className="font-semibold mb-4">Enrich New Leads</h3>
         <p className="text-xs text-slate-500 mb-3">Targets {pStats ? pStats.discovered : '…'} newly discovered leads that haven't been enriched yet.</p>
         <div className="space-y-3">
-          {[
+          {stratOpts([
             { id: 'free_first', label: 'Free First (Recommended)', desc: 'Website scrape → permutator → Serper → Oxylabs. Zero paid credits if free tier works.', icon: 'Gift' },
             { id: 'serper_only', label: 'Serper Only', desc: 'Fast, uses Serper search — no Oxylabs cost', icon: 'Zap' },
             { id: 'serper_then_oxylabs', label: 'Smart (Serper + Oxylabs)', desc: 'Serper first, Oxylabs fills gaps', icon: 'Sparkles' },
             { id: 'oxylabs_only', label: 'Oxylabs Deep', desc: 'Deep scrape only — most thorough', icon: 'Shield' },
-          ].map(opt => (
+          ]).map(opt => (
             <label key={opt.id} className={'flex items-start gap-3 p-3 rounded-lg border-2 cursor-pointer ' + (
               provider === opt.id ? 'border-accent-500 bg-accent-50 dark:bg-accent-900/20' : 'border-slate-200 dark:border-slate-800'
             )}>
