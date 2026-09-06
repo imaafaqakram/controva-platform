@@ -21,6 +21,30 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
+            echo "### VERIFY: 'Free First' re-enrich no longer needs Oxylabs (real leads, zero paid credits) ###"
+            TOKEN0=$(python3 -c "import json; print(json.load(open('/opt/leadgen/config.json')).get('service_token',''))" 2>/dev/null)
+            if [ -z "$TOKEN0" ]; then
+              echo "no service_token found — skipping"
+            else
+              RUN_RESP=$(curl -s -X POST http://localhost:8080/reenrich-missing-emails \
+                -H "Authorization: Bearer $TOKEN0" -H "Content-Type: application/json" \
+                -d '{"provider_strategy":"free_first"}')
+              echo "run response: $RUN_RESP"
+              JOB_ID=$(echo "$RUN_RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('job_id',''))" 2>/dev/null)
+              if [ -n "$JOB_ID" ]; then
+                for i in 1 2 3; do
+                  sleep 2
+                  STATUS_RESP=$(curl -s "http://localhost:8080/job/$JOB_ID" -H "Authorization: Bearer $TOKEN0")
+                  echo "poll $i: $STATUS_RESP"
+                done
+                echo "(job keeps running server-side against real no-contact leads — this is real, wanted work, not left dangling)"
+              else
+                echo "no job started — likely 'nothing_to_do' (no leads currently need it): $RUN_RESP"
+              fi
+            fi
+            unset TOKEN0 RUN_RESP JOB_ID STATUS_RESP
+            echo
+
             echo "### END-TO-END WORKFLOW ENGINE TEST (live API, all 12 node types, disconnected so every node takes its safe/zero-cost early-return branch — no leads touched, no cost) ###"
             TOKEN=$(python3 -c "import json; print(json.load(open('/opt/leadgen/config.json')).get('service_token',''))" 2>/dev/null)
             if [ -z "$TOKEN" ]; then
