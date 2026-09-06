@@ -28,11 +28,27 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
-            echo "### CURRENT ICP RUN STATE (read-only — no restart commands in this file anymore, see commit message) ###"
+            echo "### TRULY CLEAN VERIFICATION: no more self-inflicted restarts, so this run gets an honest, uninterrupted answer ###"
             docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
-              "SELECT id, icp_id, status, started_at, NOW() - started_at AS elapsed, finished_at, leads_found, leads_new, LEFT(log,1500) AS log_tail FROM icp_runs WHERE icp_id=2 ORDER BY id DESC;" 2>&1
-            echo "--- when did leadgen-api last (re)start, for reference ---"
+              "SELECT id, icp_id, status, started_at, NOW() - started_at AS elapsed, finished_at, leads_found, leads_new FROM icp_runs WHERE icp_id=2 ORDER BY id DESC;" 2>&1
+            echo "--- when did leadgen-api last (re)start, for reference (should NOT change again after this push) ---"
             systemctl show leadgen-api --property=ActiveEnterTimestamp
+            echo "--- triggering one more fresh ICP run and giving it a real, uninterrupted 90 seconds ---"
+            TOKENF=$(python3 -c "import json; print(json.load(open('/opt/leadgen/config.json')).get('service_token',''))" 2>/dev/null)
+            if [ -n "$TOKENF" ]; then
+              RR=$(curl -s -X POST http://localhost:8080/icp/run -H "Authorization: Bearer $TOKENF" -H "Content-Type: application/json" -d '{"id":2}')
+              echo "run response: $RR"
+              JF=$(echo "$RR" | python3 -c "import json,sys; print(json.load(sys.stdin).get('job_id',''))" 2>/dev/null)
+              if [ -n "$JF" ]; then
+                for i in 1 2 3 4 5 6 7 8 9; do
+                  sleep 10
+                  SF=$(curl -s "http://localhost:8080/job/$JF" -H "Authorization: Bearer $TOKENF")
+                  echo "poll $i (+${i}0s): $SF"
+                  echo "$SF" | grep -q '"status": *"completed"' && break
+                done
+              fi
+            fi
+            unset TOKENF RR JF SF
             echo
 
             echo "### END-TO-END WORKFLOW ENGINE TEST (live API, all 12 node types, disconnected so every node takes its safe/zero-cost early-return branch — no leads touched, no cost) ###"
