@@ -28,28 +28,23 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
-            echo "### CLEANUP: current state before touching anything ###"
+            echo "### DELIVERABILITY CHECK: what sending domains are configured, and is their DNS actually correct? ###"
+            echo "--- configured sending domains ---"
             docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
-              "SELECT id, icp_id, status, started_at, NOW() - started_at AS elapsed, finished_at, leads_found, leads_new FROM icp_runs WHERE icp_id=2 ORDER BY id DESC;" 2>&1
-            TOKENC=$(python3 -c "import json; print(json.load(open('/opt/leadgen/config.json')).get('service_token',''))" 2>/dev/null)
-            echo "--- stopping the one run that's actually still alive (job_1788729384331) ---"
-            curl -s -X POST "http://localhost:8080/job/job_1788729384331/cancel" -H "Authorization: Bearer $TOKENC" -H "Content-Type: application/json" -d '{}'
-            echo
-            sleep 3
-            echo "--- state after cancelling (the live one should now show a terminal status with whatever it found before stopping) ---"
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
-              "SELECT id, icp_id, status, started_at, finished_at, leads_found, leads_new FROM icp_runs WHERE icp_id=2 ORDER BY id DESC;" 2>&1
-            echo "--- deleting the three confirmed-dead rows (6, 7, 8) — their processes were killed by the restart bug and will never reach a terminal status on their own ---"
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
-              "DELETE FROM icp_runs WHERE id IN (6,7,8) AND status='running';" 2>&1
-            echo "--- final state ---"
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
-              "SELECT id, icp_id, status, started_at, finished_at, leads_found, leads_new FROM icp_runs WHERE icp_id=2 ORDER BY id DESC;" 2>&1
-            echo "--- any other jobs stuck 'running' anywhere in the system, for good measure ---"
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
-              "SELECT id, icp_id, status, started_at FROM icp_runs WHERE status='running';" 2>&1
-            unset TOKENC
-            echo
+              "SELECT id, domain, from_email, from_name, is_active, daily_cap, paused_reason FROM sending_domains ORDER BY id;" 2>&1
+            echo "--- is public_base_url set? (needed for a real https unsubscribe link + List-Unsubscribe header, not just the mailto fallback) ---"
+            python3 -c "import json; d=json.load(open('/opt/leadgen/config.json')); print('public_base_url:', repr(d.get('public_base_url',''))); print('company_address set:', bool(d.get('company_address')))" 2>/dev/null
+            echo "--- for each configured domain: SPF, DKIM (resend._domainkey), and DMARC records, checked directly via DNS ---"
+            for DOM in $(docker exec leadgen_postgres psql -U leadgen -d leadgen_db -t -A -c "SELECT domain FROM sending_domains;" 2>/dev/null); do
+              echo "=== $DOM ==="
+              echo "SPF:"
+              dig +short TXT "$DOM" | grep -i spf || echo "  (no SPF TXT record found at the root)"
+              echo "DKIM (resend._domainkey.$DOM):"
+              dig +short CNAME "resend._domainkey.$DOM" || dig +short TXT "resend._domainkey.$DOM" || echo "  (no resend._domainkey record found)"
+              echo "DMARC (_dmarc.$DOM):"
+              dig +short TXT "_dmarc.$DOM" || echo "  (no DMARC record found — recommended, not just SPF+DKIM)"
+              echo
+            done
 
             echo "### END-TO-END WORKFLOW ENGINE TEST (live API, all 12 node types, disconnected so every node takes its safe/zero-cost early-return branch — no leads touched, no cost) ###"
             TOKEN=$(python3 -c "import json; print(json.load(open('/opt/leadgen/config.json')).get('service_token',''))" 2>/dev/null)
