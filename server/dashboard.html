@@ -1589,8 +1589,10 @@ const PipelinePage = () => {
   const cancelJob = async () => {
     if (!jobId) return;
     try { await api.post('/job/' + jobId + '/cancel', {}); } catch (e) {}
-    setJob(j => (j ? { ...j, status: 'cancelled' } : j));
-    clearPolling();
+    // Don't stop polling here — the background loop takes a moment (well
+    // under a second) to notice the flag and write its real final tally.
+    // Leave the poll below to pick up the actual 'cancelled' status instead
+    // of freezing the panel on stale progress from before the click.
   };
 
   const run = async () => {
@@ -1658,6 +1660,11 @@ const PipelinePage = () => {
           clearInterval(poll);
           try { localStorage.removeItem('pipeline_job'); } catch (e) {}
           showToast(`${stepLabel || 'Job'} failed: ${j.error || 'unknown error'}`, 'error');
+        } else if (j.status === 'cancelled') {
+          clearInterval(poll);
+          try { localStorage.removeItem('pipeline_job'); } catch (e) {}
+          loadStats();
+          showToast(`${stepLabel || 'Job'} stopped`, 'info');
         }
       } catch (e) { clearInterval(poll); }
     }, 2000);
