@@ -1565,10 +1565,32 @@ const PipelinePage = () => {
   const loadStats = () => api.get('/stats').then(s => setPStats(s)).catch(() => {});
   useEffect(() => { loadStats(); }, []);
 
+  // Jobs run server-side in a background thread — navigating away or
+  // refreshing doesn't stop them, it just drops this page's local state,
+  // so a still-running (or by-then-finished) job silently vanishes from
+  // view. Persisting the id lets the next mount reconnect to it instead.
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('pipeline_job') || 'null');
+      if (saved && saved.id) { setJobId(saved.id); setStepLabel(saved.label || ''); }
+    } catch (e) {}
+  }, []);
+
   const startPolling = (id, label) => {
     setJobId(id);
     setStepLabel(label || '');
     setJob(null);
+    try { localStorage.setItem('pipeline_job', JSON.stringify({ id, label: label || '' })); } catch (e) {}
+  };
+  const clearPolling = () => {
+    setJobId(null);
+    try { localStorage.removeItem('pipeline_job'); } catch (e) {}
+  };
+  const cancelJob = async () => {
+    if (!jobId) return;
+    try { await api.post('/job/' + jobId + '/cancel', {}); } catch (e) {}
+    setJob(j => (j ? { ...j, status: 'cancelled' } : j));
+    clearPolling();
   };
 
   const run = async () => {
@@ -1628,11 +1650,13 @@ const PipelinePage = () => {
         setJob(j);
         if (j.status === 'completed') {
           clearInterval(poll);
+          try { localStorage.removeItem('pipeline_job'); } catch (e) {}
           loadStats();
           const count = j.results ? (j.results.processed ?? j.results.total ?? j.results.enriched ?? '') : '';
           showToast(`${stepLabel || 'Job'} completed${count !== '' ? ': ' + count + ' processed' : ''}`, 'success');
         } else if (j.status === 'failed') {
           clearInterval(poll);
+          try { localStorage.removeItem('pipeline_job'); } catch (e) {}
           showToast(`${stepLabel || 'Job'} failed: ${j.error || 'unknown error'}`, 'error');
         }
       } catch (e) { clearInterval(poll); }
@@ -1698,16 +1722,18 @@ const PipelinePage = () => {
         <div className={`rounded-xl border-2 p-4 space-y-3 ${
           job.status === 'completed' ? 'border-green-400 bg-green-50 dark:bg-green-900/20' :
           job.status === 'failed'    ? 'border-red-400 bg-red-50 dark:bg-red-900/20' :
+          job.status === 'cancelled' ? 'border-slate-300 bg-slate-50 dark:bg-slate-800/40' :
           'border-amber-400 bg-amber-50 dark:bg-amber-900/20'
         }`}>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
-              {(job.status !== 'completed' && job.status !== 'failed') && <Spinner />}
+              {job.status === 'running' && <Spinner />}
               <span className="font-semibold text-sm">
                 {stepLabel || 'Pipeline'} —&nbsp;
                 <span className={
                   job.status === 'completed' ? 'text-green-700' :
                   job.status === 'failed'    ? 'text-red-600' :
+                  job.status === 'cancelled' ? 'text-slate-500' :
                   'text-amber-700'
                 }>{job.status === 'running' ? 'running…' : job.status}</span>
               </span>
@@ -1715,8 +1741,13 @@ const PipelinePage = () => {
                 <span className="text-xs text-slate-500">{job.progress}%</span>
               )}
             </div>
-            {(job.status === 'completed' || job.status === 'failed') && (
-              <button onClick={() => { setJob(null); setJobId(null); loadStats(); }}
+            {job.status === 'running' ? (
+              <button onClick={cancelJob}
+                className="px-3 py-1 bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 rounded-lg text-xs font-semibold hover:bg-red-200 dark:hover:bg-red-900/60 transition-colors border border-red-200 dark:border-red-800">
+                ✕ Stop
+              </button>
+            ) : (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') && (
+              <button onClick={() => { setJob(null); clearPolling(); loadStats(); }}
                 className="text-xs text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 underline">Dismiss</button>
             )}
           </div>
@@ -1724,6 +1755,7 @@ const PipelinePage = () => {
             <div className={`h-3 rounded-full transition-all duration-500 ${
               job.status === 'completed' ? 'bg-green-500' :
               job.status === 'failed'    ? 'bg-red-500' :
+              job.status === 'cancelled' ? 'bg-slate-400' :
               'bg-gradient-to-r from-accent-500 to-green-500 animate-pulse'
             }`} style={{ width: Math.max(job.progress || (job.status !== 'completed' ? 5 : 0), 0) + '%' }} />
           </div>
@@ -1922,6 +1954,7 @@ const PipelinePage = () => {
           <div className="space-y-2 mb-4">
             {[
               { id: 'free_first', label: 'Free First', desc: 'Website scrape → permutator → Serper → Oxylabs', icon: 'Gift' },
+              { id: 'serper_only', label: 'Serper Only', desc: 'Fast Google-based search — no Oxylabs, doesn\'t need it available', icon: 'Zap' },
               { id: 'serper_then_oxylabs', label: 'Smart (Serper → Oxylabs)', desc: 'Try Serper first, then Oxylabs for remaining', icon: 'Sparkles' },
               { id: 'oxylabs_only', label: 'Oxylabs Deep', desc: 'Deep web scrape — best for finding hidden contact info', icon: 'Shield' },
             ].map(opt => (
@@ -1941,6 +1974,7 @@ const PipelinePage = () => {
             Re-Enrich {pStats.enriched_no_contact} Leads with {
               reenrichProvider === 'oxylabs_only' ? 'Oxylabs' :
               reenrichProvider === 'serper_then_oxylabs' ? 'Smart Strategy' :
+              reenrichProvider === 'serper_only' ? 'Serper Only' :
               reenrichProvider === 'free_first' ? 'Free First' : 'Free Strategy'
             }
           </Button>
