@@ -1730,14 +1730,14 @@ def discover_leads_smart(niche, city, country='', original_query='',
                 already_in_db += 1
             else:
                 cur.execute("""INSERT INTO leads(place_id,business_name,niche,city,country,address,phone,
-                              website,latitude,longitude,google_rating,review_count,status,source,phone_norm,domain,search_batch_id)
-                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'discovered',%s,%s,%s,%s)
+                              website,latitude,longitude,google_rating,review_count,status,source,phone_norm,domain,search_batch_id,tenant_id)
+                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'discovered',%s,%s,%s,%s,%s)
                     ON CONFLICT (place_id) DO NOTHING RETURNING id""",
                     (pid, (cand.get('name') or 'Unknown')[:480], niche.lower(), city, country,
                      cand.get('address', ''), cand.get('phone', ''), website,
                      cand.get('lat'), cand.get('lng'), cand.get('rating'),
                      cand.get('review_count', 0), cand.get('source', 'google'),
-                     pn or None, dom or None, job_id))
+                     pn or None, dom or None, job_id, tenant_id))
                 row = cur.fetchone()
                 if row:
                     lead_id = row[0]
@@ -1749,9 +1749,7 @@ def discover_leads_smart(niche, city, country='', original_query='',
                     })
                 else:
                     continue # Race condition, another thread inserted it
-                    
-            if tenant_id:
-                cur.execute("INSERT INTO tenant_leads(tenant_id, lead_id) VALUES (%s, %s) ON CONFLICT DO NOTHING", (tenant_id, lead_id))
+
             conn.commit()
         except Exception as e:
             print(f'dedup/insert error: {e}')
@@ -3373,7 +3371,7 @@ def generate_mockup_for_lead(lead_id, custom_prompt=None):
     conn.commit(); cur.close(); conn.close()
     return {'success': True, 'mockup_url': mockup_url}
 
-def get_search_batches():
+def get_search_batches(tenant_id=None):
     """Return a summary of each search batch (job) that created leads."""
     conn = db_conn(); cur = conn.cursor()
     cur.execute("""
@@ -3382,11 +3380,12 @@ def get_search_batches():
                COUNT(*) as count,
                to_char(MIN(created_at), 'YYYY-MM-DD HH24:MI') as batch_date
         FROM leads
-        WHERE search_batch_id IS NOT NULL AND search_batch_id != ''
+        WHERE search_batch_id IS NOT NULL AND search_batch_id != '' {tenant_clause}
         GROUP BY search_batch_id
         ORDER BY MIN(created_at) DESC
         LIMIT 100
-    """)
+    """.format(tenant_clause="AND tenant_id = %s" if tenant_id else ""),
+    (tenant_id,) if tenant_id else ())
     rows = [{'batch_id': r[0], 'niche': r[1], 'city': r[2], 'country': r[3],
              'count': r[4], 'date': r[5]} for r in cur.fetchall()]
     cur.close(); conn.close()
@@ -3400,15 +3399,19 @@ def delete_search_batch(batch_id):
     conn.commit(); cur.close(); conn.close()
     return deleted
 
-def delete_leads_bulk(lead_ids):
+def delete_leads_bulk(lead_ids, tenant_id=None):
     """Delete arbitrary business leads by id (Leads page multi-select delete).
     Scoped to lead_type IS NULL so this can never remove Intent Search leads —
-    those have their own delete endpoint (/intent-leads/<id>/delete)."""
+    those have their own delete endpoint (/intent-leads/<id>/delete). When
+    tenant_id is given, only that tenant's own leads can be deleted — a client
+    can't blindly wipe leads outside their own account by guessing/sending ids
+    they were never shown."""
     if not lead_ids:
         return 0
     conn = db_conn(); cur = conn.cursor()
-    cur.execute("""DELETE FROM leads WHERE id = ANY(%s::uuid[]) AND lead_type IS NULL RETURNING id""",
-                (lead_ids,))
+    cur.execute("""DELETE FROM leads WHERE id = ANY(%s::uuid[]) AND lead_type IS NULL {tenant_clause} RETURNING id""".format(
+                tenant_clause="AND tenant_id = %s" if tenant_id else ""),
+                (lead_ids, tenant_id) if tenant_id else (lead_ids,))
     deleted = cur.rowcount
     conn.commit(); cur.close(); conn.close()
     return deleted
@@ -4949,7 +4952,9 @@ def get_intent_stats():
 # ──────────────────────────────────────────────────────────────
 #  GET LEADS
 # ──────────────────────────────────────────────────────────────
-def get_leads():
+def get_leads(tenant_id=None):
+    """tenant_id=None returns every lead (admin/service). A real tenant_id
+    scopes to only the leads created under that account — see scope_tenant()."""
     conn = db_conn(); cur = conn.cursor()
     cur.execute("""
         SELECT l.id::text as id, l.business_name,l.niche,l.city,l.country,l.phone,l.address,
@@ -4980,8 +4985,10 @@ def get_leads():
             ORDER BY (COALESCE(email,'') != '') DESC, confidence DESC NULLS LAST, created_at DESC
             LIMIT 1
         ) c ON TRUE
-        WHERE l.lead_type IS NULL
-        ORDER BY l.ai_score DESC NULLS LAST, l.created_at DESC""")
+        WHERE l.lead_type IS NULL {tenant_clause}
+        ORDER BY l.ai_score DESC NULLS LAST, l.created_at DESC""".format(
+        tenant_clause="AND l.tenant_id = %s" if tenant_id else ""),
+        (tenant_id,) if tenant_id else ())
     cols = [d[0] for d in cur.description]
     rows = [dict(zip(cols,r)) for r in cur.fetchall()]
     cur.close(); conn.close()
@@ -5554,6 +5561,42 @@ def ensure_auth_tables():
         print('Client role account seeded: username=client — password was generated once and '
               'given directly to the operator; rotate it via POST /auth/change-password if lost')
     conn.commit(); cur.close(); conn.close()
+
+    # Bridge auth_users to the tenants table: it already existed in the schema
+    # but was never wired to login — check_auth() returned one hardcoded
+    # tenant_id for every account, so every client and the admin all saw the
+    # exact same (globally shared) lead data. Give every account a real,
+    # distinct tenant so client logins can finally be scoped to their own data.
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"')
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS tenants (
+            id         UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+            name       VARCHAR(200) NOT NULL,
+            is_active  BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )""")
+    cur.execute("ALTER TABLE auth_users ADD COLUMN IF NOT EXISTS tenant_id UUID REFERENCES tenants(id)")
+    cur.execute("SELECT username FROM auth_users WHERE tenant_id IS NULL")
+    unassigned = [r[0] for r in cur.fetchall()]
+    for uname in unassigned:
+        cur.execute("INSERT INTO tenants (name) VALUES (%s) RETURNING id", (f"{uname}'s workspace",))
+        new_tenant_id = cur.fetchone()[0]
+        cur.execute("UPDATE auth_users SET tenant_id = %s WHERE username = %s", (new_tenant_id, uname))
+        print(f'[tenants] assigned a new isolated tenant to existing account "{uname}"')
+    conn.commit(); cur.close(); conn.close()
+
+def get_user_tenant_id(username):
+    """The real per-account tenant id — every account (including admin) has
+    its own, but scoping is only ever ENFORCED for the 'client' role (see
+    Handler.scope_tenant); admin/service always see unscoped, global data."""
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("SELECT tenant_id FROM auth_users WHERE username = %s", (username,))
+        row = cur.fetchone(); cur.close(); conn.close()
+        return str(row[0]) if row and row[0] else None
+    except Exception:
+        return None
 
 def get_user_role(username):
     if username == 'service':
@@ -7797,8 +7840,26 @@ def reject_lead(lead_id):
     conn.commit(); cur.close(); conn.close()
     return {"success": True, "lead_id": lead_id, "status": "rejected"}
 
-def get_lead_detail(lead_id):
-    """Get full details of one lead."""
+def lead_in_scope(lead_id, tenant_id):
+    """True when tenant_id is None (unscoped/admin) or the lead actually
+    belongs to that tenant. Guards the /lead/<id>/* action routes so a client
+    can't act on (send email as, approve, reject, regenerate copy for) a lead
+    outside their own account even if they somehow got hold of its id —
+    those ids are never shown to them by the scoped read endpoints above."""
+    if not tenant_id:
+        return True
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("SELECT 1 FROM leads WHERE id = %s AND tenant_id = %s", (lead_id, tenant_id))
+        found = cur.fetchone() is not None
+        cur.close(); conn.close()
+        return found
+    except Exception:
+        return False
+
+def get_lead_detail(lead_id, tenant_id=None):
+    """Get full details of one lead. tenant_id, when given, makes this return
+    None for a lead outside that tenant instead of leaking it."""
     conn = db_conn(); cur = conn.cursor()
     cur.execute("""
         SELECT l.id, l.business_name, l.niche, l.city, l.country, l.phone, l.address,
@@ -7820,8 +7881,9 @@ def get_lead_detail(lead_id):
             LIMIT 1
         ) c ON TRUE
         LEFT JOIN lead_research rs ON rs.lead_id = l.id
-        WHERE l.id = %s
-    """, (lead_id,))
+        WHERE l.id = %s {tenant_clause}
+    """.format(tenant_clause="AND l.tenant_id = %s" if tenant_id else ""),
+    (lead_id, tenant_id) if tenant_id else (lead_id,))
     r = cur.fetchone()
     cur.close(); conn.close()
     if not r:
@@ -7883,15 +7945,17 @@ def regenerate_email_for_lead(lead_id, extra_instructions=""):
     conn.commit(); cur.close(); conn.close()
     return {"success": True, "subject": email.get("subject"), "body": email.get("body")}
 
-def get_outreach_log(limit=100):
+def get_outreach_log(limit=100, tenant_id=None):
     conn = db_conn(); cur = conn.cursor()
     cur.execute("""
         SELECT o.id, o.lead_id, l.business_name, o.email_to, o.email_subject,
                o.sent_at, o.opened_at, o.replied_at, o.status, o.resend_message_id,
                o.reply_classification, o.reply_digest, l.meeting_booked
         FROM outreach_log o LEFT JOIN leads l ON l.id = o.lead_id
+        WHERE 1=1 {tenant_clause}
         ORDER BY o.sent_at DESC NULLS LAST LIMIT %s
-    """, (limit,))
+    """.format(tenant_clause="AND l.tenant_id = %s" if tenant_id else ""),
+    (tenant_id, limit) if tenant_id else (limit,))
     rows = cur.fetchall()
     cur.close(); conn.close()
     return [{
@@ -7905,30 +7969,32 @@ def get_outreach_log(limit=100):
         "meeting_booked": bool(r[12])
     } for r in rows]
 
-def get_chart_stats():
+def get_chart_stats(tenant_id=None):
     """Time-series data for charts."""
     try:
         conn = db_conn(); cur = conn.cursor()
+        tc = "AND tenant_id = %s" if tenant_id else ""
+        tp = (tenant_id,) if tenant_id else ()
 
         # Leads per day for the last 14 days
         cur.execute("""
             SELECT DATE(created_at) as d, COUNT(*) as c
             FROM leads
-            WHERE created_at > NOW() - INTERVAL '14 days' AND lead_type IS NULL
+            WHERE created_at > NOW() - INTERVAL '14 days' AND lead_type IS NULL {tc}
             GROUP BY DATE(created_at) ORDER BY d
-        """)
+        """.format(tc=tc), tp)
         leads_per_day = [{"date": str(r[0]), "count": r[1]} for r in cur.fetchall()]
 
         # Status breakdown
-        cur.execute("SELECT status, COUNT(*) FROM leads WHERE lead_type IS NULL GROUP BY status")
+        cur.execute("SELECT status, COUNT(*) FROM leads WHERE lead_type IS NULL {tc} GROUP BY status".format(tc=tc), tp)
         status_breakdown = [{"status": r[0], "count": r[1]} for r in cur.fetchall()]
 
         # Niche breakdown
-        cur.execute("SELECT niche, COUNT(*) FROM leads WHERE lead_type IS NULL GROUP BY niche ORDER BY 2 DESC LIMIT 10")
+        cur.execute("SELECT niche, COUNT(*) FROM leads WHERE lead_type IS NULL {tc} GROUP BY niche ORDER BY 2 DESC LIMIT 10".format(tc=tc), tp)
         niche_breakdown = [{"niche": r[0], "count": r[1]} for r in cur.fetchall()]
 
         # City breakdown
-        cur.execute("SELECT city, COUNT(*) FROM leads WHERE lead_type IS NULL GROUP BY city ORDER BY 2 DESC LIMIT 10")
+        cur.execute("SELECT city, COUNT(*) FROM leads WHERE lead_type IS NULL {tc} GROUP BY city ORDER BY 2 DESC LIMIT 10".format(tc=tc), tp)
         city_breakdown = [{"city": r[0], "count": r[1]} for r in cur.fetchall()]
 
         # Score distribution
@@ -7941,8 +8007,8 @@ def get_chart_stats():
                 ELSE 'Low (1-4)'
               END as bucket,
               COUNT(*) as c
-            FROM leads WHERE lead_type IS NULL GROUP BY bucket
-        """)
+            FROM leads WHERE lead_type IS NULL {tc} GROUP BY bucket
+        """.format(tc=tc), tp)
         score_distribution = [{"bucket": r[0], "count": r[1]} for r in cur.fetchall()]
 
         cur.close(); conn.close()
@@ -7977,7 +8043,11 @@ class Handler(BaseHTTPRequestHandler):
     def check_auth(self):
         """Authenticate the request. Returns (tenant_id, user_id) for valid
         sessions and (None, None) when unauthenticated. Accepts the token via
-        the Authorization header or a ?token= query parameter (CSV downloads)."""
+        the Authorization header or a ?token= query parameter (CSV downloads).
+        tenant_id is the account's own real tenant (see get_user_tenant_id) —
+        used only for the truthy "is this a valid session" check by most
+        callers; use scope_tenant() below to decide whether to actually
+        FILTER data by it (client role) or not (admin/service see everything)."""
         auth_header = self.headers.get('Authorization')
         token = ''
         if auth_header and auth_header.startswith('Bearer '):
@@ -7988,8 +8058,19 @@ class Handler(BaseHTTPRequestHandler):
         user = auth_check(token)
         if not user:
             return None, None
-        # Single-tenant deployment: authenticated users share the default tenant.
-        return '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000002'
+        tenant_id = get_user_tenant_id(user) if user != 'service' else 'service'
+        return tenant_id, '00000000-0000-0000-0000-000000000002'
+
+    def scope_tenant(self):
+        """The tenant_id to FILTER data by for this request, or None for
+        unfiltered/global access. Only the 'client' role is ever scoped —
+        admin and the internal 'service' account (CI/automation) always see
+        every tenant's data, by design ('the admin can see what the client
+        have fetched'). Call after require_auth()."""
+        username = self.current_username() or ''
+        if get_user_role(username) == 'client':
+            return get_user_tenant_id(username)
+        return None
 
     def require_auth(self):
         """Enforce auth for non-public paths. Returns False after sending a 401."""
@@ -8101,7 +8182,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not tenant_id:
                     self.send_json(401, {'error': 'Unauthorized'})
                     return
-                cols, rows = get_leads()
+                cols, rows = get_leads(self.scope_tenant())
                 self.send_json(200, {'status': 'ok', 'total': len(rows), 'columns': cols, 'leads': rows})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
@@ -8111,7 +8192,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not tenant_id:
                     self.send_json(401, {'error': 'Unauthorized'})
                     return
-                cols, rows = get_leads()
+                cols, rows = get_leads(self.scope_tenant())
                 buf = io.StringIO()
                 w = csv.DictWriter(buf, fieldnames=cols)
                 w.writeheader()
@@ -8126,7 +8207,15 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
         elif p == '/config':
-            self.send_json(200, CONFIG)
+            role = get_user_role(self.current_username() or '')
+            if role in ('admin', 'service'):
+                self.send_json(200, CONFIG)
+            else:
+                # Client accounts only get the cosmetic/white-label fields the
+                # app shell needs to render — never internal enrichment
+                # strategy, automation settings, or cost/budget config.
+                safe_keys = ('client_brand_name', 'client_brand_color', 'calendly_url', 'client_footer_text')
+                self.send_json(200, {k: CONFIG.get(k, '') for k in safe_keys})
         elif p == '/health':
             self.send_json(200, {
                 'status': 'ok', 'version': '5.0',
@@ -8178,6 +8267,19 @@ class Handler(BaseHTTPRequestHandler):
             if not self.require_admin(): return
             try:
                 self.send_json(200, get_api_keys_masked())
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p == '/users':
+            if not self.require_admin(): return
+            try:
+                conn = db_conn(); cur = conn.cursor()
+                cur.execute("""SELECT username, role, tenant_id, created_at FROM auth_users
+                               WHERE role != 'admin' ORDER BY created_at""")
+                users = [{'username': r[0], 'role': r[1], 'tenant_id': str(r[2]) if r[2] else None,
+                          'created_at': r[3].isoformat() if r[3] else None} for r in cur.fetchall()]
+                cur.close(); conn.close()
+                self.send_json(200, {'users': users})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
@@ -8349,6 +8451,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, {'workflows': [], 'configured': True, 'error': str(e), 'n8n_url': N8N_URL})
 
         elif p == '/cost-stats':
+            if not self.require_admin(): return
             try:
                 conn = db_conn(); cur = conn.cursor()
                 cur.execute("""SELECT provider, SUM(cost),
@@ -8378,7 +8481,10 @@ class Handler(BaseHTTPRequestHandler):
 
         elif p == '/stats':
             try:
+                scope = self.scope_tenant()
                 conn = db_conn(); cur = conn.cursor()
+                tc = "AND tenant_id = %s" if scope else ""
+                tp = (scope,) if scope else ()
                 cur.execute("""
                     SELECT
                       COUNT(*) FILTER (WHERE has_website = FALSE) as hot_leads,
@@ -8390,16 +8496,16 @@ class Handler(BaseHTTPRequestHandler):
                       COUNT(*) FILTER (WHERE status = 'sent') as sent,
                       COUNT(*) FILTER (WHERE ai_score >= 7) as high_score
                     FROM leads
-                    WHERE lead_type IS NULL
-                """)
+                    WHERE lead_type IS NULL {tc}
+                """.format(tc=tc), tp)
                 row = cur.fetchone()
                 cur.execute("""
                     SELECT COUNT(*) FROM contacts c
                     JOIN leads l ON l.id = c.lead_id
-                    WHERE c.email != '' AND l.lead_type IS NULL
-                """)
+                    WHERE c.email != '' AND l.lead_type IS NULL {tc2}
+                """.format(tc2=("AND l.tenant_id = %s" if scope else "")), tp)
                 with_email = cur.fetchone()[0]
-                cur.execute("SELECT COUNT(DISTINCT city) FROM leads WHERE lead_type IS NULL")
+                cur.execute("SELECT COUNT(DISTINCT city) FROM leads WHERE lead_type IS NULL {tc}".format(tc=tc), tp)
                 cities = cur.fetchone()[0]
                 # Leads that went through enrichment but still have no email or LinkedIn
                 cur.execute("""
@@ -8408,7 +8514,8 @@ class Handler(BaseHTTPRequestHandler):
                     WHERE l.lead_type IS NULL
                       AND l.status NOT IN ('discovered', 'rejected')
                       AND (c.id IS NULL OR (COALESCE(c.email,'') = '' AND COALESCE(c.linkedin_url,'') = ''))
-                """)
+                      {tc2}
+                """.format(tc2=("AND l.tenant_id = %s" if scope else "")), tp)
                 enriched_no_contact = cur.fetchone()[0]
                 # Email verification summary — feeds the Pipeline page card
                 cur.execute("""
@@ -8419,9 +8526,11 @@ class Handler(BaseHTTPRequestHandler):
                       COUNT(*) FILTER (WHERE email_status IS NULL OR email_status = 'unknown'),
                       COUNT(*) FILTER (WHERE email_status = 'deliverable'
                                        AND email_checked_at < NOW() - INTERVAL '60 days')
-                    FROM contacts
-                    WHERE COALESCE(email,'') != ''
-                """)
+                    FROM contacts c
+                    {join2}
+                    WHERE COALESCE(email,'') != '' {tc2}
+                """.format(join2=("JOIN leads l ON l.id = c.lead_id" if scope else ""),
+                           tc2=("AND l.tenant_id = %s" if scope else "")), tp)
                 v = cur.fetchone()
                 cur.close(); conn.close()
                 self.send_json(200, {
@@ -8487,14 +8596,14 @@ class Handler(BaseHTTPRequestHandler):
 
         elif p == '/batches':
             try:
-                self.send_json(200, {'batches': get_search_batches()})
+                self.send_json(200, {'batches': get_search_batches(self.scope_tenant())})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
         elif p.startswith('/lead/'):
             try:
                 lead_id = p.split('/')[2]
-                detail = get_lead_detail(lead_id)
+                detail = get_lead_detail(lead_id, self.scope_tenant())
                 if detail:
                     self.send_json(200, detail)
                 else:
@@ -8504,13 +8613,13 @@ class Handler(BaseHTTPRequestHandler):
 
         elif p == '/outreach':
             try:
-                self.send_json(200, {'total': 0, 'log': get_outreach_log(100)})
+                self.send_json(200, {'total': 0, 'log': get_outreach_log(100, self.scope_tenant())})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
         elif p == '/stats-chart':
             try:
-                self.send_json(200, get_chart_stats())
+                self.send_json(200, get_chart_stats(self.scope_tenant()))
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
@@ -8692,9 +8801,14 @@ class Handler(BaseHTTPRequestHandler):
                 JOBS[job_id] = {'status': 'running', 'progress': 0,
                                 'log': [f'Parsing "{query}" → {parsed.get("niche")} in {where}'],
                                 'step': 'Discover'}
+                # tenant_id is a real UUID for admin/client accounts, but the
+                # internal service token resolves to the literal string
+                # 'service' (not a row in tenants) — never pass that into a
+                # uuid column, tag as untagged/admin-visible-only instead.
+                tag_tenant_id = tenant_id if tenant_id != 'service' else None
                 _bg_thread(run_discover_bg,
                     job_id, parsed['niche'], parsed['city'], parsed.get('country', ''),
-                    filter_mode, density, find_more, query, state_cities, tenant_id, user_id)
+                    filter_mode, density, find_more, query, state_cities, tag_tenant_id, user_id)
                 self.send_json(200, {'job_id': job_id, 'status': 'started',
                                      'parsed': parsed, 'find_more': find_more})
             except Exception as e:
@@ -9233,6 +9347,53 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
+        elif p == '/users/create':
+            # Admin-only: onboard a new client login with its own isolated
+            # tenant, so client2/client3/... each see only what they fetch —
+            # never each other's data, and never the admin's own.
+            if not self.require_admin(): return
+            try:
+                username = (body.get('username') or '').strip().lower()
+                password = str(body.get('password') or '')
+                if not username or not re.match(r'^[a-z0-9_-]{3,50}$', username):
+                    self.send_json(400, {'error': 'username must be 3-50 chars: letters, numbers, _ or -'}); return
+                if len(password) < 10:
+                    self.send_json(400, {'error': 'password must be at least 10 characters'}); return
+                conn = db_conn(); cur = conn.cursor()
+                cur.execute("SELECT 1 FROM auth_users WHERE username = %s", (username,))
+                if cur.fetchone():
+                    cur.close(); conn.close()
+                    self.send_json(409, {'error': 'that username already exists'}); return
+                cur.execute("INSERT INTO tenants (name) VALUES (%s) RETURNING id", (f"{username}'s workspace",))
+                new_tenant_id = cur.fetchone()[0]
+                salt = _h_secrets.token_hex(16)
+                pwhash = auth_hash(password, salt)
+                cur.execute("""INSERT INTO auth_users (username, salt, pwhash, role, tenant_id)
+                               VALUES (%s, %s, %s, 'client', %s)""",
+                            (username, salt, pwhash, new_tenant_id))
+                conn.commit(); cur.close(); conn.close()
+                self.send_json(200, {'success': True, 'username': username, 'role': 'client'})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p.startswith('/users/') and p.endswith('/delete'):
+            if not self.require_admin(): return
+            try:
+                username = p.split('/')[2]
+                if username in ('admin', 'service'):
+                    self.send_json(400, {'error': 'cannot delete the admin account'}); return
+                conn = db_conn(); cur = conn.cursor()
+                cur.execute("DELETE FROM auth_sessions WHERE username = %s", (username,))
+                # Only the account+login is removed — their tenant and any
+                # leads already tagged to it are left alone, in case the
+                # client comes back or the admin wants to keep the data.
+                cur.execute("DELETE FROM auth_users WHERE username = %s AND role != 'admin'", (username,))
+                deleted = cur.rowcount > 0
+                conn.commit(); cur.close(); conn.close()
+                self.send_json(200, {'success': deleted})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
         elif p == '/run-pipeline':
             try:
                 strategy = body.get('provider', 'serper_then_oxylabs')
@@ -9395,6 +9556,8 @@ class Handler(BaseHTTPRequestHandler):
         elif p.startswith('/lead/') and p.endswith('/send'):
             try:
                 lead_id = p.split('/')[2]
+                if not lead_in_scope(lead_id, self.scope_tenant()):
+                    self.send_json(404, {'error': 'Lead not found'}); return
                 result = send_lead_email(lead_id)
                 self.send_json(200 if result.get('success') else 400, result)
             except Exception as e:
@@ -9403,6 +9566,8 @@ class Handler(BaseHTTPRequestHandler):
         elif p.startswith('/lead/') and p.endswith('/approve'):
             try:
                 lead_id = p.split('/')[2]
+                if not lead_in_scope(lead_id, self.scope_tenant()):
+                    self.send_json(404, {'error': 'Lead not found'}); return
                 self.send_json(200, approve_lead(lead_id))
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
@@ -9410,6 +9575,8 @@ class Handler(BaseHTTPRequestHandler):
         elif p.startswith('/lead/') and p.endswith('/reject'):
             try:
                 lead_id = p.split('/')[2]
+                if not lead_in_scope(lead_id, self.scope_tenant()):
+                    self.send_json(404, {'error': 'Lead not found'}); return
                 self.send_json(200, reject_lead(lead_id))
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
@@ -9417,6 +9584,8 @@ class Handler(BaseHTTPRequestHandler):
         elif p.startswith('/lead/') and p.endswith('/regenerate-email'):
             try:
                 lead_id = p.split('/')[2]
+                if not lead_in_scope(lead_id, self.scope_tenant()):
+                    self.send_json(404, {'error': 'Lead not found'}); return
                 extras = body.get('instructions', '')
                 self.send_json(200, regenerate_email_for_lead(lead_id, extras))
             except Exception as e:
@@ -9425,6 +9594,8 @@ class Handler(BaseHTTPRequestHandler):
         elif p.startswith('/lead/') and p.endswith('/generate-mockup'):
             try:
                 lead_id = p.split('/')[2]
+                if not lead_in_scope(lead_id, self.scope_tenant()):
+                    self.send_json(404, {'error': 'Lead not found'}); return
                 custom_prompt = body.get('custom_prompt', '') or None
                 self.send_json(200, generate_mockup_for_lead(lead_id, custom_prompt=custom_prompt))
             except Exception as e:
@@ -9433,6 +9604,8 @@ class Handler(BaseHTTPRequestHandler):
         elif p.startswith('/lead/') and p.endswith('/research'):
             try:
                 lead_id = p.split('/')[2]
+                if not lead_in_scope(lead_id, self.scope_tenant()):
+                    self.send_json(404, {'error': 'Lead not found'}); return
                 job_id = f'job_{int(time.time() * 1000)}'
                 JOBS[job_id] = {'status': 'running', 'progress': 0,
                                 'log': ['Starting research…'], 'step': 'AI Research'}
@@ -9478,7 +9651,7 @@ class Handler(BaseHTTPRequestHandler):
         elif p == '/leads/delete':
             try:
                 lead_ids = body.get('lead_ids') or []
-                deleted = delete_leads_bulk(lead_ids)
+                deleted = delete_leads_bulk(lead_ids, self.scope_tenant())
                 self.send_json(200, {'success': True, 'deleted': deleted})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})

@@ -3996,6 +3996,84 @@ const SendingDomainsEditor = () => {
   );
 };
 
+const UserAccountsEditor = () => {
+  const [users, setUsers] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [adding, setAdding] = useState(false);
+  const [newUsername, setNewUsername] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const { showToast } = useToast();
+
+  const load = () => api.get('/users').then(d => { setUsers(d.users || []); setLoading(false); }).catch(() => setLoading(false));
+  useEffect(() => { load(); }, []);
+
+  const genPassword = () => {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+    let out = '';
+    for (let i = 0; i < 14; i++) out += chars[Math.floor(Math.random() * chars.length)];
+    setNewPassword(out);
+  };
+
+  const create = async () => {
+    if (!newUsername.trim() || !newPassword.trim()) { showToast('Username and password required', 'error'); return; }
+    try {
+      await api.post('/users/create', { username: newUsername.trim(), password: newPassword });
+      showToast(`Client account "${newUsername.trim()}" created — its own isolated workspace, invisible to other clients`);
+      setAdding(false); setNewUsername(''); setNewPassword('');
+      load();
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+  };
+
+  const remove = async (username) => {
+    if (!confirm(`Delete the login for "${username}"? Their fetched leads are kept, not deleted — this only removes their access.`)) return;
+    try { await api.post('/users/' + username + '/delete', {}); load(); }
+    catch (e) { showToast('Failed', 'error'); }
+  };
+
+  if (loading) return <div className="py-4 text-center"><Spinner /></div>;
+
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-slate-500">
+        Each client account below has its own private workspace — they only ever see leads they themselves fetch,
+        never yours (admin) or another client's. You can see everyone's data from your own admin login.
+      </p>
+      {users.length === 0 && !adding && (
+        <p className="text-xs text-slate-500">No client accounts yet.</p>
+      )}
+      {users.map(u => (
+        <div key={u.username} className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg flex items-center justify-between gap-2">
+          <div className="min-w-0">
+            <div className="font-medium text-sm flex items-center gap-2">
+              <span className="truncate">{u.username}</span>
+              <Badge variant="grey">{u.role}</Badge>
+            </div>
+            <p className="text-xs text-slate-500 mt-0.5">workspace {(u.tenant_id || '').slice(0, 8)}… · created {u.created_at ? new Date(u.created_at).toLocaleDateString() : ''}</p>
+          </div>
+          <Button size="sm" variant="ghost" icon="Trash2" onClick={() => remove(u.username)} />
+        </div>
+      ))}
+      {!adding ? (
+        <Button size="sm" variant="secondary" icon="Plus" onClick={() => { setAdding(true); genPassword(); }}>Add Client Account</Button>
+      ) : (
+        <div className="p-3 border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-lg space-y-2">
+          <h4 className="text-xs font-semibold text-slate-500">New Client Account</h4>
+          <Input value={newUsername} onChange={v => setNewUsername(v.trim().toLowerCase())} placeholder="username, e.g. acme-corp" />
+          <div className="flex gap-2">
+            <Input value={newPassword} onChange={setNewPassword} placeholder="password" />
+            <Button size="sm" variant="secondary" onClick={genPassword}>Generate</Button>
+          </div>
+          <p className="text-[11px] text-slate-400">Copy this password now and send it to the client — it isn't shown again after you leave this form.</p>
+          <div className="flex gap-2">
+            <Button size="sm" onClick={create}>Create</Button>
+            <Button size="sm" variant="ghost" onClick={() => setAdding(false)}>Cancel</Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 // ─────────────────────────────────────────────────
 //  Activity Log - who used which API/tool, when, and at what cost (M12)
 // ─────────────────────────────────────────────────
@@ -4184,6 +4262,11 @@ const SettingsPage = () => {
         <h3 className="font-semibold mb-3 flex items-center gap-2"><Icon name="Link2" /> CRM Connections</h3>
         <p className="text-xs text-slate-500 mb-3">Push qualified leads — with their full research dossier — into Pipedrive or any webhook-compatible system (Zapier, n8n, GoHighLevel).</p>
         <CrmConnectionsEditor />
+      </Card>
+
+      <Card>
+        <h3 className="font-semibold mb-3 flex items-center gap-2"><Icon name="Users" /> Client Accounts</h3>
+        <UserAccountsEditor />
       </Card>
 
       <Card>
