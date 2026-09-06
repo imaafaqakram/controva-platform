@@ -21,32 +21,33 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
-            echo "### WHICH ENRICHMENT-RELATED API KEYS ARE ACTUALLY CONFIGURED? ###"
-            python3 -c "import json; d = json.load(open('/opt/leadgen/config.json')); [print(k, ':', ('SET (' + str(len(str(d.get(k,'')))) + ' chars)') if d.get(k) else 'NOT SET') for k in ['serper_key','oxylabs_key','millionverifier_key','scrapingbee_key','zenrows_key','scrapingdog_key','firecrawl_key','here_api_key']]" 2>&1 || echo "(could not read config.json)"
-            echo
-            echo "### DID THE OXYLABS CLIENT FAIL TO INITIALIZE AT PROCESS STARTUP? (would stay broken until next restart even if Oxylabs itself has since recovered) ###"
-            journalctl -u leadgen-api --no-pager | grep -i "oxylabs" | tail -5 || echo "(no oxylabs-related startup log lines found)"
-            echo
-            echo "### REAL RECENT API USAGE LOG — did serper/oxylabs/millionverifier actually get called, and when? ###"
+            echo "### ICP RUN INVESTIGATION: is it actually still progressing, or stuck, and is Google's API (unrelated to Serper/Oxylabs) also broken? ###"
+            echo "--- icp_profiles + their most recent run ---"
             docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
-              "SELECT provider, endpoint, COUNT(*), MAX(created_at) AS most_recent FROM api_usage WHERE created_at > NOW() - INTERVAL '2 hours' GROUP BY provider, endpoint ORDER BY most_recent DESC;" 2>&1
-            echo "--- last 15 raw api_usage rows (any provider) ---"
+              "SELECT id, name, is_active, industries, geos FROM icp_profiles ORDER BY id;" 2>&1
             docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
-              "SELECT provider, endpoint, meta, created_at FROM api_usage ORDER BY id DESC LIMIT 15;" 2>&1
-            echo
-            echo "### DOES A DIRECT SERPER CALL WITH THE CONFIGURED KEY ACTUALLY WORK RIGHT NOW? ###"
-            SERPER_KEY_LIVE=$(python3 -c "import json; print(json.load(open('/opt/leadgen/config.json')).get('serper_key',''))" 2>/dev/null)
-            if [ -n "$SERPER_KEY_LIVE" ]; then
-              curl -s -o /tmp/serper_test.json -w "HTTP %{http_code}\n" -X POST https://google.serper.dev/search \
-                -H "X-API-KEY: $SERPER_KEY_LIVE" -H "Content-Type: application/json" \
-                -d '{"q":"test query controva diagnostics","num":1}'
-              echo "response body (first 300 chars):"
-              head -c 300 /tmp/serper_test.json; echo
-              rm -f /tmp/serper_test.json
+              "SELECT id, icp_id, status, started_at, NOW() - started_at AS elapsed, finished_at, leads_found, leads_new, LEFT(log, 800) AS log_tail FROM icp_runs ORDER BY id DESC LIMIT 5;" 2>&1
+            echo "--- leadgen-api log lines mentioning ICP, geocode, places, or TextSearch from the last hour (broader pattern this time) ---"
+            journalctl -u leadgen-api --since "60 minutes ago" --no-pager 2>&1 | grep -iE "icp|geocod|places|textsearch" | tail -60 || echo "(none found)"
+            echo "--- does a direct Google Geocoding call with the configured key work right now? ---"
+            GKEY=$(python3 -c "import json; print(json.load(open('/opt/leadgen/config.json')).get('google_api_key',''))" 2>/dev/null)
+            if [ -n "$GKEY" ]; then
+              curl -s "https://maps.googleapis.com/maps/api/geocode/json?address=Miami&key=$GKEY" | python3 -c "import json,sys; d=json.load(sys.stdin); print('status:', d.get('status'), '| error_message:', d.get('error_message',''))" 2>&1
             else
-              echo "no serper_key configured in config.json at all"
+              echo "no google_api_key configured at all"
             fi
-            unset SERPER_KEY_LIVE
+            echo "--- direct New Places API call with a locationRestriction circle, exactly matching what discover_leads_smart actually sends ---"
+            if [ -n "$GKEY" ]; then
+              curl -s -X POST "https://places.googleapis.com/v1/places:searchText" \
+                -H "Content-Type: application/json" -H "X-Goog-Api-Key: $GKEY" \
+                -H "X-Goog-FieldMask: places.id,places.displayName" \
+                -d '{"textQuery":"dental","pageSize":20,"rankPreference":"RELEVANCE","locationRestriction":{"circle":{"center":{"latitude":25.7617,"longitude":-80.1918},"radius":15000.0}}}' | head -c 500; echo
+            fi
+            echo "--- direct Classic Places call, exactly matching what _classic_text_search actually sends ---"
+            if [ -n "$GKEY" ]; then
+              curl -s "https://maps.googleapis.com/maps/api/place/textsearch/json?query=dental&location=25.7617,-80.1918&radius=15000&key=$GKEY" | python3 -c "import json,sys; d=json.load(sys.stdin); print('status:', d.get('status'), '| error_message:', d.get('error_message',''))" 2>&1
+            fi
+            unset GKEY
             echo
 
             echo "### END-TO-END WORKFLOW ENGINE TEST (live API, all 12 node types, disconnected so every node takes its safe/zero-cost early-return branch — no leads touched, no cost) ###"

@@ -4708,8 +4708,9 @@ const ICPPage = ({ setPage }) => {
                   <p className="text-xs text-slate-500 mt-0.5 truncate">
                     {pr.industries} · {pr.geos}
                   </p>
+                  {!pr.is_active && <p className="text-[11px] text-slate-400 mt-0.5">Won't run on the daily schedule — Run Now still works</p>}
                 </div>
-                <Badge variant={pr.is_active ? 'success' : 'grey'}>{pr.is_active ? 'Active' : 'Paused'}</Badge>
+                <Badge variant={pr.is_active ? 'success' : 'grey'}>{pr.is_active ? 'Auto-run: Active' : 'Auto-run: Paused'}</Badge>
               </div>
               <div className="grid grid-cols-3 gap-2 mt-3 text-center">
                 <div className="bg-slate-50 dark:bg-slate-800 rounded-lg p-2">
