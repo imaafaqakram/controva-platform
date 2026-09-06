@@ -2237,8 +2237,11 @@ def save_enrichment(result):
     finally:
         cur.close(); conn.close()
 
-def enrich_all_discovered(provider_strategy='serper_then_oxylabs'):
-    """Enrich all discovered leads that don't have contact info yet."""
+def enrich_all_discovered(provider_strategy='serper_then_oxylabs', job_id=None):
+    """Enrich all discovered leads that don't have contact info yet.
+    When job_id is given, stops early if that job was cancelled — safe to do
+    since each lead's status flips to 'enriched' as soon as it's processed, so
+    a later call just picks up whatever's left."""
     conn = db_conn(); cur = conn.cursor()
     # Target: status=discovered, regardless of has_website, with no useful contact info yet
     cur.execute("""
@@ -2256,6 +2259,8 @@ def enrich_all_discovered(provider_strategy='serper_then_oxylabs'):
 
     results = []
     for ld in leads:
+        if job_id and JOBS.get(job_id, {}).get('cancelled'):
+            break
         lead_id, bname, city, phone, niche, website = ld
         try:
             r = enrich_lead(str(lead_id), bname, city, phone, niche, providers, website=website)
@@ -5154,6 +5159,8 @@ def run_enrich_bg(job_id, provider_strategy='serper_then_oxylabs'):
 
         done = 0; found_email = 0; found_linkedin = 0
         for ld in leads:
+            if JOBS[job_id].get('cancelled'):
+                break
             lead_id, bname, city, phone, niche, website = ld
             try:
                 r = enrich_lead(str(lead_id), bname, city, phone, niche, providers, website=website)
@@ -5172,10 +5179,20 @@ def run_enrich_bg(job_id, provider_strategy='serper_then_oxylabs'):
                 JOBS[job_id]['log'].append(f'[{done}/{total}] Error on {bname}: {str(e)[:60]}')
                 JOBS[job_id]['progress'] = int(done / total * 100)
 
-        JOBS[job_id]['status'] = 'completed'
-        JOBS[job_id]['progress'] = 100
-        JOBS[job_id]['log'].append(f'Done — {total} processed · {found_email} emails · {found_linkedin} LinkedIn profiles found.')
-        JOBS[job_id]['results'] = {'processed': total, 'emails_found': found_email, 'linkedin_found': found_linkedin}
+        # Each lead's status flips to 'enriched' the moment it's processed (see
+        # save_enrichment), so a stop here is a true pause: the WHERE clause above
+        # already excludes done leads, meaning clicking Enrich again only picks up
+        # the ones this run never got to — no re-work, no duplicate API spend.
+        if JOBS[job_id].get('cancelled'):
+            JOBS[job_id]['status'] = 'cancelled'
+            JOBS[job_id]['log'].append(
+                f'Stopped — {done}/{total} processed ({found_email} emails, {found_linkedin} LinkedIn found). '
+                f'{total - done} leads untouched — click Enrich again to continue with those.')
+        else:
+            JOBS[job_id]['status'] = 'completed'
+            JOBS[job_id]['progress'] = 100
+            JOBS[job_id]['log'].append(f'Done — {total} processed · {found_email} emails · {found_linkedin} LinkedIn profiles found.')
+        JOBS[job_id]['results'] = {'processed': done, 'emails_found': found_email, 'linkedin_found': found_linkedin}
     except Exception as e:
         JOBS[job_id]['status'] = 'failed'
         JOBS[job_id]['error'] = str(e)
@@ -5209,17 +5226,31 @@ def run_verify_emails_bg(job_id, only_stale=False):
             return
 
         stats = {'deliverable': 0, 'risky': 0, 'undeliverable': 0, 'unknown': 0}
+        checked = 0
         for i, (lead_id, email) in enumerate(rows):
+            if JOBS[job_id].get('cancelled'):
+                break
             vr = verify_and_store_contact_email(lead_id, email)
             stats[vr['status']] = stats.get(vr['status'], 0) + 1
+            checked += 1
             JOBS[job_id]['progress'] = int((i + 1) / total * 100)
             JOBS[job_id]['log'] = (JOBS[job_id]['log'][-40:]
                                    + [f"[{i+1}/{total}] {email} → {vr['status']}"])
             time.sleep(0.4)   # be polite to receiving mail servers
-        JOBS[job_id]['log'].append(
-            f"Done — deliverable: {stats['deliverable']}, risky: {stats['risky']}, "
-            f"undeliverable: {stats['undeliverable']}, unknown: {stats['unknown']}")
-        JOBS[job_id]['status'] = 'completed'; JOBS[job_id]['progress'] = 100
+        # Each contact's email_status is written immediately per-row, so this is a
+        # true pause — the WHERE clause above already skips checked contacts, and
+        # re-running Verify Emails just continues with whatever's left.
+        if JOBS[job_id].get('cancelled'):
+            JOBS[job_id]['log'].append(
+                f"Stopped — {checked}/{total} checked (deliverable: {stats['deliverable']}, risky: {stats['risky']}, "
+                f"undeliverable: {stats['undeliverable']}). {total - checked} left — run Verify Emails again to continue.")
+            JOBS[job_id]['status'] = 'cancelled'
+        else:
+            JOBS[job_id]['log'].append(
+                f"Done — deliverable: {stats['deliverable']}, risky: {stats['risky']}, "
+                f"undeliverable: {stats['undeliverable']}, unknown: {stats['unknown']}")
+            JOBS[job_id]['status'] = 'completed'
+        JOBS[job_id]['progress'] = 100
     except Exception as e:
         JOBS[job_id]['status'] = 'failed'
         JOBS[job_id]['error'] = str(e)
@@ -5376,17 +5407,31 @@ def run_verify_websites_bg(job_id, lead_ids=None):
 
 def run_pipeline_bg(job_id, provider_strategy='serper_then_oxylabs', generate_images=False):
     try:
-        JOBS[job_id] = {'status': 'enriching', 'progress': 0, 'log': []}
+        JOBS[job_id] = {'status': 'enriching', 'progress': 0, 'log': [], 'cancelled': False}
         JOBS[job_id]['log'].append('Step 1/3: Enriching leads...')
-        enriched = enrich_all_discovered(provider_strategy)
+        enriched = enrich_all_discovered(provider_strategy, job_id=job_id)
         JOBS[job_id]['log'].append(f'  Enriched {len(enriched)} leads')
         JOBS[job_id]['progress'] = 33
+
+        if JOBS[job_id].get('cancelled'):
+            JOBS[job_id]['status'] = 'cancelled'
+            JOBS[job_id]['log'].append('Stopped after enrichment — scoring and email generation skipped. '
+                                        'Run the pipeline again to continue with the remaining leads.')
+            JOBS[job_id]['results'] = {'enriched': len(enriched), 'scored': 0, 'assets': 0}
+            return
 
         JOBS[job_id]['status'] = 'scoring'
         JOBS[job_id]['log'].append('Step 2/3: AI scoring...')
         scored = score_all_enriched()
         JOBS[job_id]['log'].append(f'  Scored {len(scored)} leads')
         JOBS[job_id]['progress'] = 66
+
+        if JOBS[job_id].get('cancelled'):
+            JOBS[job_id]['status'] = 'cancelled'
+            JOBS[job_id]['log'].append('Stopped after scoring — email generation skipped. '
+                                        'Run the pipeline again to continue.')
+            JOBS[job_id]['results'] = {'enriched': len(enriched), 'scored': len(scored), 'assets': 0}
+            return
 
         JOBS[job_id]['status'] = 'generating'
         if generate_images:
@@ -7095,6 +7140,17 @@ def send_email_via_resend(to_email, subject, body_text, body_html=None, from_ema
         "html": body_html,
         "text": body_text
     }
+    if unsub_url:
+        # RFC 8058 one-click unsubscribe. Gmail/Yahoo/Microsoft's 2024 bulk-sender
+        # rules weight this heavily for inbox (vs spam) placement, and Gmail/Yahoo
+        # will actively penalize senders whose one-click header doesn't work — so
+        # this only gets sent when unsub_url is a real link; the /u/<token> POST
+        # handler below is what answers the one-click request with an instant,
+        # no-login unsubscribe (same handler the GET link already uses).
+        payload["headers"] = {
+            "List-Unsubscribe": f"<{unsub_url}>",
+            "List-Unsubscribe-Post": "List-Unsubscribe=One-Click"
+        }
 
     try:
         req = urllib.request.Request(
@@ -8518,6 +8574,23 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200 if result.get('ok') else 400, result)
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
+            return
+
+        if p.startswith('/u/'):
+            # RFC 8058 one-click unsubscribe: Gmail/Yahoo/Outlook POST here
+            # (body "List-Unsubscribe=One-Click") when a recipient hits the
+            # inbox's own Unsubscribe button — no login, no confirmation
+            # click, just remove them immediately. Unauthenticated by design,
+            # same as the GET version of this link used in the email body.
+            try:
+                token = p[3:].split('?')[0]
+                handle_unsubscribe(token)
+            except Exception as e:
+                print(f'[unsubscribe] one-click POST error: {e}')
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(b'OK')
             return
 
         if not self.require_auth():
