@@ -21,29 +21,17 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
-            echo "### VERIFY THE FIX: does the SAME ICP (id=2) that found 0 leads with the buggy locationRestriction now actually find real leads? ###"
-            echo "--- status of the two runs interrupted by this deploy's restart (read-only — not touching them) ---"
+            echo "### VERIFY THE FIX (continued): check the ALREADY-RUNNING fresh job (job_1788728037775) rather than starting yet another one ###"
+            echo "--- status of the two runs interrupted by this deploy's restart, plus the fresh one, all for icp_id=2 ---"
             docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
-              "SELECT id, icp_id, status, started_at, NOW() - started_at AS elapsed, finished_at FROM icp_runs WHERE id IN (6,7);" 2>&1
-            echo "--- triggering a fresh run of the same ICP with the fixed code ---"
+              "SELECT id, icp_id, status, started_at, NOW() - started_at AS elapsed, finished_at, leads_found, leads_new, LEFT(log,1500) AS log_tail FROM icp_runs WHERE icp_id=2 ORDER BY id DESC;" 2>&1
             TOKENI=$(python3 -c "import json; print(json.load(open('/opt/leadgen/config.json')).get('service_token',''))" 2>/dev/null)
             if [ -n "$TOKENI" ]; then
-              RUN_RESP=$(curl -s -X POST http://localhost:8080/icp/run -H "Authorization: Bearer $TOKENI" -H "Content-Type: application/json" -d '{"id":2}')
-              echo "run response: $RUN_RESP"
-              JOBI=$(echo "$RUN_RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('job_id',''))" 2>/dev/null)
-              if [ -n "$JOBI" ]; then
-                for i in 1 2 3 4 5 6; do
-                  sleep 5
-                  ST=$(curl -s "http://localhost:8080/job/$JOBI" -H "Authorization: Bearer $TOKENI")
-                  echo "poll $i: $ST"
-                  echo "$ST" | grep -q '"status": *"completed"' && break
-                done
-                echo "(this job keeps running server-side if not yet finished — real, wanted work, not left dangling)"
-              fi
-            else
-              echo "no service_token — skipping"
+              echo "--- current state of job_1788728037775 (in-memory JOBS dict — empty/not_found if the run already finished and this is a fresh process, which is fine, the DB row above is authoritative) ---"
+              curl -s "http://localhost:8080/job/job_1788728037775" -H "Authorization: Bearer $TOKENI"
+              echo
             fi
-            unset TOKENI RUN_RESP JOBI ST
+            unset TOKENI
             echo
 
             echo "### END-TO-END WORKFLOW ENGINE TEST (live API, all 12 node types, disconnected so every node takes its safe/zero-cost early-return branch — no leads touched, no cost) ###"
