@@ -28,23 +28,27 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
-            echo "### DELIVERABILITY CHECK: what sending domains are configured, and is their DNS actually correct? ###"
-            echo "--- configured sending domains ---"
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
-              "SELECT id, domain, from_email, from_name, is_active, daily_cap, paused_reason FROM sending_domains ORDER BY id;" 2>&1
-            echo "--- is public_base_url set? (needed for a real https unsubscribe link + List-Unsubscribe header, not just the mailto fallback) ---"
-            python3 -c "import json; d=json.load(open('/opt/leadgen/config.json')); print('public_base_url:', repr(d.get('public_base_url',''))); print('company_address set:', bool(d.get('company_address')))" 2>/dev/null
-            echo "--- for each configured domain: SPF, DKIM (resend._domainkey), and DMARC records, checked directly via DNS ---"
-            for DOM in $(docker exec leadgen_postgres psql -U leadgen -d leadgen_db -t -A -c "SELECT domain FROM sending_domains;" 2>/dev/null); do
-              echo "=== $DOM ==="
-              echo "SPF:"
-              dig +short TXT "$DOM" | grep -i spf || echo "  (no SPF TXT record found at the root)"
-              echo "DKIM (resend._domainkey.$DOM):"
-              dig +short CNAME "resend._domainkey.$DOM" || dig +short TXT "resend._domainkey.$DOM" || echo "  (no resend._domainkey record found)"
-              echo "DMARC (_dmarc.$DOM):"
-              dig +short TXT "_dmarc.$DOM" || echo "  (no DMARC record found — recommended, not just SPF+DKIM)"
-              echo
-            done
+            echo "### TENANT ISOLATION SCHEMA AUDIT (read-only) — do NOT infer this from init.sql, the live DB may have drifted ###"
+            echo "--- does auth_users have a tenant_id column already? full column list: ---"
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "\d auth_users" 2>&1
+            echo "--- current accounts (username/role only, no secrets) ---"
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "SELECT username, role, created_at FROM auth_users ORDER BY created_at;" 2>&1
+            echo "--- does the leads table actually have a tenant_id column live? ---"
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "\d leads" 2>&1 | grep -i "tenant\|Table \"public"
+            echo "--- does a 'tenants' table exist live, and if so what's in it? ---"
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "\d tenants" 2>&1
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "SELECT * FROM tenants;" 2>&1
+            echo "--- does a separate 'users' table exist live (distinct from auth_users)? ---"
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "\d users" 2>&1
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "SELECT COUNT(*) FROM users;" 2>&1
+            echo "--- does tenant_leads exist, and does it have any rows? for which tenant_id values? ---"
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "SELECT tenant_id, COUNT(*) FROM tenant_leads GROUP BY tenant_id;" 2>&1
+            echo "--- how many leads actually have a non-null tenant_id today? (confirms whether it has ever been set) ---"
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "SELECT COUNT(*) FILTER (WHERE tenant_id IS NOT NULL) as tagged, COUNT(*) as total FROM leads;" 2>&1
+            echo "--- any FK constraints on leads.tenant_id / tenant_search_history.user_id that INSERTs must satisfy? ---"
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "SELECT conname, conrelid::regclass, confrelid::regclass, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid IN ('leads'::regclass, 'tenant_search_history'::regclass, 'credit_usage'::regclass) AND contype='f';" 2>&1
+            echo "--- is uuid_generate_v4() available (uuid-ossp extension)? ---"
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "SELECT extname FROM pg_extension;" 2>&1
 
             echo "### END-TO-END WORKFLOW ENGINE TEST (live API, all 12 node types, disconnected so every node takes its safe/zero-cost early-return branch — no leads touched, no cost) ###"
             TOKEN=$(python3 -c "import json; print(json.load(open('/opt/leadgen/config.json')).get('service_token',''))" 2>/dev/null)
