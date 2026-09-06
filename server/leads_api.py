@@ -2245,7 +2245,7 @@ def enrich_all_discovered(provider_strategy='serper_then_oxylabs'):
         providers = ['oxylabs']
     elif provider_strategy == 'serper_then_oxylabs':
         providers = ['serper', 'oxylabs']
-    elif provider_strategy == 'free_only':
+    elif provider_strategy in ('free_only', 'free_first'):
         providers = ['serper', 'permutator']
     else:
         providers = ['serper']
@@ -5152,7 +5152,7 @@ def run_enrich_bg(job_id, provider_strategy='serper_then_oxylabs'):
             providers = ['oxylabs']
         elif provider_strategy == 'serper_then_oxylabs':
             providers = ['serper', 'oxylabs']
-        elif provider_strategy == 'free_only':
+        elif provider_strategy in ('free_only', 'free_first'):
             providers = ['serper', 'permutator']
         else:
             providers = ['serper']
@@ -5263,7 +5263,7 @@ def run_reenrich_bg(job_id, provider_strategy='oxylabs_only'):
             providers = ['oxylabs']
         elif provider_strategy == 'serper_then_oxylabs':
             providers = ['serper', 'oxylabs']
-        elif provider_strategy == 'free_only':
+        elif provider_strategy in ('free_only', 'free_first'):
             providers = ['serper', 'permutator']
         else:
             providers = ['oxylabs']
