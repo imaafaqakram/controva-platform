@@ -117,13 +117,20 @@ CONFIG = {
     'outreach_automation_interval_sec': 300,  # how often the automation loop checks for ready leads
 }
 
-# Map enrichment_strategy → providers list for enrich_lead()
+# Map enrichment_strategy → providers list for enrich_lead(). Single source of
+# truth — every caller (Quick Enrich, the Pipeline page's Enrich/Re-Enrich,
+# Settings' global default, the workflow builder's Enrich node) resolves a
+# strategy name through this dict rather than keeping its own copy: three
+# independent if/elif copies of this same mapping had drifted out of sync
+# with each other and with the frontend's actual strategy ids, which is how
+# picking "Free First" (the default, labeled "Recommended") ended up
+# silently running Oxylabs-only in one place and Serper-only in another.
 _STRATEGY_PROVIDERS = {
     'free_first':          ['free_scrape', 'permutator', 'serper', 'oxylabs'],
     'serper_only':         ['serper'],
     'oxylabs_only':        ['oxylabs'],
     'serper_then_oxylabs': ['serper', 'oxylabs'],
-    'free_only':           ['serper'],
+    'free_only':           ['serper', 'permutator'],
 }
 
 # ──────────────────────────────────────────────────────────────
@@ -2239,16 +2246,7 @@ def enrich_all_discovered(provider_strategy='serper_then_oxylabs'):
     leads = cur.fetchall()
     cur.close(); conn.close()
 
-    if provider_strategy == 'serper_only':
-        providers = ['serper']
-    elif provider_strategy == 'oxylabs_only':
-        providers = ['oxylabs']
-    elif provider_strategy == 'serper_then_oxylabs':
-        providers = ['serper', 'oxylabs']
-    elif provider_strategy in ('free_only', 'free_first'):
-        providers = ['serper', 'permutator']
-    else:
-        providers = ['serper']
+    providers = _STRATEGY_PROVIDERS.get(provider_strategy, ['serper'])
 
     results = []
     for ld in leads:
@@ -5146,16 +5144,7 @@ def run_enrich_bg(job_id, provider_strategy='serper_then_oxylabs'):
 
         JOBS[job_id]['log'].append(f'Found {total} leads to enrich.')
 
-        if provider_strategy == 'serper_only':
-            providers = ['serper']
-        elif provider_strategy == 'oxylabs_only':
-            providers = ['oxylabs']
-        elif provider_strategy == 'serper_then_oxylabs':
-            providers = ['serper', 'oxylabs']
-        elif provider_strategy in ('free_only', 'free_first'):
-            providers = ['serper', 'permutator']
-        else:
-            providers = ['serper']
+        providers = _STRATEGY_PROVIDERS.get(provider_strategy, ['serper'])
 
         done = 0; found_email = 0; found_linkedin = 0
         for ld in leads:
@@ -5257,16 +5246,7 @@ def run_reenrich_bg(job_id, provider_strategy='oxylabs_only'):
             JOBS[job_id]['results'] = {'processed': 0, 'emails_found': 0, 'linkedin_found': 0}
             return
 
-        if provider_strategy == 'serper_only':
-            providers = ['serper']
-        elif provider_strategy == 'oxylabs_only':
-            providers = ['oxylabs']
-        elif provider_strategy == 'serper_then_oxylabs':
-            providers = ['serper', 'oxylabs']
-        elif provider_strategy in ('free_only', 'free_first'):
-            providers = ['serper', 'permutator']
-        else:
-            providers = ['oxylabs']
+        providers = _STRATEGY_PROVIDERS.get(provider_strategy, ['oxylabs'])
 
         JOBS[job_id]['log'].append(f'Found {total} leads with no contact info. Using: {"+".join(providers)}')
         done = 0; found_email = 0; found_linkedin = 0
@@ -7406,9 +7386,7 @@ def wf_search(config, input_ids, log_fn):
 def wf_enrich(config, input_ids, log_fn):
     if not input_ids: return []
     strategy = config.get('strategy') or CONFIG.get('enrichment_strategy', 'serper_then_oxylabs')
-    providers = {'serper_only': ['serper'], 'oxylabs_only': ['oxylabs'],
-                 'serper_then_oxylabs': ['serper', 'oxylabs'],
-                 'free_only': ['serper', 'permutator']}.get(strategy, ['serper'])
+    providers = _STRATEGY_PROVIDERS.get(strategy, ['serper'])
     conn = db_conn(); cur = conn.cursor()
     cur.execute("""SELECT id, business_name, city, phone, niche, COALESCE(website,'')
                    FROM leads WHERE id = ANY(%s)""", (input_ids,))
