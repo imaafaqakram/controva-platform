@@ -27,8 +27,8 @@ jobs:
               "SELECT id, name, is_active, industries, geos FROM icp_profiles ORDER BY id;" 2>&1
             docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
               "SELECT id, icp_id, status, started_at, NOW() - started_at AS elapsed, finished_at, leads_found, leads_new, LEFT(log, 800) AS log_tail FROM icp_runs ORDER BY id DESC LIMIT 5;" 2>&1
-            echo "--- leadgen-api log lines mentioning ICP, geocode, or places from the last hour ---"
-            journalctl -u leadgen-api --since "60 minutes ago" --no-pager 2>&1 | grep -iE "icp|geocod|places|text_search" | tail -40 || echo "(none found)"
+            echo "--- leadgen-api log lines mentioning ICP, geocode, places, or TextSearch from the last hour (broader pattern this time) ---"
+            journalctl -u leadgen-api --since "60 minutes ago" --no-pager 2>&1 | grep -iE "icp|geocod|places|textsearch" | tail -60 || echo "(none found)"
             echo "--- does a direct Google Geocoding call with the configured key work right now? ---"
             GKEY=$(python3 -c "import json; print(json.load(open('/opt/leadgen/config.json')).get('google_api_key',''))" 2>/dev/null)
             if [ -n "$GKEY" ]; then
@@ -36,12 +36,16 @@ jobs:
             else
               echo "no google_api_key configured at all"
             fi
-            echo "--- does a direct Google Places Text Search call with the configured key work right now? ---"
+            echo "--- direct New Places API call with a locationRestriction circle, exactly matching what discover_leads_smart actually sends ---"
             if [ -n "$GKEY" ]; then
               curl -s -X POST "https://places.googleapis.com/v1/places:searchText" \
                 -H "Content-Type: application/json" -H "X-Goog-Api-Key: $GKEY" \
                 -H "X-Goog-FieldMask: places.id,places.displayName" \
-                -d '{"textQuery":"dental clinics in Miami"}' | head -c 400; echo
+                -d '{"textQuery":"dental","pageSize":20,"rankPreference":"RELEVANCE","locationRestriction":{"circle":{"center":{"latitude":25.7617,"longitude":-80.1918},"radius":15000.0}}}' | head -c 500; echo
+            fi
+            echo "--- direct Classic Places call, exactly matching what _classic_text_search actually sends ---"
+            if [ -n "$GKEY" ]; then
+              curl -s "https://maps.googleapis.com/maps/api/place/textsearch/json?query=dental&location=25.7617,-80.1918&radius=15000&key=$GKEY" | python3 -c "import json,sys; d=json.load(sys.stdin); print('status:', d.get('status'), '| error_message:', d.get('error_message',''))" 2>&1
             fi
             unset GKEY
             echo
