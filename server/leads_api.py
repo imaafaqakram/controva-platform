@@ -1264,7 +1264,11 @@ def text_search_places(text_query, lat=None, lng=None, radius_m=None, rank='RELE
     if rank in ('DISTANCE', 'RELEVANCE'):
         base['rankPreference'] = rank
     if lat is not None and lng is not None and radius_m:
-        base['locationRestriction'] = {'circle': {
+        # locationRestriction has no "circle" field for Text Search (New) —
+        # only locationBias does. Sending it under locationRestriction gets
+        # a 400 "Unknown name \"circle\"" on every single call, which was
+        # silently falling through to the classic API every time.
+        base['locationBias'] = {'circle': {
             'center': {'latitude': float(lat), 'longitude': float(lng)},
             'radius': float(min(radius_m, 50000))}}
     results, token = [], None
