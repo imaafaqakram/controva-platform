@@ -7095,6 +7095,17 @@ def send_email_via_resend(to_email, subject, body_text, body_html=None, from_ema
         "html": body_html,
         "text": body_text
     }
+    if unsub_url:
+        # RFC 8058 one-click unsubscribe. Gmail/Yahoo/Microsoft's 2024 bulk-sender
+        # rules weight this heavily for inbox (vs spam) placement, and Gmail/Yahoo
+        # will actively penalize senders whose one-click header doesn't work — so
+        # this only gets sent when unsub_url is a real link; the /u/<token> POST
+        # handler below is what answers the one-click request with an instant,
+        # no-login unsubscribe (same handler the GET link already uses).
+        payload["headers"] = {
+            "List-Unsubscribe": f"<{unsub_url}>",
+            "List-Unsubscribe-Post": "List-Unsubscribe=One-Click"
+        }
 
     try:
         req = urllib.request.Request(
@@ -8518,6 +8529,23 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200 if result.get('ok') else 400, result)
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
+            return
+
+        if p.startswith('/u/'):
+            # RFC 8058 one-click unsubscribe: Gmail/Yahoo/Outlook POST here
+            # (body "List-Unsubscribe=One-Click") when a recipient hits the
+            # inbox's own Unsubscribe button — no login, no confirmation
+            # click, just remove them immediately. Unauthenticated by design,
+            # same as the GET version of this link used in the email body.
+            try:
+                token = p[3:].split('?')[0]
+                handle_unsubscribe(token)
+            except Exception as e:
+                print(f'[unsubscribe] one-click POST error: {e}')
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(b'OK')
             return
 
         if not self.require_auth():
