@@ -1,6 +1,13 @@
 name: VM Diagnostics
-# retry: re-verify all 12 workflow node types now that PR #27 (job-status fix +
-# 6 new node types) is merged and deployed to the live API
+# Read-only live checks against the production VM, plus a standing
+# end-to-end smoke test of the workflow engine. Deliberately has no
+# restart/service-management commands: this file's own content used
+# to include two unconditional `systemctl restart leadgen-api` calls
+# left over from a one-time investigation, and every single push to
+# this file (including ones only changing the checks themselves) was
+# silently restarting production and killing whatever background job
+# happened to be running at the time. Keep it that way — add new
+# checks freely, never add a restart here again.
 
 on:
   push:
@@ -21,29 +28,11 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
-            echo "### WHY DID job_1788728037775 DISAPPEAR FROM MEMORY WITH 0 PROGRESS? Did the server restart again, or crash, or hang on something specific? ###"
-            echo "--- when did leadgen-api actually last (re)start? ---"
-            systemctl show leadgen-api --property=ActiveEnterTimestamp
-            echo "--- any restarts, crashes, or tracebacks in the last 15 minutes? ---"
-            journalctl -u leadgen-api --since "15 minutes ago" --no-pager 2>&1 | grep -iE "started leadgen|stopped leadgen|traceback|error|exception|killed|oom" | tail -40 || echo "(none found)"
-            echo "--- is the service even up right now, and responsive? ---"
-            systemctl is-active leadgen-api
-            curl -s --max-time 5 http://localhost:8080/health || echo "(no response)"
-            echo "--- full raw log for the exact window job 8 was started through now, no filter, to see literally everything ---"
-            journalctl -u leadgen-api --since "2026-09-06 20:53:00" --no-pager 2>&1 | tail -80
-            echo
-
-            echo "### VERIFY THE FIX (continued): check the ALREADY-RUNNING fresh job (job_1788728037775) rather than starting yet another one ###"
-            echo "--- status of the two runs interrupted by this deploy's restart, plus the fresh one, all for icp_id=2 ---"
+            echo "### CURRENT ICP RUN STATE (read-only — no restart commands in this file anymore, see commit message) ###"
             docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
               "SELECT id, icp_id, status, started_at, NOW() - started_at AS elapsed, finished_at, leads_found, leads_new, LEFT(log,1500) AS log_tail FROM icp_runs WHERE icp_id=2 ORDER BY id DESC;" 2>&1
-            TOKENI=$(python3 -c "import json; print(json.load(open('/opt/leadgen/config.json')).get('service_token',''))" 2>/dev/null)
-            if [ -n "$TOKENI" ]; then
-              echo "--- current state of job_1788728037775 (in-memory JOBS dict — empty/not_found if the run already finished and this is a fresh process, which is fine, the DB row above is authoritative) ---"
-              curl -s "http://localhost:8080/job/job_1788728037775" -H "Authorization: Bearer $TOKENI"
-              echo
-            fi
-            unset TOKENI
+            echo "--- when did leadgen-api last (re)start, for reference ---"
+            systemctl show leadgen-api --property=ActiveEnterTimestamp
             echo
 
             echo "### END-TO-END WORKFLOW ENGINE TEST (live API, all 12 node types, disconnected so every node takes its safe/zero-cost early-return branch — no leads touched, no cost) ###"
@@ -88,172 +77,6 @@ jobs:
               fi
             fi
             unset TOKEN SAVE_RESP RUN_RESP STATUS_RESP
-            echo
-
-            echo "### FIND N8N ON THIS VM ###"
-            echo "--- docker containers (any n8n?) ---"
-            docker ps -a --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' 2>&1
-            echo "--- systemd services mentioning n8n ---"
-            systemctl list-units --all 2>/dev/null | grep -i n8n || echo "(no systemd unit named n8n)"
-            echo "--- is anything listening that looks like n8n's default port 5678? ---"
-            sudo ss -tlnp 2>/dev/null | grep -E ':5678|n8n' || echo "(nothing on 5678)"
-            echo "--- n8n container env (if found) — look for N8N_API_KEY / auth config / port, secrets redacted ---"
-            N8N_CONTAINER=$(docker ps -a --format '{{.Names}}' | grep -i n8n | head -1)
-            echo "n8n container name: ${N8N_CONTAINER:-none found}"
-            if [ -n "$N8N_CONTAINER" ]; then
-              docker inspect "$N8N_CONTAINER" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>&1 | grep -iE 'N8N_|PORT|HOST|PROTOCOL' | sed -E 's/(KEY|SECRET|PASSWORD|TOKEN)=.*/\1=***REDACTED***/'
-              echo "--- n8n container port mapping ---"
-              docker port "$N8N_CONTAINER" 2>&1
-              echo "--- can we reach n8n's REST API locally at all (unauthenticated ping) ---"
-              curl -s -o /dev/null -w "http://localhost:5678/ -> HTTP %{http_code}\n" --max-time 5 http://localhost:5678/ || true
-              echo "--- does this n8n have ANY existing api key stored in its own db (n8n uses sqlite by default unless configured otherwise)? ---"
-              docker exec "$N8N_CONTAINER" sh -c 'find / -maxdepth 4 -iname "*.sqlite*" 2>/dev/null' 2>&1 || true
-            fi
-            echo "--- does app.controvallc.com's DNS sibling n8n.controvallc.com resolve, and to what? (may be a DIFFERENT server per earlier session notes) ---"
-            getent hosts n8n.controvallc.com || echo "n8n.controvallc.com does not resolve from this VM"
-            echo
-
-            echo "### CAN N8N'S OWN EDITOR BE IFRAME-EMBEDDED IN OUR DASHBOARD? ###"
-            echo "--- is n8n_url / n8n_api_key currently configured in our app? ---"
-            python3 -c "import json; d=json.load(open('/opt/leadgen/config.json')); print('n8n_url:', repr(d.get('n8n_url',''))); print('n8n_api_key set:', bool(d.get('n8n_api_key')))" 2>/dev/null || echo "(could not read config.json)"
-            echo "--- response headers from n8n's own editor root (X-Frame-Options / CSP frame-ancestors decide if an <iframe> is even possible) ---"
-            curl -sI --max-time 5 http://localhost:5678/ 2>&1 | grep -iE 'x-frame-options|content-security-policy|^HTTP' || echo "(no response / nothing on 5678)"
-            if [ -n "$N8N_CONTAINER" ]; then
-              echo "--- does the n8n container set N8N_EDITOR_BASE_URL, N8N_SECURE_COOKIE, or any frame/embed-related env? ---"
-              docker inspect "$N8N_CONTAINER" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>&1 | grep -iE 'FRAME|EMBED|EDITOR_BASE|SECURE_COOKIE|N8N_PATH' || echo "(none set — n8n defaults apply)"
-            fi
-            echo
-
-            echo "### WORKFLOW_RUNS SCHEMA INVESTIGATION ###"
-            echo "--- does 'workflows' table exist, and what does it look like? ---"
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "\d workflows" 2>&1
-            echo "--- does 'workflow_runs' table exist, and what does it ACTUALLY look like? ---"
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "\d workflow_runs" 2>&1
-            echo "--- any rows in either table already? ---"
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "SELECT COUNT(*) FROM workflows;" 2>&1
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "SELECT COUNT(*) FROM workflow_runs;" 2>&1
-            echo "--- list ALL tables in this database (any n8n or other unexpected owner of this name?) ---"
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "\dt" 2>&1
-            echo "--- is there possibly a SECOND postgres/database that n8n uses — same container? ---"
-            docker ps --format '{{.Names}}\t{{.Image}}' 2>&1
-            echo "--- try the exact CREATE INDEX statement from the migration directly, capture full error ---"
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "CREATE INDEX IF NOT EXISTS idx_workflow_runs_wf ON workflow_runs(workflow_id);" 2>&1
-            echo "--- leadgen-api logs mentioning workflow (did ensure_workflow_tables() run at startup, and what happened) ---"
-            journalctl -u leadgen-api --since "20 minutes ago" --no-pager | grep -i workflow || echo "(no workflow-related log lines)"
-            echo "--- is the /workflows API actually working right now despite the migration error? ---"
-            curl -s http://localhost:8080/health || true
-            echo
-
-            echo "### LATEST ICP RUN + ACTIVITY LOG ATTRIBUTION CHECK ###"
-            echo "--- most recent icp_runs rows (status/timestamps/counts) ---"
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
-              "SELECT id, icp_id, started_at, finished_at, status, leads_found, leads_new FROM icp_runs ORDER BY id DESC LIMIT 5;" 2>&1
-            echo "--- full log of the most recent run ---"
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -t -c \
-              "SELECT log FROM icp_runs ORDER BY id DESC LIMIT 1;" 2>&1
-            echo "--- the ICP profile that run belongs to ---"
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
-              "SELECT p.id, p.name, p.industries, p.geos, p.min_lead_score FROM icp_profiles p ORDER BY p.id DESC LIMIT 3;" 2>&1
-            echo "--- the actual leads that ICP run found (most recently touched profile) ---"
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
-              "SELECT l.id, l.business_name, l.niche, l.city, l.ai_score, l.icp_score, l.status, l.website, l.phone \
-               FROM leads l WHERE l.icp_id = (SELECT icp_id FROM icp_runs ORDER BY id DESC LIMIT 1) \
-               ORDER BY l.id DESC LIMIT 20;" 2>&1
-            echo "--- most recent api_usage rows (does M12 attribution actually work on a real run?) ---"
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
-              "SELECT created_at, username, provider, endpoint, cost, meta FROM api_usage ORDER BY id DESC LIMIT 25;" 2>&1
-            echo "--- api_usage username breakdown, last 2 hours (any NULLs where a real user should be attributed?) ---"
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
-              "SELECT COALESCE(username,'(NULL)') as username, COUNT(*), SUM(cost) FROM api_usage \
-               WHERE created_at > NOW() - INTERVAL '2 hours' GROUP BY username ORDER BY COUNT(*) DESC;" 2>&1
-            echo
-
-            echo "### ROOT CAUSE TEST: does deploy.yml's plain (non-sudo) systemctl restart actually work over SSH? ###"
-            echo "--- ActiveEnterTimestamp BEFORE test ---"
-            systemctl show leadgen-api --property=ActiveEnterTimestamp --no-pager
-            echo "--- whoami / groups / passwordless sudo? ---"
-            whoami
-            groups
-            sudo -n true 2>&1 && echo "passwordless sudo: YES" || echo "passwordless sudo: NO / needs password"
-            echo "--- running: systemctl restart leadgen-api (NO sudo — exactly what deploy.yml runs) ---"
-            systemctl restart leadgen-api 2>&1
-            echo "exit code: $?"
-            sleep 4
-            echo "--- ActiveEnterTimestamp AFTER plain restart attempt (compare to BEFORE) ---"
-            systemctl show leadgen-api --property=ActiveEnterTimestamp --no-pager
-            echo "--- is-active after plain restart attempt ---"
-            systemctl is-active leadgen-api
-            echo
-
-            echo "### leadgen-api ###"
-            systemctl status leadgen-api --no-pager || true
-            echo
-            echo "### docker ps ###"
-            docker ps || true
-            echo
-            echo "### xray (REALITY VPN) ###"
-            sudo systemctl status xray --no-pager || true
-            echo
-            echo "### openvpn-server@server2 ###"
-            sudo systemctl status openvpn-server@server2 --no-pager || true
-            echo
-            echo "### recent leadgen-api logs ###"
-            journalctl -u leadgen-api -n 50 --no-pager || true
-            echo
-            echo "### when did leadgen-api actually last (re)start? ###"
-            systemctl show leadgen-api --property=ActiveEnterTimestamp --no-pager
-            echo "### full startup log since last restart ###"
-            journalctl -u leadgen-api --since "30 minutes ago" --no-pager | grep -E "Schema migration|Auth:|WARNING: auth|Client role account|migration warning|Multi-Module|Listening on" || echo "(no migration/startup log lines found in the last 30 minutes)"
-            echo "--- does the client role account actually exist in the DB? ---"
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -t -c "SELECT username, role FROM auth_users;" 2>&1 || echo "(could not query auth_users)"
-            echo "--- does the lead_research table exist (M7 migration)? ---"
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -t -c "\dt lead_research" 2>&1 || echo "(could not query)"
-            echo "--- is leads_api.py on disk actually the new version? (grep for an M7-only string) ---"
-            grep -c "AI RESEARCH & PAIN DETECTION" /opt/leadgen/leads_api.py 2>&1 || echo "0 (old version still on disk!)"
-            echo
-            echo "### if the process is stale relative to the file on disk, force a real restart ###"
-            sudo systemctl restart leadgen-api
-            sleep 5
-            echo "Restart result: $(systemctl is-active leadgen-api)"
-            systemctl show leadgen-api --property=ActiveEnterTimestamp --no-pager
-            echo "--- health check post-restart ---"
-            curl -s http://localhost:8080/health || true
-            echo
-            echo "--- client account now seeded? ---"
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -t -c "SELECT username, role FROM auth_users;" 2>&1 || true
-            echo "--- fresh startup log ---"
-            journalctl -u leadgen-api --since "1 minute ago" --no-pager | grep -E "Schema migration|Auth:|Client role account|WARNING" || echo "(nothing yet)"
-            echo
-            echo "### disk / memory ###"
-            df -h /
-            free -h
-            echo
-            echo "### health endpoint ###"
-            curl -s http://localhost:8080/health || true
-            echo
-            echo "### reverse proxy (caddy/nginx) ###"
-            systemctl is-active caddy 2>/dev/null && echo "caddy: active" || echo "caddy: not active/not installed"
-            systemctl is-active nginx 2>/dev/null && echo "nginx: active" || echo "nginx: not active/not installed"
-            echo "--- Caddyfile ---"
-            cat /etc/caddy/Caddyfile 2>/dev/null || echo "(no /etc/caddy/Caddyfile)"
-            echo "--- nginx sites-enabled ---"
-            ls /etc/nginx/sites-enabled/ 2>/dev/null && cat /etc/nginx/sites-enabled/* 2>/dev/null || echo "(no nginx sites-enabled)"
-            echo
-            echo "### firewall — is 8080 exposed publicly? ###"
-            sudo ufw status 2>/dev/null || echo "(ufw not active/installed)"
-            echo
-            echo "### public IP + domain check ###"
-            PUBIP=$(curl -s ifconfig.me || echo unknown)
-            echo "Public IP: $PUBIP"
-            echo "--- does app.controvallc.com resolve, and to what? ---"
-            getent hosts app.controvallc.com || echo "app.controvallc.com does not resolve"
-            echo "--- end-to-end HTTPS test from the VM itself ---"
-            curl -sk -o /dev/null -w "https://app.controvallc.com -> HTTP %{http_code}\n" --max-time 8 https://app.controvallc.com/health || echo "https://app.controvallc.com unreachable"
-            echo
-            echo "### caddy status + recent journal (did the cert actually get issued?) ###"
-            sudo systemctl status caddy --no-pager || true
-            echo "--- last 40 caddy log lines ---"
-            sudo journalctl -u caddy -n 40 --no-pager || true
 
       - name: DNS + cert deep-dive from the internet (this runner, not the VM)
         run: |
