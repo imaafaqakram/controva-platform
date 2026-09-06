@@ -21,33 +21,29 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
-            echo "### ICP RUN INVESTIGATION: is it actually still progressing, or stuck, and is Google's API (unrelated to Serper/Oxylabs) also broken? ###"
-            echo "--- icp_profiles + their most recent run ---"
+            echo "### VERIFY THE FIX: does the SAME ICP (id=2) that found 0 leads with the buggy locationRestriction now actually find real leads? ###"
+            echo "--- status of the two runs interrupted by this deploy's restart (read-only — not touching them) ---"
             docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
-              "SELECT id, name, is_active, industries, geos FROM icp_profiles ORDER BY id;" 2>&1
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
-              "SELECT id, icp_id, status, started_at, NOW() - started_at AS elapsed, finished_at, leads_found, leads_new, LEFT(log, 800) AS log_tail FROM icp_runs ORDER BY id DESC LIMIT 5;" 2>&1
-            echo "--- leadgen-api log lines mentioning ICP, geocode, places, or TextSearch from the last hour (broader pattern this time) ---"
-            journalctl -u leadgen-api --since "60 minutes ago" --no-pager 2>&1 | grep -iE "icp|geocod|places|textsearch" | tail -60 || echo "(none found)"
-            echo "--- does a direct Google Geocoding call with the configured key work right now? ---"
-            GKEY=$(python3 -c "import json; print(json.load(open('/opt/leadgen/config.json')).get('google_api_key',''))" 2>/dev/null)
-            if [ -n "$GKEY" ]; then
-              curl -s "https://maps.googleapis.com/maps/api/geocode/json?address=Miami&key=$GKEY" | python3 -c "import json,sys; d=json.load(sys.stdin); print('status:', d.get('status'), '| error_message:', d.get('error_message',''))" 2>&1
+              "SELECT id, icp_id, status, started_at, NOW() - started_at AS elapsed, finished_at FROM icp_runs WHERE id IN (6,7);" 2>&1
+            echo "--- triggering a fresh run of the same ICP with the fixed code ---"
+            TOKENI=$(python3 -c "import json; print(json.load(open('/opt/leadgen/config.json')).get('service_token',''))" 2>/dev/null)
+            if [ -n "$TOKENI" ]; then
+              RUN_RESP=$(curl -s -X POST http://localhost:8080/icp/run -H "Authorization: Bearer $TOKENI" -H "Content-Type: application/json" -d '{"id":2}')
+              echo "run response: $RUN_RESP"
+              JOBI=$(echo "$RUN_RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('job_id',''))" 2>/dev/null)
+              if [ -n "$JOBI" ]; then
+                for i in 1 2 3 4 5 6; do
+                  sleep 5
+                  ST=$(curl -s "http://localhost:8080/job/$JOBI" -H "Authorization: Bearer $TOKENI")
+                  echo "poll $i: $ST"
+                  echo "$ST" | grep -q '"status": *"completed"' && break
+                done
+                echo "(this job keeps running server-side if not yet finished — real, wanted work, not left dangling)"
+              fi
             else
-              echo "no google_api_key configured at all"
+              echo "no service_token — skipping"
             fi
-            echo "--- direct New Places API call with a locationRestriction circle, exactly matching what discover_leads_smart actually sends ---"
-            if [ -n "$GKEY" ]; then
-              curl -s -X POST "https://places.googleapis.com/v1/places:searchText" \
-                -H "Content-Type: application/json" -H "X-Goog-Api-Key: $GKEY" \
-                -H "X-Goog-FieldMask: places.id,places.displayName" \
-                -d '{"textQuery":"dental","pageSize":20,"rankPreference":"RELEVANCE","locationRestriction":{"circle":{"center":{"latitude":25.7617,"longitude":-80.1918},"radius":15000.0}}}' | head -c 500; echo
-            fi
-            echo "--- direct Classic Places call, exactly matching what _classic_text_search actually sends ---"
-            if [ -n "$GKEY" ]; then
-              curl -s "https://maps.googleapis.com/maps/api/place/textsearch/json?query=dental&location=25.7617,-80.1918&radius=15000&key=$GKEY" | python3 -c "import json,sys; d=json.load(sys.stdin); print('status:', d.get('status'), '| error_message:', d.get('error_message',''))" 2>&1
-            fi
-            unset GKEY
+            unset TOKENI RUN_RESP JOBI ST
             echo
 
             echo "### END-TO-END WORKFLOW ENGINE TEST (live API, all 12 node types, disconnected so every node takes its safe/zero-cost early-return branch — no leads touched, no cost) ###"
