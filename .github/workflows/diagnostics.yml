@@ -21,6 +21,18 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
+            echo "### WHY DID job_1788728037775 DISAPPEAR FROM MEMORY WITH 0 PROGRESS? Did the server restart again, or crash, or hang on something specific? ###"
+            echo "--- when did leadgen-api actually last (re)start? ---"
+            systemctl show leadgen-api --property=ActiveEnterTimestamp
+            echo "--- any restarts, crashes, or tracebacks in the last 15 minutes? ---"
+            journalctl -u leadgen-api --since "15 minutes ago" --no-pager 2>&1 | grep -iE "started leadgen|stopped leadgen|traceback|error|exception|killed|oom" | tail -40 || echo "(none found)"
+            echo "--- is the service even up right now, and responsive? ---"
+            systemctl is-active leadgen-api
+            curl -s --max-time 5 http://localhost:8080/health || echo "(no response)"
+            echo "--- full raw log for the exact window job 8 was started through now, no filter, to see literally everything ---"
+            journalctl -u leadgen-api --since "2026-09-06 20:53:00" --no-pager 2>&1 | tail -80
+            echo
+
             echo "### VERIFY THE FIX (continued): check the ALREADY-RUNNING fresh job (job_1788728037775) rather than starting yet another one ###"
             echo "--- status of the two runs interrupted by this deploy's restart, plus the fresh one, all for icp_id=2 ---"
             docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
