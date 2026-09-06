@@ -1999,21 +1999,28 @@ def smart_scrape(url, timeout=20, prefer_direct=False):
     print(f'smart_scrape: ALL tiers failed for {url[:70]}')
     return None
 
-def enrich_with_free_scrape(business_name, city):
-    """Completely free enrichment: guess domain → scrape with Jina → extract emails/socials.
-    No Serper or Oxylabs credits consumed."""
+def enrich_with_free_scrape(business_name, city, website=''):
+    """Completely free enrichment: scrape the lead's known website if we have
+    one, else guess a domain → scrape via smart_scrape() → extract
+    emails/socials. No Serper or Oxylabs credits required (smart_scrape only
+    reaches paid tiers — Oxylabs — if every free/cheap one it's configured
+    with, e.g. ScrapingBee/ZenRows/Scrapingdog/Firecrawl, already failed)."""
     result = {'email': None, 'linkedin_url': None, 'facebook_url': None,
               'instagram_url': None, 'owner_name': None}
+
+    domains = []
+    # A website we've already confirmed for this lead is ground truth —
+    # try it before any guess, and it's the one candidate worth spending
+    # smart_scrape's full multi-tier effort on.
+    known_domain = norm_domain(website) if website else ''
+    if known_domain:
+        domains.append(known_domain)
 
     # Build candidate domain guesses from the business name
     clean = re.sub(r"[^a-z0-9]+", '', business_name.lower())[:30]
     city_clean = re.sub(r"[^a-z0-9]+", '', city.lower())[:15] if city else ''
-    domains = []
     if clean:
-        domains = [
-            f'{clean}.com',
-            f'{clean}business.com',
-        ]
+        domains += [f'{clean}.com', f'{clean}business.com']
         if city_clean:
             domains.append(f'{clean}{city_clean}.com')
 
@@ -2029,7 +2036,7 @@ def enrich_with_free_scrape(business_name, city):
         if ab and ab.startswith('http'):
             m = re.match(r'https?://([^/]+)', ab)
             if m:
-                domains.insert(0, m.group(1))
+                domains.insert(1 if known_domain else 0, m.group(1))
     except Exception:
         pass
 
@@ -2040,12 +2047,7 @@ def enrich_with_free_scrape(business_name, city):
         for path in ['', '/contact', '/about']:
             url = f'https://{dom}{path}'
             try:
-                jina_url = 'https://r.jina.ai/' + url
-                req = urllib.request.Request(jina_url, headers={
-                    'Accept': 'text/plain', 'X-Return-Format': 'markdown',
-                    'User-Agent': 'Mozilla/5.0 LeadGen/1.0',
-                })
-                text = urllib.request.urlopen(req, timeout=12).read().decode('utf-8', errors='replace')
+                text = smart_scrape(url, timeout=15)
                 if not _scrape_ok(text, min_len=100): continue
 
                 emails = extract_emails(text)
@@ -2164,7 +2166,7 @@ def enrich_lead(lead_id, business_name, city, phone, niche, providers=None, webs
             continue  # already found email, no need to fallback
 
         if prov == 'free_scrape':
-            r = enrich_with_free_scrape(business_name, city)
+            r = enrich_with_free_scrape(business_name, city, website=website)
             result['sources_tried'].append('free_scrape')
             for k, v in r.items():
                 if v and not result.get(k): result[k] = v

@@ -21,6 +21,34 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
+            echo "### WHICH ENRICHMENT-RELATED API KEYS ARE ACTUALLY CONFIGURED? ###"
+            python3 -c "import json; d = json.load(open('/opt/leadgen/config.json')); [print(k, ':', ('SET (' + str(len(str(d.get(k,'')))) + ' chars)') if d.get(k) else 'NOT SET') for k in ['serper_key','oxylabs_key','millionverifier_key','scrapingbee_key','zenrows_key','scrapingdog_key','firecrawl_key','here_api_key']]" 2>&1 || echo "(could not read config.json)"
+            echo
+            echo "### DID THE OXYLABS CLIENT FAIL TO INITIALIZE AT PROCESS STARTUP? (would stay broken until next restart even if Oxylabs itself has since recovered) ###"
+            journalctl -u leadgen-api --no-pager | grep -i "oxylabs" | tail -5 || echo "(no oxylabs-related startup log lines found)"
+            echo
+            echo "### REAL RECENT API USAGE LOG — did serper/oxylabs/millionverifier actually get called, and when? ###"
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
+              "SELECT provider, endpoint, COUNT(*), MAX(created_at) AS most_recent FROM api_usage WHERE created_at > NOW() - INTERVAL '2 hours' GROUP BY provider, endpoint ORDER BY most_recent DESC;" 2>&1
+            echo "--- last 15 raw api_usage rows (any provider) ---"
+            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c \
+              "SELECT provider, endpoint, meta, created_at FROM api_usage ORDER BY id DESC LIMIT 15;" 2>&1
+            echo
+            echo "### DOES A DIRECT SERPER CALL WITH THE CONFIGURED KEY ACTUALLY WORK RIGHT NOW? ###"
+            SERPER_KEY_LIVE=$(python3 -c "import json; print(json.load(open('/opt/leadgen/config.json')).get('serper_key',''))" 2>/dev/null)
+            if [ -n "$SERPER_KEY_LIVE" ]; then
+              curl -s -o /tmp/serper_test.json -w "HTTP %{http_code}\n" -X POST https://google.serper.dev/search \
+                -H "X-API-KEY: $SERPER_KEY_LIVE" -H "Content-Type: application/json" \
+                -d '{"q":"test query controva diagnostics","num":1}'
+              echo "response body (first 300 chars):"
+              head -c 300 /tmp/serper_test.json; echo
+              rm -f /tmp/serper_test.json
+            else
+              echo "no serper_key configured in config.json at all"
+            fi
+            unset SERPER_KEY_LIVE
+            echo
+
             echo "### END-TO-END WORKFLOW ENGINE TEST (live API, all 12 node types, disconnected so every node takes its safe/zero-cost early-return branch — no leads touched, no cost) ###"
             TOKEN=$(python3 -c "import json; print(json.load(open('/opt/leadgen/config.json')).get('service_token',''))" 2>/dev/null)
             if [ -z "$TOKEN" ]; then
