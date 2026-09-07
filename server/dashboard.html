@@ -865,6 +865,13 @@ const LeadsPage = () => {
     const poll = setInterval(async () => {
       try {
         const j = await api.get('/job/' + verifyJobId);
+        if (!handled && j.status === 'not_found') {
+          handled = true;
+          clearInterval(poll); setVerifyJobId(null);
+          setVerifyJob({ status: 'not_found', log: ['Lost track of this job — the server restarted while it was running. Nothing was lost; run it again to continue.'] });
+          showToast('Verification lost its connection (server restarted) — safe to retry', 'info');
+          return;
+        }
         setVerifyJob(j);
         if (!handled && j.status === 'completed') {
           handled = true;
@@ -1652,6 +1659,12 @@ const PipelinePage = () => {
     const poll = setInterval(async () => {
       try {
         const j = await api.get('/job/' + qeCsvJobId);
+        if (j.status === 'not_found') {
+          clearInterval(poll);
+          setQeCsvJob({ status: 'not_found' });
+          showToast('CSV enrichment lost its connection (server restarted) — safe to retry', 'info');
+          return;
+        }
         setQeCsvJob(j);
         if (j.status === 'completed' || j.status === 'failed') {
           clearInterval(poll);
@@ -1668,6 +1681,21 @@ const PipelinePage = () => {
     const poll = setInterval(async () => {
       try {
         const j = await api.get('/job/' + jobId);
+        if (j.status === 'not_found') {
+          // The server restarted (every deploy does this) while this job was
+          // still running — its in-memory progress is gone for good, but no
+          // work is lost: whatever it already finished stays done, so
+          // clicking the same button again just continues with what's left.
+          clearInterval(poll);
+          try { localStorage.removeItem('pipeline_job'); } catch (e) {}
+          setJob({ status: 'not_found', progress: 0, log: [
+            'Lost track of this job — the server restarted while it was running (this happens on every deploy).',
+            'Nothing was lost: leads already processed stay processed. Click the button again to continue with the rest.'
+          ] });
+          loadStats();
+          showToast(`${stepLabel || 'Job'} lost its connection (server restarted) — safe to retry`, 'info');
+          return;
+        }
         setJob(j);
         if (j.status === 'completed') {
           clearInterval(poll);
@@ -1748,7 +1776,7 @@ const PipelinePage = () => {
         <div className={`rounded-xl border-2 p-4 space-y-3 ${
           job.status === 'completed' ? 'border-green-400 bg-green-50 dark:bg-green-900/20' :
           job.status === 'failed'    ? 'border-red-400 bg-red-50 dark:bg-red-900/20' :
-          job.status === 'cancelled' ? 'border-slate-300 bg-slate-50 dark:bg-slate-800/40' :
+          (job.status === 'cancelled' || job.status === 'not_found') ? 'border-slate-300 bg-slate-50 dark:bg-slate-800/40' :
           'border-amber-400 bg-amber-50 dark:bg-amber-900/20'
         }`}>
           <div className="flex items-center justify-between">
@@ -1759,9 +1787,9 @@ const PipelinePage = () => {
                 <span className={
                   job.status === 'completed' ? 'text-green-700' :
                   job.status === 'failed'    ? 'text-red-600' :
-                  job.status === 'cancelled' ? 'text-slate-500' :
+                  (job.status === 'cancelled' || job.status === 'not_found') ? 'text-slate-500' :
                   'text-amber-700'
-                }>{job.status === 'running' ? 'running…' : job.status}</span>
+                }>{job.status === 'running' ? 'running…' : job.status === 'not_found' ? 'lost (server restarted)' : job.status}</span>
               </span>
               {job.progress > 0 && job.progress < 100 && (
                 <span className="text-xs text-slate-500">{job.progress}%</span>
@@ -1772,7 +1800,7 @@ const PipelinePage = () => {
                 className="px-3 py-1 bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 rounded-lg text-xs font-semibold hover:bg-red-200 dark:hover:bg-red-900/60 transition-colors border border-red-200 dark:border-red-800">
                 ✕ Stop
               </button>
-            ) : (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') && (
+            ) : (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled' || job.status === 'not_found') && (
               <button onClick={() => { setJob(null); clearPolling(); loadStats(); }}
                 className="text-xs text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 underline">Dismiss</button>
             )}
@@ -1781,7 +1809,7 @@ const PipelinePage = () => {
             <div className={`h-3 rounded-full transition-all duration-500 ${
               job.status === 'completed' ? 'bg-green-500' :
               job.status === 'failed'    ? 'bg-red-500' :
-              job.status === 'cancelled' ? 'bg-slate-400' :
+              (job.status === 'cancelled' || job.status === 'not_found') ? 'bg-slate-400' :
               'bg-gradient-to-r from-accent-500 to-green-500 animate-pulse'
             }`} style={{ width: Math.max(job.progress || (job.status !== 'completed' ? 5 : 0), 0) + '%' }} />
           </div>
@@ -1931,12 +1959,13 @@ const PipelinePage = () => {
               <div className={`rounded-xl border-2 p-4 ${
                 qeCsvJob.status === 'completed' ? 'border-green-400 bg-green-50 dark:bg-green-900/20' :
                 qeCsvJob.status === 'failed' ? 'border-red-400 bg-red-50 dark:bg-red-900/20' :
+                qeCsvJob.status === 'not_found' ? 'border-slate-300 bg-slate-50 dark:bg-slate-800/40' :
                 'border-accent-400 bg-accent-50 dark:bg-accent-900/20'
               }`}>
                 <div className="flex items-center justify-between mb-2">
                   <div className="flex items-center gap-2">
                     {qeCsvJob.status === 'running' && <Spinner />}
-                    <span className="font-semibold text-sm">Bulk Enrichment — {qeCsvJob.status}</span>
+                    <span className="font-semibold text-sm">Bulk Enrichment — {qeCsvJob.status === 'not_found' ? 'lost (server restarted) — safe to retry' : qeCsvJob.status}</span>
                   </div>
                   {qeCsvJob.results && (
                     <div className="flex gap-3 text-xs">
@@ -4465,7 +4494,7 @@ const LeadDetailModal = ({ leadId, onClose, onUpdate }) => {
     const poll = setInterval(async () => {
       try {
         const j = await api.get('/job/' + researchJobId);
-        if (j.status === 'completed' || j.status === 'failed') {
+        if (j.status === 'completed' || j.status === 'failed' || j.status === 'not_found') {
           clearInterval(poll);
           setResearching(false);
           setResearchJobId(null);
@@ -4473,6 +4502,8 @@ const LeadDetailModal = ({ leadId, onClose, onUpdate }) => {
             const d = await api.get('/lead/' + leadId);
             setLead(d);
             showToast('Research complete', 'success');
+          } else if (j.status === 'not_found') {
+            showToast('Research lost its connection (server restarted) — safe to retry', 'info');
           } else {
             showToast('Research failed: ' + (j.error || 'unknown error'), 'error');
           }
@@ -4741,6 +4772,7 @@ const ICPPage = ({ setPage }) => {
         return;
       }
       api.get('/job/' + runJob.job_id).then(j => {
+        if (j.status === 'not_found') { clearInterval(t); setRunJob(null); refresh(); return; }
         setRunJob(j);
         if (j.status === 'completed' || j.status === 'failed') { clearInterval(t); refresh(); }
       }).catch(() => {});
@@ -5221,6 +5253,7 @@ const WorkflowsPage = () => {
     const t = setInterval(() => {
       if (Date.now() - startedAt > 5 * 60 * 1000) { clearInterval(t); setRunJob(null); refresh(); return; }
       api.get('/job/' + runJob.job_id).then(j => {
+        if (j.status === 'not_found') { clearInterval(t); setRunJob(null); refresh(); return; }
         setRunJob(j);
         if (j.status === 'completed' || j.status === 'failed') { clearInterval(t); refresh(); }
       }).catch(() => {});
