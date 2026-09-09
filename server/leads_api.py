@@ -9394,6 +9394,40 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
+        elif p.startswith('/users/') and p.endswith('/reset-password'):
+            # Admin-only: set a client's password directly (they can't do a
+            # self-service change without knowing the old one). Also clears
+            # any lockout from prior failed attempts and force-logs-out every
+            # existing session, so a stale login elsewhere can't cause
+            # confusing "it still won't let me in" reports right after this.
+            if not self.require_admin(): return
+            try:
+                username = p.split('/')[2]
+                new_password = str(body.get('password') or '')
+                if username in ('admin', 'service'):
+                    self.send_json(400, {'error': 'use /auth/change-password for the admin account'}); return
+                if len(new_password) < 6:
+                    self.send_json(400, {'error': 'password must be at least 6 characters'}); return
+                conn = db_conn(); cur = conn.cursor()
+                cur.execute("SELECT 1 FROM auth_users WHERE username = %s", (username,))
+                if not cur.fetchone():
+                    cur.close(); conn.close()
+                    self.send_json(404, {'error': 'no such account'}); return
+                salt = _h_secrets.token_hex(16)
+                pwhash = auth_hash(new_password, salt)
+                cur.execute("UPDATE auth_users SET salt = %s, pwhash = %s WHERE username = %s",
+                            (salt, pwhash, username))
+                cur.execute("DELETE FROM auth_sessions WHERE username = %s", (username,))
+                conn.commit(); cur.close(); conn.close()
+                stale_keys = [k for k in list(_login_locks.keys()) + list(_login_failures.keys())
+                              if k.startswith(username.lower() + '|')]
+                for k in set(stale_keys):
+                    _login_locks.pop(k, None)
+                    _login_failures.pop(k, None)
+                self.send_json(200, {'success': True})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
         elif p == '/run-pipeline':
             try:
                 strategy = body.get('provider', 'serper_then_oxylabs')

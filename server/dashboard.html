@@ -201,6 +201,8 @@ const ICONS = {
   PieChart:      'M21.21 15.89A10 10 0 118 2.83M22 12A10 10 0 0012 2v10z',
   Activity:      'M22 12h-4l-3 9L9 3l-3 9H2',
   Trash2:        'M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6h14zM10 11v6M14 11v6',
+  Eye:           'M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8zM12 15a3 3 0 100-6 3 3 0 000 6z',
+  EyeOff:        'M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19M14.12 14.12a3 3 0 11-4.24-4.24M1 1l22 22',
 
 };
 
@@ -344,13 +346,23 @@ const Button = ({ children, onClick, variant = 'primary', size = 'md', disabled,
   );
 };
 
-const Input = ({ value, onChange, placeholder, type = 'text', className = '', icon = null, onKeyDown }) => (
-  <div className={'relative ' + className}>
-    {icon && <Icon name={icon} className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />}
-    <input type={type} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} onKeyDown={onKeyDown}
-      className={'w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent-500 transition-all ' + (icon ? 'pl-10 pr-3' : 'px-3') + ' py-2.5'} />
-  </div>
-);
+const Input = ({ value, onChange, placeholder, type = 'text', className = '', icon = null, onKeyDown, revealable = false }) => {
+  const [revealed, setRevealed] = useState(false);
+  const effectiveType = revealable ? (revealed ? 'text' : 'password') : type;
+  return (
+    <div className={'relative ' + className}>
+      {icon && <Icon name={icon} className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />}
+      <input type={effectiveType} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} onKeyDown={onKeyDown}
+        className={'w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent-500 transition-all ' + (icon ? 'pl-10' : 'pl-3') + (revealable ? ' pr-10' : ' pr-3') + ' py-2.5'} />
+      {revealable && (
+        <button type="button" tabIndex={-1} onClick={() => setRevealed(r => !r)}
+          className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300">
+          <Icon name={revealed ? 'EyeOff' : 'Eye'} className="w-4 h-4" />
+        </button>
+      )}
+    </div>
+  );
+};
 
 const Badge = ({ children, variant = 'default', ...rest }) => {
   const v = {
@@ -4052,16 +4064,18 @@ const UserAccountsEditor = () => {
   const [adding, setAdding] = useState(false);
   const [newUsername, setNewUsername] = useState('');
   const [newPassword, setNewPassword] = useState('');
+  const [resettingUser, setResettingUser] = useState(null); // username being reset, or null
+  const [resetPassword, setResetPassword] = useState('');
   const { showToast } = useToast();
 
   const load = () => api.get('/users').then(d => { setUsers(d.users || []); setLoading(false); }).catch(() => setLoading(false));
   useEffect(() => { load(); }, []);
 
-  const genPassword = () => {
+  const genRandomPassword = () => {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
     let out = '';
     for (let i = 0; i < 14; i++) out += chars[Math.floor(Math.random() * chars.length)];
-    setNewPassword(out);
+    return out;
   };
 
   const create = async () => {
@@ -4080,6 +4094,15 @@ const UserAccountsEditor = () => {
     catch (e) { showToast('Failed', 'error'); }
   };
 
+  const doReset = async () => {
+    if (!resetPassword.trim()) { showToast('Enter a password first', 'error'); return; }
+    try {
+      await api.post('/users/' + resettingUser + '/reset-password', { password: resetPassword });
+      showToast(`Password reset for "${resettingUser}" — any stuck login attempts/lockouts were cleared too`);
+      setResettingUser(null); setResetPassword('');
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+  };
+
   if (loading) return <div className="py-4 text-center"><Spinner /></div>;
 
   return (
@@ -4092,15 +4115,35 @@ const UserAccountsEditor = () => {
         <p className="text-xs text-slate-500">No client accounts yet.</p>
       )}
       {users.map(u => (
-        <div key={u.username} className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg flex items-center justify-between gap-2">
-          <div className="min-w-0">
-            <div className="font-medium text-sm flex items-center gap-2">
-              <span className="truncate">{u.username}</span>
-              <Badge variant="grey">{u.role}</Badge>
+        <div key={u.username} className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="min-w-0">
+              <div className="font-medium text-sm flex items-center gap-2">
+                <span className="truncate">{u.username}</span>
+                <Badge variant="grey">{u.role}</Badge>
+              </div>
+              <p className="text-xs text-slate-500 mt-0.5">workspace {(u.tenant_id || '').slice(0, 8)}… · created {u.created_at ? new Date(u.created_at).toLocaleDateString() : ''}</p>
             </div>
-            <p className="text-xs text-slate-500 mt-0.5">workspace {(u.tenant_id || '').slice(0, 8)}… · created {u.created_at ? new Date(u.created_at).toLocaleDateString() : ''}</p>
+            <div className="flex gap-1 flex-shrink-0">
+              <Button size="sm" variant="ghost" icon="Lock"
+                onClick={() => { setResettingUser(u.username); setResetPassword(genRandomPassword()); }} />
+              <Button size="sm" variant="ghost" icon="Trash2" onClick={() => remove(u.username)} />
+            </div>
           </div>
-          <Button size="sm" variant="ghost" icon="Trash2" onClick={() => remove(u.username)} />
+          {resettingUser === u.username && (
+            <div className="p-2.5 border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-lg space-y-2">
+              <h4 className="text-xs font-semibold text-slate-500">Reset password for "{u.username}"</h4>
+              <div className="flex gap-2">
+                <Input value={resetPassword} onChange={setResetPassword} placeholder="new password" revealable />
+                <Button size="sm" variant="secondary" onClick={() => setResetPassword(genRandomPassword())}>Generate</Button>
+              </div>
+              <p className="text-[11px] text-slate-400">Also clears any lockout from prior failed attempts and signs them out everywhere — copy this now and send it to the client.</p>
+              <div className="flex gap-2">
+                <Button size="sm" onClick={doReset}>Reset Password</Button>
+                <Button size="sm" variant="ghost" onClick={() => { setResettingUser(null); setResetPassword(''); }}>Cancel</Button>
+              </div>
+            </div>
+          )}
         </div>
       ))}
       {!adding ? (
@@ -4110,7 +4153,7 @@ const UserAccountsEditor = () => {
           <h4 className="text-xs font-semibold text-slate-500">New Client Account</h4>
           <Input value={newUsername} onChange={v => setNewUsername(v.trim().toLowerCase())} placeholder="username, e.g. acme-corp" />
           <div className="flex gap-2">
-            <Input value={newPassword} onChange={setNewPassword} placeholder="password" />
+            <Input value={newPassword} onChange={setNewPassword} placeholder="password" revealable />
             <Button size="sm" variant="secondary" onClick={genPassword}>Generate</Button>
           </div>
           <p className="text-[11px] text-slate-400">Copy this password now and send it to the client — it isn't shown again after you leave this form.</p>
