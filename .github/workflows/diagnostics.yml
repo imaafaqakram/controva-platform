@@ -28,45 +28,42 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
-            echo "### TENANT ISOLATION LIVE VERIFICATION — does the fix actually isolate a client account? ###"
-            TOKEN=$(python3 -c "import json; print(json.load(open('/opt/leadgen/config.json')).get('service_token',''))" 2>/dev/null)
-            echo "--- auth_users: does every account now have its own distinct tenant_id? ---"
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "SELECT username, role, tenant_id FROM auth_users ORDER BY username;" 2>&1
-            echo "--- tenants table: one row per account now? ---"
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "SELECT id, name, created_at FROM tenants ORDER BY created_at;" 2>&1
-            echo "--- creating a throwaway test client account via the new admin-only endpoint ---"
-            CREATE_RESP=$(curl -s -X POST http://localhost:8080/users/create \
-              -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-              -d '{"username":"_diag_test_client","password":"Diag-Test-Pass-987654"}')
-            echo "create response: $CREATE_RESP"
-            LOGIN_RESP=$(curl -s -X POST http://localhost:8080/auth/login \
-              -H "Content-Type: application/json" \
-              -d '{"username":"_diag_test_client","password":"Diag-Test-Pass-987654"}')
-            CLIENT_TOKEN=$(echo "$LOGIN_RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('token',''))" 2>/dev/null)
-            echo "got client token: $([ -n \"$CLIENT_TOKEN\" ] && echo yes || echo NO)"
-            TEST_TENANT=$(docker exec leadgen_postgres psql -U leadgen -d leadgen_db -t -A -c "SELECT tenant_id FROM auth_users WHERE username='_diag_test_client';" 2>/dev/null)
-            echo "test client's tenant_id: $TEST_TENANT"
-            echo "--- /leads as the brand-new test client, before anything is tagged to them — MUST be 0 ---"
-            curl -s "http://localhost:8080/leads" -H "Authorization: Bearer $CLIENT_TOKEN" | python3 -c "import json,sys; d=json.load(sys.stdin); print('total:', d.get('total'))" 2>&1
-            echo "--- /config as the test client — MUST NOT contain enrichment_strategy or other internal keys ---"
-            curl -s "http://localhost:8080/config" -H "Authorization: Bearer $CLIENT_TOKEN"
-            echo
-            echo "--- /cost-stats as the test client — MUST be rejected (admin-only) ---"
-            curl -s -o /dev/null -w "http_code: %{http_code}\n" "http://localhost:8080/cost-stats" -H "Authorization: Bearer $CLIENT_TOKEN"
-            ONE_LEAD=$(docker exec leadgen_postgres psql -U leadgen -d leadgen_db -t -A -c "SELECT id FROM leads WHERE lead_type IS NULL LIMIT 1;" 2>/dev/null)
-            echo "--- tagging exactly one pre-existing (admin's) lead to the test tenant via direct SQL, to prove filtering works without spending real API credits ---"
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "UPDATE leads SET tenant_id='$TEST_TENANT' WHERE id='$ONE_LEAD';" 2>&1
-            echo "--- /leads as the test client AFTER tagging — MUST now be exactly 1 ---"
-            curl -s "http://localhost:8080/leads" -H "Authorization: Bearer $CLIENT_TOKEN" | python3 -c "import json,sys; d=json.load(sys.stdin); print('total:', d.get('total'))" 2>&1
-            echo "--- /leads with the service token (unscoped/admin-equivalent) — MUST be the full, unaffected total ---"
-            curl -s "http://localhost:8080/leads" -H "Authorization: Bearer $TOKEN" | python3 -c "import json,sys; d=json.load(sys.stdin); print('total:', d.get('total'))" 2>&1
-            echo "--- cleanup: untag the lead, delete the test account ---"
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "UPDATE leads SET tenant_id=NULL WHERE id='$ONE_LEAD';" 2>&1
-            curl -s -X POST "http://localhost:8080/users/_diag_test_client/delete" -H "Authorization: Bearer $TOKEN"
-            echo
-            echo "--- confirming cleanup ---"
-            docker exec leadgen_postgres psql -U leadgen -d leadgen_db -c "SELECT COUNT(*) FROM auth_users WHERE username='_diag_test_client';" 2>&1
-            unset TOKEN CREATE_RESP LOGIN_RESP CLIENT_TOKEN TEST_TENANT ONE_LEAD
+            echo "### REPLICATE EMAIL COPY — direct standalone reproduction (bypasses the app entirely, and its stdout buffering, so the real error is visible immediately) ###"
+            python3 -c "
+            import json, urllib.request, urllib.error
+            tok = json.load(open('/opt/leadgen/config.json')).get('replicate_token', '')
+            print('token present:', bool(tok), '/ length:', len(tok))
+            body = json.dumps({'input': {'prompt': 'Say hello in one word.', 'system_prompt': 'Reply with only the word.', 'max_tokens': 20}}).encode()
+            req = urllib.request.Request(
+                'https://api.replicate.com/v1/models/meta/meta-llama-3-70b-instruct/predictions',
+                data=body, method='POST',
+                headers={'Authorization': f'Bearer {tok}', 'Content-Type': 'application/json', 'Prefer': 'wait'}
+            )
+            try:
+                resp = urllib.request.urlopen(req, timeout=60)
+                print('llama HTTP', resp.status)
+                print(resp.read().decode()[:1500])
+            except urllib.error.HTTPError as e:
+                print('llama HTTPError', e.code)
+                print(e.read().decode()[:1500])
+            except Exception as e:
+                print('llama Exception:', repr(e))
+            print('--- now the SAME token against the flux-schnell model already used for mockup images — is the token bad account-wide, or just for this one model? ---')
+            req2 = urllib.request.Request(
+                'https://api.replicate.com/v1/models/black-forest-labs/flux-schnell/predictions',
+                data=json.dumps({'input': {'prompt': 'test', 'num_outputs': 1}}).encode(), method='POST',
+                headers={'Authorization': f'Bearer {tok}', 'Content-Type': 'application/json', 'Prefer': 'wait'}
+            )
+            try:
+                resp2 = urllib.request.urlopen(req2, timeout=60)
+                print('flux HTTP', resp2.status)
+                print(resp2.read().decode()[:300])
+            except urllib.error.HTTPError as e:
+                print('flux HTTPError', e.code)
+                print(e.read().decode()[:500])
+            except Exception as e:
+                print('flux Exception:', repr(e))
+            " 2>&1
 
             echo "### END-TO-END WORKFLOW ENGINE TEST (live API, all 12 node types, disconnected so every node takes its safe/zero-cost early-return branch — no leads touched, no cost) ###"
             TOKEN=$(python3 -c "import json; print(json.load(open('/opt/leadgen/config.json')).get('service_token',''))" 2>/dev/null)

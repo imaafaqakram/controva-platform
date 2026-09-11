@@ -9799,11 +9799,20 @@ class Handler(BaseHTTPRequestHandler):
                     LIMIT 500
                 """, (min_score,))
                 lead_ids = [str(r[0]) for r in cur.fetchall()]
-                cur.close(); conn.close()
                 if not lead_ids:
-                    self.send_json(200, {'job_id': None, 'status': 'nothing_to_do',
-                                         'message': 'No un-researched leads at or above that score.'})
+                    # l.ai_score >= %s excludes NULL either way, so an unscored
+                    # lead never shows up here regardless of min_score — that's
+                    # the far more common reason this comes back empty than
+                    # "no leads meet the score bar", so say so specifically.
+                    cur.execute("SELECT COUNT(*) FROM leads WHERE lead_type IS NULL AND ai_score IS NULL")
+                    unscored = cur.fetchone()[0]
+                    cur.close(); conn.close()
+                    msg = (f'{unscored} lead(s) haven\'t been AI-scored yet — score them first '
+                           f'(Pipeline > AI Score), then research picks them up.') if unscored else \
+                          'No un-researched leads at or above that score.'
+                    self.send_json(200, {'job_id': None, 'status': 'nothing_to_do', 'message': msg})
                     return
+                cur.close(); conn.close()
                 job_id = f'job_{int(time.time() * 1000)}'
                 JOBS[job_id] = {'status': 'running', 'progress': 0,
                                 'log': [f'Queued {len(lead_ids)} lead(s) for research…'], 'step': 'AI Research'}
