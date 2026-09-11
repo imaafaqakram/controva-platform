@@ -90,9 +90,10 @@ CONFIG = {
     'enrichment_primary': 'serper',       # kept for backwards-compat; enrichment_strategy takes precedence
     'enrichment_fallback': 'oxylabs',     # kept for backwards-compat
     'image_provider': 'none',             # none | replicate | imagine_art
-    'auto_score': True,                   # Run Gemini scoring during pipeline
+    'auto_score': True,                   # Run AI scoring during pipeline
+    'ai_text_provider': 'replicate',      # replicate (Llama 3) | gemini — used for scoring + pain-point research synthesis
     'auto_email_copy': False,             # AI email writing OFF by default (saves credits)
-    'email_copy_provider': 'claude',      # claude | replicate (Llama 3) — which AI writes the copy
+    'email_copy_provider': 'replicate',   # replicate (Llama 3) | claude — which AI writes the copy
     'auto_image': False,                  # Image generation OFF by default
     # M3 send throttle — protects sender reputation (mailbox-provider safe zone)
     'send_hourly_limit': 30,
@@ -584,7 +585,11 @@ def research_result_to_csv(result):
 # ──────────────────────────────────────────────────────────────
 #  GEMINI - Natural Language Query Parser
 # ──────────────────────────────────────────────────────────────
-_GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-flash-latest', 'gemini-2.0-flash', 'gemini-1.5-flash']
+_GEMINI_MODELS = ['gemini-3.6-flash', 'gemini-2.5-flash', 'gemini-flash-latest', 'gemini-2.0-flash', 'gemini-1.5-flash']
+# gemini-2.5-flash and older are 404ing for newer API keys/projects — Google's
+# own error message names gemini-3.6-flash as the replacement (confirmed live
+# 2026-09-11). Kept the older names after it since existing keys/projects on
+# an older tier may still only have access to those.
 
 def gemini_call(prompt, max_tokens=300):
     log_api_usage('gemini', 'gemini_call')
@@ -3472,8 +3477,17 @@ Respond ONLY with valid JSON:
 {{"subject": "<subject>", "body": "<body with \\\\n for line breaks>"}}"""
 
 def _extract_json_object(text):
-    m = re.search(r'\{[\s\S]*\}', text)
-    return json.loads(m.group()) if m else None
+    """Best-effort JSON extraction from an LLM's raw text response. Returns
+    None (never raises) on no match or malformed JSON — callers across
+    scoring/research/email-copy rely on that to fall back cleanly instead of
+    a 500 bubbling up from one garbled model response."""
+    m = re.search(r'\{[\s\S]*\}', text or '')
+    if not m:
+        return None
+    try:
+        return json.loads(m.group())
+    except (json.JSONDecodeError, ValueError):
+        return None
 
 def generate_email_copy_claude(business_name, niche, city, owner_name=None, research=None):
     if not CLAUDE_KEY:
@@ -3503,22 +3517,23 @@ def generate_email_copy_claude(business_name, niche, city, owner_name=None, rese
         print(f'Claude email copy error: {e}')
     return None
 
-def generate_email_copy_replicate(business_name, niche, city, owner_name=None, research=None):
-    """Same prompt/contract as the Claude path, run on Meta's Llama 3 (hosted
-    on Replicate) instead — for accounts that would rather standardize on one
-    vendor (Replicate is already used for mockup images) or don't have a
-    Claude key."""
+def replicate_text_call(prompt, system_prompt='Respond with ONLY the requested JSON object, no other text.',
+                        max_tokens=500, temperature=0.7, log_tag='replicate'):
+    """Shared helper: run any text prompt through Meta's Llama 3 on Replicate
+    and return the raw response text (or None). One request pattern for
+    every LLM-shaped task this app has (email copy, scoring, pain-point
+    synthesis) — Replicate is the account's preferred vendor since it also
+    already runs mockup image generation."""
     if not REPLICATE_TOKEN:
-        print('[replicate] skipped: no REPLICATE_TOKEN configured')
+        print(f'[{log_tag}] skipped: no REPLICATE_TOKEN configured')
         return None
-    prompt = _email_copy_prompt(business_name, niche, city, owner_name, research)
     try:
         body = json.dumps({
             'input': {
                 'prompt': prompt,
-                'system_prompt': 'You are a cold-email copywriter. Respond with ONLY the requested JSON object, no other text.',
-                'max_tokens': 500,
-                'temperature': 0.7,
+                'system_prompt': system_prompt,
+                'max_tokens': max_tokens,
+                'temperature': temperature,
             }
         }).encode()
         req = urllib.request.Request(
@@ -3531,15 +3546,29 @@ def generate_email_copy_replicate(business_name, niche, city, owner_name=None, r
         data = json.loads(resp.read().decode())
         output = data.get('output')
         text = ''.join(output) if isinstance(output, list) else (output or '')
+        if text:
+            log_api_usage('replicate', log_tag)
+            return text
+        print(f'[{log_tag}] Replicate returned no output')
+    except urllib.error.HTTPError as e:
+        print(f'[{log_tag}] Replicate HTTP error: {e.code} {e.read().decode()[:300]}')
+    except Exception as e:
+        print(f'[{log_tag}] Replicate error: {e}')
+    return None
+
+def generate_email_copy_replicate(business_name, niche, city, owner_name=None, research=None):
+    """Same prompt/contract as the Claude path, run on Meta's Llama 3 (hosted
+    on Replicate) instead — for accounts that would rather standardize on one
+    vendor (Replicate is already used for mockup images) or don't have a
+    Claude key."""
+    prompt = _email_copy_prompt(business_name, niche, city, owner_name, research)
+    text = replicate_text_call(prompt, 'You are a cold-email copywriter. Respond with ONLY the requested JSON object, no other text.',
+                               max_tokens=500, log_tag='email_copy')
+    if text:
         result = _extract_json_object(text)
         if result:
-            log_api_usage('replicate', 'email_copy')
             return result
         print(f'[replicate] email copy: no parseable JSON in output: {text[:200]}')
-    except urllib.error.HTTPError as e:
-        print(f'Replicate email copy HTTP error: {e.code} {e.read().decode()[:300]}')
-    except Exception as e:
-        print(f'Replicate email copy error: {e}')
     return None
 
 def generate_email_copy(business_name, niche, city, owner_name=None, research=None):
@@ -3558,10 +3587,10 @@ def generate_email_copy(business_name, niche, city, owner_name=None, research=No
     return generate_email_copy_claude(business_name, niche, city, owner_name, research)
 
 # ──────────────────────────────────────────────────────────────
-#  GEMINI SCORING
+#  LEAD SCORING (Gemini or Replicate, per Settings > Automation)
 # ──────────────────────────────────────────────────────────────
-def gemini_score(business_name, niche, city, phone, has_email, has_linkedin):
-    prompt = f"""Score this B2B lead 1-10 for cold outreach.
+def _lead_score_prompt(business_name, niche, city, phone, has_email, has_linkedin):
+    return f"""Score this B2B lead 1-10 for cold outreach.
 
 Business: {business_name}
 Type: {niche}
@@ -3574,15 +3603,41 @@ Note: This business has NO WEBSITE.
 
 Score: 9-10 (excellent), 7-8 (good), 5-6 (medium), 1-4 (low)
 Respond ONLY with JSON: {{"score":<1-10>,"reason":"<1 sentence>","best_channel":"<WhatsApp|Email|Phone>"}}"""
-    text = gemini_call(prompt, 150)
+
+def gemini_score(business_name, niche, city, phone, has_email, has_linkedin):
+    text = gemini_call(_lead_score_prompt(business_name, niche, city, phone, has_email, has_linkedin), 150)
     if text:
-        try:
-            m = re.search(r'\{[\s\S]*\}', text)
-            if m:
-                log_api_usage('claude', 'score_fallback')
-                return json.loads(m.group())
-        except: pass
-    return {'score': 5, 'reason': 'Default', 'best_channel': 'Phone'}
+        result = _extract_json_object(text)
+        if result:
+            log_api_usage('gemini', 'score')
+            return result
+    return None
+
+def score_lead_replicate(business_name, niche, city, phone, has_email, has_linkedin):
+    prompt = _lead_score_prompt(business_name, niche, city, phone, has_email, has_linkedin)
+    text = replicate_text_call(prompt, 'You score B2B sales leads. Respond with ONLY the requested JSON object, no other text.',
+                               max_tokens=150, log_tag='score')
+    if text:
+        result = _extract_json_object(text)
+        if result:
+            return result
+        print(f'[replicate] score: no parseable JSON in output: {text[:200]}')
+    return None
+
+def score_lead_ai(business_name, niche, city, phone, has_email, has_linkedin):
+    """Dispatches to whichever provider Settings > Automation has chosen for
+    scoring/research (default: Replicate), falling back to Gemini if that
+    fails and a Gemini key is configured, then a neutral default score."""
+    provider = CONFIG.get('ai_text_provider', 'replicate')
+    result = None
+    if provider == 'replicate':
+        result = score_lead_replicate(business_name, niche, city, phone, has_email, has_linkedin)
+        if not result and GEMINI_KEY:
+            print('[score] Replicate failed, falling back to Gemini')
+            result = gemini_score(business_name, niche, city, phone, has_email, has_linkedin)
+    else:
+        result = gemini_score(business_name, niche, city, phone, has_email, has_linkedin)
+    return result or {'score': 5, 'reason': 'Default (AI scoring unavailable)', 'best_channel': 'Phone'}
 
 def score_all_enriched():
     conn = db_conn(); cur = conn.cursor()
@@ -3595,7 +3650,7 @@ def score_all_enriched():
     for ld in leads:
         lead_id, bname, niche, city, phone, email, linkedin = ld
         try:
-            s = gemini_score(bname, niche, city, phone, bool(email), bool(linkedin))
+            s = score_lead_ai(bname, niche, city, phone, bool(email), bool(linkedin))
             score = int(s.get('score', 5))
             cur.execute("UPDATE leads SET ai_score=%s, score_reason=%s WHERE id=%s",
                        (score, str(s.get('reason', ''))[:500], lead_id))
@@ -6016,8 +6071,7 @@ def research_lead(lead_id):
         print(f'[research] decision-maker capture failed: {e}')
 
     pain_points, needs_summary, recommended_angle = [], '', ''
-    try:
-        context = f"""Business: {business_name} ({niche}, {city})
+    context = f"""Business: {business_name} ({niche}, {city})
 Website findings: {json.dumps(web_findings)[:1500]}
 Tech stack detected: {', '.join(tech_stack) or 'none detected'}
 Review summary: {reviews_summary or 'no reviews found'}
@@ -6031,14 +6085,26 @@ directly from the findings above. Respond ONLY with valid JSON:
  "recommended_angle": "<one specific pitch angle to lead with>"}}
 If there is not enough evidence for a pain point, return an empty pain_points array —
 never invent one."""
-        raw = gemini_call(context, max_tokens=500)
-        if raw:
-            m = re.search(r'\{[\s\S]*\}', raw)
-            if m:
-                parsed = json.loads(m.group())
-                pain_points = parsed.get('pain_points', [])
-                needs_summary = parsed.get('needs_summary', '')
-                recommended_angle = parsed.get('recommended_angle', '')
+    try:
+        provider = CONFIG.get('ai_text_provider', 'replicate')
+        parsed = None
+        if provider == 'replicate':
+            raw = replicate_text_call(context, 'You analyze business research findings for a B2B sales team. Respond with ONLY the requested JSON object, no other text.',
+                                      max_tokens=500, log_tag='research')
+            parsed = _extract_json_object(raw) if raw else None
+            if not parsed and GEMINI_KEY:
+                print(f'[research] Replicate synthesis failed for {business_name}, falling back to Gemini')
+                raw = gemini_call(context, max_tokens=500)
+                parsed = _extract_json_object(raw) if raw else None
+        else:
+            raw = gemini_call(context, max_tokens=500)
+            parsed = _extract_json_object(raw) if raw else None
+        if parsed:
+            pain_points = parsed.get('pain_points', [])
+            needs_summary = parsed.get('needs_summary', '')
+            recommended_angle = parsed.get('recommended_angle', '')
+        else:
+            print(f'[research] synthesis produced no usable result for {business_name}')
     except Exception as e:
         print(f'[research] synthesis failed for {business_name}: {e}')
 
@@ -7615,7 +7681,7 @@ def wf_score(config, input_ids, log_fn):
     leads = cur.fetchall()
     for lead_id, bname, niche, city, phone, email, linkedin in leads:
         try:
-            s = gemini_score(bname, niche, city, phone, bool(email), bool(linkedin))
+            s = score_lead_ai(bname, niche, city, phone, bool(email), bool(linkedin))
             cur.execute("UPDATE leads SET ai_score=%s, score_reason=%s WHERE id=%s",
                        (int(s.get('score', 5)), str(s.get('reason', ''))[:500], lead_id))
             conn.commit()
