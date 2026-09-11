@@ -3571,8 +3571,8 @@ def generate_email_copy_replicate(business_name, niche, city, owner_name=None, r
         print(f'[replicate] email copy: no parseable JSON in output: {text[:200]}')
     return None
 
-def generate_email_copy(business_name, niche, city, owner_name=None, research=None):
-    if not CONFIG.get('auto_email_copy', True):
+def generate_email_copy(business_name, niche, city, owner_name=None, research=None, force=False):
+    if not force and not CONFIG.get('auto_email_copy', True):
         print('[email_copy] skipped: auto_email_copy disabled in settings')
         return None
     provider = CONFIG.get('email_copy_provider', 'claude')
@@ -8093,13 +8093,13 @@ def regenerate_email_for_lead(lead_id, extra_instructions=""):
         detail["niche"],
         detail["city"],
         detail["owner_name"],
-        research=detail.get("research")
+        research=detail.get("research"),
+        force=True  # a manual per-lead regenerate should always run, regardless
+                    # of the bulk pipeline's "Auto Email Copy" automation toggle
     )
 
     if not email:
         provider = CONFIG.get('email_copy_provider', 'claude')
-        if not CONFIG.get('auto_email_copy', True):
-            return {"success": False, "error": "AI email generation is OFF. Enable it in Settings > Automation."}
         if provider == 'replicate' and not REPLICATE_TOKEN:
             return {"success": False, "error": "No Replicate API token configured. Add one in Settings > API Keys, or switch the provider to Claude."}
         if provider != 'replicate' and not CLAUDE_KEY:

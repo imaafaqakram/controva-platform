@@ -28,45 +28,100 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
-            echo "### VERIFYING THE JUST-ROTATED GEMINI + REPLICATE KEYS DIRECTLY ###"
-            python3 -c "
-            import json, urllib.request, urllib.error
-            key = json.load(open('/opt/leadgen/config.json')).get('gemini_key', '')
-            print('gemini key present:', bool(key), '/ length:', len(key))
-            body = json.dumps({'contents':[{'parts':[{'text':'Respond with only the word OK.'}]}]}).encode()
-            req = urllib.request.Request(
-                f'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={key}',
-                data=body, method='POST', headers={'Content-Type':'application/json'}
-            )
-            try:
-                resp = urllib.request.urlopen(req, timeout=20)
-                print('gemini HTTP', resp.status)
-                print(resp.read().decode()[:500])
-            except urllib.error.HTTPError as e:
-                print('gemini HTTPError', e.code)
-                print(e.read().decode()[:500])
-            except Exception as e:
-                print('gemini Exception:', repr(e))
-            " 2>&1
-            python3 -c "
-            import json, urllib.request, urllib.error
-            tok = json.load(open('/opt/leadgen/config.json')).get('replicate_token', '')
-            print('replicate token present:', bool(tok), '/ length:', len(tok))
-            body = json.dumps({'input': {'prompt': 'Say hello in one word.', 'max_tokens': 20}}).encode()
-            req = urllib.request.Request(
-                'https://api.replicate.com/v1/models/meta/meta-llama-3-70b-instruct/predictions',
-                data=body, method='POST',
-                headers={'Authorization': f'Bearer {tok}', 'Content-Type': 'application/json', 'Prefer': 'wait'}
-            )
-            try:
-                resp = urllib.request.urlopen(req, timeout=60)
-                print('replicate HTTP', resp.status)
-                print(resp.read().decode()[:800])
-            except urllib.error.HTTPError as e:
-                print('replicate HTTPError', e.code)
-                print(e.read().decode()[:800])
-            except Exception as e:
-                print('replicate Exception:', repr(e))
+            echo "### root cause found: leadgen-api's real env has DB_PORT=5432 (leads_api.py's hardcoded default of 5433 is just wrong for this box — postgres is actually published on 127.0.0.1:5432). systemctl show --property=Environment doesn't surface it, so copying the live process's real environment straight from /proc/PID/environ instead of guessing at individual vars ###"
+            PID=$(systemctl show leadgen-api --property=MainPID --value)
+            echo "leadgen-api MainPID: $PID"
+            if [ -n "$PID" ] && [ "$PID" != "0" ]; then
+              while IFS='=' read -r -d '' _envkey _envval; do
+                export "$_envkey=$_envval"
+              done < /proc/$PID/environ
+              echo "copied live process env — DB_HOST=$DB_HOST DB_PORT=$DB_PORT DB_NAME=$DB_NAME DB_USER=$DB_USER DB_PASS_set=$([ -n "$DB_PASS" ] && echo yes || echo no)"
+            fi
+
+            echo "### REAL END-TO-END TEST: 5 real leads through enrich -> AI score -> pain-point research -> email copy -> send ###"
+            echo "### Uses the exact production functions directly on exactly these 5 lead ids — NOT the bulk queues, which would touch the other 1000+ leads ###"
+            cd /opt/leadgen && /opt/leadgen/venv/bin/python -c "
+            import sys, json
+            sys.path.insert(0, '/opt/leadgen')
+            from leads_api import (db_conn, enrich_lead, save_enrichment, score_lead_ai,
+                                    research_lead, regenerate_email_for_lead, send_lead_email,
+                                    _STRATEGY_PROVIDERS, CONFIG)
+
+            conn = db_conn(); cur = conn.cursor()
+            cur.execute(\"\"\"SELECT id, business_name, city, phone, niche, COALESCE(website,'')
+                           FROM leads WHERE lead_type IS NULL AND status='discovered'
+                           ORDER BY created_at DESC LIMIT 5\"\"\")
+            leads = cur.fetchall()
+            cur.close(); conn.close()
+            print(f'=== Testing {len(leads)} real leads end-to-end ===')
+
+            providers = _STRATEGY_PROVIDERS.get(CONFIG.get('enrichment_strategy', 'serper_then_oxylabs'), ['serper', 'oxylabs'])
+            print(f'enrichment providers in use: {providers}')
+            results = []
+            for lead_id, bname, city, phone, niche, website in leads:
+                lid = str(lead_id)
+                r = {'lead_id': lid, 'business_name': bname}
+                print(f'--- {bname} ({lid}) ---')
+
+                try:
+                    er = enrich_lead(lid, bname, city, phone, niche, providers, website=website)
+                    save_enrichment(er)
+                    r['email'] = er.get('email')
+                    r['linkedin'] = bool(er.get('linkedin_url'))
+                    print(f'  1 ENRICH: email={er.get(\"email\")!r} linkedin={bool(er.get(\"linkedin_url\"))} sources={er.get(\"sources_tried\")}')
+                except Exception as e:
+                    r['enrich_error'] = str(e)
+                    print(f'  1 ENRICH ERROR: {e}')
+
+                try:
+                    conn = db_conn(); cur = conn.cursor()
+                    cur.execute('SELECT email, linkedin_url FROM contacts WHERE lead_id=%s ORDER BY created_at DESC LIMIT 1', (lead_id,))
+                    crow = cur.fetchone()
+                    email, linkedin = crow if crow else (None, None)
+                    s = score_lead_ai(bname, niche, city, phone, bool(email), bool(linkedin))
+                    cur.execute(\"UPDATE leads SET ai_score=%s, score_reason=%s WHERE id=%s\",
+                                (int(s.get('score', 5)), str(s.get('reason', ''))[:500], lead_id))
+                    conn.commit(); cur.close(); conn.close()
+                    r['ai_score'] = s.get('score'); r['score_reason'] = s.get('reason')
+                    print(f'  2 SCORE: {s.get(\"score\")} — {s.get(\"reason\")}')
+                except Exception as e:
+                    r['score_error'] = str(e)
+                    print(f'  2 SCORE ERROR: {e}')
+
+                try:
+                    rr = research_lead(lid)
+                    pains = rr.get('pain_points', [])
+                    r['pain_points_n'] = len(pains)
+                    r['pain_points'] = pains
+                    print(f'  3 RESEARCH: {len(pains)} pain point(s) — {json.dumps(pains)[:300]}')
+                except Exception as e:
+                    r['research_error'] = str(e)
+                    print(f'  3 RESEARCH ERROR: {e}')
+
+                try:
+                    email_result = regenerate_email_for_lead(lid)
+                    r['email_copy_ok'] = email_result.get('success')
+                    r['email_subject'] = email_result.get('subject')
+                    print(f'  4 EMAIL COPY: success={email_result.get(\"success\")} subject={email_result.get(\"subject\")!r} error={email_result.get(\"error\")}')
+                except Exception as e:
+                    r['email_copy_error'] = str(e)
+                    print(f'  4 EMAIL COPY ERROR: {e}')
+
+                try:
+                    send_result = send_lead_email(lid)
+                    r['send_ok'] = send_result.get('success')
+                    r['send_error'] = send_result.get('error')
+                    r['send_message_id'] = send_result.get('message_id')
+                    print(f'  5 SEND: success={send_result.get(\"success\")} error={send_result.get(\"error\")} message_id={send_result.get(\"message_id\")}')
+                except Exception as e:
+                    r['send_exception'] = str(e)
+                    print(f'  5 SEND ERROR: {e}')
+
+                results.append(r)
+                print()
+
+            print('=== JSON SUMMARY ===')
+            print(json.dumps(results, indent=2, default=str))
             " 2>&1
 
             echo "### END-TO-END WORKFLOW ENGINE TEST (live API, all 12 node types, disconnected so every node takes its safe/zero-cost early-return branch — no leads touched, no cost) ###"
