@@ -1736,6 +1736,11 @@ const PipelinePage = () => {
       const r = await api.post(path, extraBody);
       if (r.job_id) {
         startPolling(r.job_id, label);
+      } else if (r.status === 'nothing_to_do' || r.message) {
+        // e.g. AI Research finding 0 unscored-but-eligible leads — a plain
+        // "done: 0 items" success toast here would hide the real reason
+        // (usually: leads need to be scored first) behind a false "it worked".
+        showToast(r.message || `${label}: nothing to do`, 'info');
       } else {
         showToast(label + ' done: ' + (r.total ?? (r.results || []).length) + ' items', 'success');
       }
