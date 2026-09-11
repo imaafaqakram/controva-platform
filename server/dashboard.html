@@ -4058,6 +4058,53 @@ const SendingDomainsEditor = () => {
   );
 };
 
+const TestEmailPanel = () => {
+  const [domains, setDomains] = useState([]);
+  const [domainId, setDomainId] = useState('');
+  const [toEmail, setToEmail] = useState('');
+  const [sending, setSending] = useState(false);
+  const [result, setResult] = useState(null);
+  const { showToast } = useToast();
+
+  useEffect(() => { api.get('/sending-domains').then(d => setDomains(d.domains || [])).catch(() => {}); }, []);
+
+  const send = async () => {
+    if (!toEmail.trim()) { showToast('Enter a recipient email first', 'error'); return; }
+    setSending(true); setResult(null);
+    try {
+      const r = await api.post('/test-email', { to_email: toEmail.trim(), domain_id: domainId || null });
+      setResult(r);
+      showToast(r.success ? `Sent via ${r.sent_via}` : 'Send failed — see details below', r.success ? 'success' : 'error');
+    } catch (e) {
+      setResult({ success: false, error: e.message });
+      showToast('Send failed', 'error');
+    } finally { setSending(false); }
+  };
+
+  return (
+    <div className="space-y-2">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+        <Input value={toEmail} onChange={setToEmail} placeholder="Send test to: you@example.com" />
+        <select value={domainId} onChange={e => setDomainId(e.target.value)}
+          className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-2.5 text-sm">
+          <option value="">Account default (From Email in API Keys)</option>
+          {domains.map(d => (
+            <option key={d.id} value={d.id}>{d.from_name} &lt;{d.from_email}&gt; ({d.domain}){d.is_active ? '' : ' — paused'}</option>
+          ))}
+        </select>
+      </div>
+      <Button onClick={send} disabled={sending} icon="Send">{sending ? 'Sending…' : 'Send Test Email'}</Button>
+      {result && (
+        <div className={'p-3 rounded-lg text-xs font-mono ' + (result.success ? 'bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-400' : 'bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400')}>
+          {result.success
+            ? <>✓ Sent via {result.sent_via}. Message ID: {result.message_id}. Check the recipient's inbox (and spam folder) now.</>
+            : <>✗ {result.error || 'Unknown error'}</>}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const UserAccountsEditor = () => {
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -4372,6 +4419,16 @@ const SettingsPage = () => {
       </Card>
 
       <Card>
+        <h3 className="font-semibold mb-3 flex items-center gap-2"><Icon name="Send" /> Send a Test Email</h3>
+        <p className="text-xs text-slate-500 mb-3">
+          Sends one real email through the exact pipeline live outreach uses — pick a sending domain (or
+          leave it on the account default), enter an address you can check yourself, and confirm it actually
+          arrives (and isn't sitting in spam).
+        </p>
+        <TestEmailPanel />
+      </Card>
+
+      <Card>
         <h3 className="font-semibold mb-3 flex items-center gap-2"><Icon name="Zap" /> Outreach Automation</h3>
         <p className="text-xs text-slate-500 mb-3">How much human review happens before a lead's email actually goes out.</p>
         <div className="space-y-2">
@@ -4446,7 +4503,7 @@ const SettingsPage = () => {
         <div className="space-y-2">
           {[
             { key: 'auto_score', label: 'Auto-score with Gemini', cost: 'Cheap — Gemini free tier covers most use' },
-            { key: 'auto_email_copy', label: 'Auto-generate email copy (Claude)', cost: 'Uses Claude API credits — turn OFF to save spend' },
+            { key: 'auto_email_copy', label: 'Auto-generate email copy', cost: `Uses ${config.email_copy_provider === 'replicate' ? 'Replicate' : 'Claude'} API credits — turn OFF to save spend` },
             { key: 'auto_image', label: 'Auto-generate mockup images', cost: 'Uses Replicate/imagine.art credits' },
           ].map(opt => (
             <label key={opt.key} className="flex items-start gap-3 p-3 bg-slate-50 dark:bg-slate-800 rounded-lg cursor-pointer">
@@ -4457,6 +4514,32 @@ const SettingsPage = () => {
               </div>
             </label>
           ))}
+          {!!config.auto_email_copy && (
+            <div className="ml-1 p-3 border border-dashed border-slate-300 dark:border-slate-700 rounded-lg">
+              <div className="text-xs font-medium text-slate-500 mb-2">Email copy AI provider</div>
+              <div className="flex gap-2">
+                {[
+                  { id: 'claude', label: 'Claude', desc: 'Anthropic — needs a Claude API key' },
+                  { id: 'replicate', label: 'Replicate (Llama 3)', desc: 'Same vendor as your mockup images' },
+                ].map(opt => (
+                  <label key={opt.id} className={'flex-1 flex items-start gap-2 p-2.5 rounded-lg border-2 cursor-pointer text-sm ' + (
+                    (config.email_copy_provider || 'claude') === opt.id
+                      ? 'border-accent-500 bg-accent-50 dark:bg-accent-900/20' : 'border-slate-200 dark:border-slate-700'
+                  )}>
+                    <input type="radio" checked={(config.email_copy_provider || 'claude') === opt.id}
+                      onChange={() => update('email_copy_provider', opt.id)} className="mt-0.5" />
+                    <div>
+                      <div className="font-medium">{opt.label}</div>
+                      <p className="text-xs text-slate-500 mt-0.5">{opt.desc}</p>
+                    </div>
+                  </label>
+                ))}
+              </div>
+              <p className="text-[11px] text-slate-400 mt-2">
+                If the chosen provider's key is missing or the call fails, it falls back to Claude automatically when a Claude key is configured.
+              </p>
+            </div>
+          )}
         </div>
       </Card>
     </div>
@@ -5773,7 +5856,20 @@ const LoginScreen = ({ onLogin }) => {
 const App = ({ role = 'admin' }) => {
   const [theme, toggleTheme] = useTheme();
   const [page, setPage] = useState('dashboard');
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  // Open by default on desktop, closed on mobile (matches the old fixed
+  // behavior) — but now a single toggle actually opens/closes it at any
+  // screen size, and the choice is remembered across reloads.
+  const [sidebarOpen, setSidebarOpen] = useState(() => {
+    try {
+      const saved = localStorage.getItem('sidebar_open');
+      if (saved !== null) return saved === '1';
+    } catch (e) {}
+    return typeof window === 'undefined' || window.innerWidth >= 1024;
+  });
+  const setSidebarOpenPersist = (v) => {
+    setSidebarOpen(v);
+    try { localStorage.setItem('sidebar_open', v ? '1' : '0'); } catch (e) {}
+  };
   const [brand, setBrand] = useState({ name: 'Controva', color: '' });
   const isAdmin = role === 'admin';
 
@@ -5787,21 +5883,23 @@ const App = ({ role = 'admin' }) => {
 
   const nav = [
     { id: 'dashboard', label: 'Dashboard', icon: 'LayoutDashboard' },
+    { section: 'Find Leads' },
     { id: 'search',    label: 'Search',    icon: 'Search' },
     { id: 'icp',       label: 'ICP',        icon: 'Target' },
-    { id: 'leads',     label: 'Leads',     icon: 'Users' },
-    { id: 'pipeline',  label: 'Pipeline',  icon: 'Workflow' },
-    { id: 'workflows', label: 'Workflows', icon: 'Repeat' },
-    { id: 'outreach',  label: 'Outreach',  icon: 'Send' },
-    { id: 'analytics', label: 'Analytics', icon: 'Activity' },
-    { id: 'divider1' },
     { id: 'intent',    label: 'Intent',    icon: 'Crosshair' },
+    { id: 'leads',     label: 'Leads',     icon: 'Users' },
+    { section: 'Enrich & Send' },
+    { id: 'pipeline',  label: 'Pipeline',  icon: 'Workflow' },
+    { id: 'outreach',  label: 'Email & Outreach', icon: 'Send' },
+    { id: 'workflows', label: 'Workflows', icon: 'Repeat' },
+    { id: 'analytics', label: 'Analytics', icon: 'Activity' },
+    { section: 'Research Tools' },
     { id: 'seo',         label: 'SEO',         icon: 'TrendingUp' },
     { id: 'competitor',  label: 'Competitors', icon: 'Target' },
     { id: 'people',      label: 'People',      icon: 'UserSearch' },
     { id: 'social',      label: 'Social',      icon: 'Share2' },
     { id: 'ecommerce',   label: 'E-commerce',  icon: 'ShoppingBag' },
-    { id: 'divider2' },
+    { section: 'Admin', adminOnly: true },
     { id: 'activity',  label: 'Activity Log', icon: 'History', adminOnly: true },
     { id: 'n8n',       label: 'N8N Workflows', icon: 'Globe', adminOnly: true },
     { id: 'settings',  label: 'Settings',  icon: 'Settings', adminOnly: true },
@@ -5826,8 +5924,8 @@ const App = ({ role = 'admin' }) => {
   else if (page === 'settings' && isAdmin) CurrentPage = SettingsPage;
 
   return (
-    <div className="min-h-screen flex">
-      <aside className={(sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0') + ' fixed lg:sticky top-0 z-40 w-64 h-screen bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-800 transition-transform flex flex-col'}>
+    <div className="min-h-screen">
+      <aside className={(sidebarOpen ? 'translate-x-0' : '-translate-x-full') + ' fixed top-0 z-40 w-64 h-screen bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-800 transition-transform duration-200 flex flex-col'}>
         <div className="p-5 border-b border-slate-200 dark:border-slate-800">
           <div className="flex items-center gap-2">
             <div className={'w-9 h-9 rounded-lg flex items-center justify-center text-white font-bold shadow-lg pulse-glow' + (brand.color ? '' : ' bg-gradient-to-br from-accent-500 to-accent-700')}
@@ -5841,10 +5939,12 @@ const App = ({ role = 'admin' }) => {
           </div>
         </div>
         <nav className="p-3 space-y-0.5 overflow-y-auto scrollbar-thin flex-1">
-          {nav.map(item => item.id.indexOf('divider') === 0 ? (
-            <div key={item.id} className="my-2 border-t border-slate-200 dark:border-slate-800" />
+          {nav.map((item, i) => item.section ? (
+            <div key={'s' + i} className={(i === 0 ? '' : 'mt-4 ') + 'px-3 pb-1.5 pt-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-600 border-t border-slate-200 dark:border-slate-800 first:border-t-0 first:pt-0'}>
+              {item.section}
+            </div>
           ) : (
-            <button key={item.id} onClick={() => { setPage(item.id); setSidebarOpen(false); }}
+            <button key={item.id} onClick={() => { setPage(item.id); if (window.innerWidth < 1024) setSidebarOpenPersist(false); }}
               className={'w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ' + (
                 page === item.id ? 'bg-accent-50 dark:bg-accent-900/30 text-accent-700 dark:text-accent-400'
                                  : 'text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
@@ -5871,12 +5971,13 @@ const App = ({ role = 'admin' }) => {
           </button>
         </div>
       </aside>
-      {sidebarOpen && <div onClick={() => setSidebarOpen(false)} className="fixed inset-0 z-30 bg-black/50 lg:hidden" />}
-      <main className="flex-1 min-w-0">
+      {sidebarOpen && <div onClick={() => setSidebarOpenPersist(false)} className="fixed inset-0 z-30 bg-black/50 lg:hidden" />}
+      <main className={(sidebarOpen ? 'lg:ml-64' : 'lg:ml-0') + ' min-w-0 transition-all duration-200'}>
         <header className="sticky top-0 z-20 bg-white/80 dark:bg-slate-950/80 glass border-b border-slate-200 dark:border-slate-800">
           <div className="px-5 py-3 flex items-center justify-between">
-            <button onClick={() => setSidebarOpen(true)} className="lg:hidden p-2 rounded hover:bg-slate-100 dark:hover:bg-slate-800">
-              <Icon name="Menu" className="w-5 h-5" />
+            <button onClick={() => setSidebarOpenPersist(!sidebarOpen)} title={sidebarOpen ? 'Collapse menu' : 'Expand menu'}
+              className="p-2 rounded hover:bg-slate-100 dark:hover:bg-slate-800">
+              <Icon name={sidebarOpen ? 'X' : 'Menu'} className="w-5 h-5" />
             </button>
             <div className="flex items-center gap-2 text-xs text-slate-500">
               <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />

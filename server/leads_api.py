@@ -91,7 +91,8 @@ CONFIG = {
     'enrichment_fallback': 'oxylabs',     # kept for backwards-compat
     'image_provider': 'none',             # none | replicate | imagine_art
     'auto_score': True,                   # Run Gemini scoring during pipeline
-    'auto_email_copy': False,             # Claude email writing OFF by default (saves credits)
+    'auto_email_copy': False,             # AI email writing OFF by default (saves credits)
+    'email_copy_provider': 'claude',      # claude | replicate (Llama 3) — which AI writes the copy
     'auto_image': False,                  # Image generation OFF by default
     # M3 send throttle — protects sender reputation (mailbox-provider safe zone)
     'send_hourly_limit': 30,
@@ -1554,7 +1555,8 @@ def ensure_intent_tables():
 
 def discover_leads_smart(niche, city, country='', original_query='',
                          filter_mode='no_website', density='standard',
-                         find_more=False, job_id=None, extra_cities=None, tenant_id=None):
+                         find_more=False, job_id=None, extra_cities=None, tenant_id=None,
+                         hide_sources=False):
     """Multi-source, round-based discovery.
 
     filter_mode  : 'no_website' | 'with_website' | 'all'
@@ -1563,6 +1565,9 @@ def discover_leads_smart(niche, city, country='', original_query='',
     extra_cities : list of cities to sweep (used for whole-state searches)
     job_id      : if set, live progress is written to JOBS[job_id]
     tenant_id   : link discovered leads to this tenant
+    hide_sources: client accounts shouldn't see which data vendors (Google
+                  Places, HERE, OpenStreetMap) power a search — this replaces
+                  those names in every live progress-log line with generic text
     """
     ensure_discovery_tables()
 
@@ -1633,9 +1638,12 @@ def discover_leads_smart(niche, city, country='', original_query='',
     use_osm  = eff_round >= 1 and bool(exp['osm_tags'])
     use_here = bool(HERE_API_KEY)  # runs per-term on primary tile; 100 results/call
 
-    sources_str = 'Google Places'
-    if use_osm:  sources_str += ' + OpenStreetMap'
-    if use_here: sources_str += ' + HERE Maps'
+    if hide_sources:
+        sources_str = 'business directories'
+    else:
+        sources_str = 'Google Places'
+        if use_osm:  sources_str += ' + OpenStreetMap'
+        if use_here: sources_str += ' + HERE Maps'
     if state_sweep:
         _log(f'State-wide sweep: {len(tiles)} cities ({", ".join(swept[:len(tiles)])}) · '
              f'{len(round_terms)} search terms · sources: {sources_str}')
@@ -1681,7 +1689,7 @@ def discover_leads_smart(niche, city, country='', original_query='',
 
     # HERE Maps: one call per term on the primary tile (100 results each)
     if use_here and not _cancelled():
-        _log('Searching HERE Maps…')
+        _log('Checking business directories…' if hide_sources else 'Searching HERE Maps…')
         for term in round_terms:
             try:
                 for h in here_search(term, lat, lng, int(base_rad)):
@@ -1694,8 +1702,11 @@ def discover_leads_smart(niche, city, country='', original_query='',
                  pct=min(85, done_units / max(1, total_units) * 85))
 
     if len(raw) == 0 and _PLACES_LAST_ERROR:
-        _log(f'Google Places API error: {_PLACES_LAST_ERROR}. '
-             f'Check your Google API key has Places API enabled in Google Cloud Console.', pct=88)
+        if hide_sources:
+            _log('No results from the search provider — please try again or contact support.', pct=88)
+        else:
+            _log(f'Google Places API error: {_PLACES_LAST_ERROR}. '
+                 f'Check your Google API key has Places API enabled in Google Cloud Console.', pct=88)
     _log(f'Collected {len(raw)} unique candidates. De-duplicating against your database…', pct=88)
 
     # ── dedup against DB (place_id / phone / domain) + insert NEW ──
@@ -3436,17 +3447,11 @@ def _pain_context_block(research, max_pains=2):
         block += f"\nRecommended pitch angle: {research['recommended_angle']}"
     return block
 
-def generate_email_copy(business_name, niche, city, owner_name=None, research=None):
-    if not CONFIG.get('auto_email_copy', True):
-        print('[claude] skipped: auto_email_copy disabled in settings')
-        return None
-    if not CLAUDE_KEY:
-        print('[claude] skipped: no CLAUDE_KEY configured')
-        return None
+def _email_copy_prompt(business_name, niche, city, owner_name=None, research=None):
     name_part = owner_name if owner_name else 'there'
     pain_block = _pain_context_block(research)
     context_line = pain_block if pain_block else "Context: They have NO WEBSITE. I want to offer to build them a free mockup."
-    prompt = f"""Write a 120-word personalized cold outreach message for a small business owner.
+    return f"""Write a 120-word personalized cold outreach message for a small business owner.
 
 Business: {business_name}
 Type: {niche}
@@ -3465,6 +3470,16 @@ Requirements:
 
 Respond ONLY with valid JSON:
 {{"subject": "<subject>", "body": "<body with \\\\n for line breaks>"}}"""
+
+def _extract_json_object(text):
+    m = re.search(r'\{[\s\S]*\}', text)
+    return json.loads(m.group()) if m else None
+
+def generate_email_copy_claude(business_name, niche, city, owner_name=None, research=None):
+    if not CLAUDE_KEY:
+        print('[claude] skipped: no CLAUDE_KEY configured')
+        return None
+    prompt = _email_copy_prompt(business_name, niche, city, owner_name, research)
     try:
         body = json.dumps({
             'model': 'claude-opus-4-5',
@@ -3480,13 +3495,67 @@ Respond ONLY with valid JSON:
         resp = urllib.request.urlopen(req, timeout=30)
         data = json.loads(resp.read().decode())
         text = data['content'][0]['text']
-        m = re.search(r'\{[\s\S]*\}', text)
-        if m:
+        result = _extract_json_object(text)
+        if result:
             log_api_usage('claude', 'email_copy')
-            return json.loads(m.group())
+            return result
     except Exception as e:
-        print(f'Claude error: {e}')
+        print(f'Claude email copy error: {e}')
     return None
+
+def generate_email_copy_replicate(business_name, niche, city, owner_name=None, research=None):
+    """Same prompt/contract as the Claude path, run on Meta's Llama 3 (hosted
+    on Replicate) instead — for accounts that would rather standardize on one
+    vendor (Replicate is already used for mockup images) or don't have a
+    Claude key."""
+    if not REPLICATE_TOKEN:
+        print('[replicate] skipped: no REPLICATE_TOKEN configured')
+        return None
+    prompt = _email_copy_prompt(business_name, niche, city, owner_name, research)
+    try:
+        body = json.dumps({
+            'input': {
+                'prompt': prompt,
+                'system_prompt': 'You are a cold-email copywriter. Respond with ONLY the requested JSON object, no other text.',
+                'max_tokens': 500,
+                'temperature': 0.7,
+            }
+        }).encode()
+        req = urllib.request.Request(
+            'https://api.replicate.com/v1/models/meta/meta-llama-3-70b-instruct/predictions',
+            data=body, method='POST',
+            headers={'Authorization': f'Bearer {REPLICATE_TOKEN}',
+                    'Content-Type': 'application/json', 'Prefer': 'wait'}
+        )
+        resp = urllib.request.urlopen(req, timeout=60)
+        data = json.loads(resp.read().decode())
+        output = data.get('output')
+        text = ''.join(output) if isinstance(output, list) else (output or '')
+        result = _extract_json_object(text)
+        if result:
+            log_api_usage('replicate', 'email_copy')
+            return result
+        print(f'[replicate] email copy: no parseable JSON in output: {text[:200]}')
+    except urllib.error.HTTPError as e:
+        print(f'Replicate email copy HTTP error: {e.code} {e.read().decode()[:300]}')
+    except Exception as e:
+        print(f'Replicate email copy error: {e}')
+    return None
+
+def generate_email_copy(business_name, niche, city, owner_name=None, research=None):
+    if not CONFIG.get('auto_email_copy', True):
+        print('[email_copy] skipped: auto_email_copy disabled in settings')
+        return None
+    provider = CONFIG.get('email_copy_provider', 'claude')
+    if provider == 'replicate':
+        result = generate_email_copy_replicate(business_name, niche, city, owner_name, research)
+        # Fall back to Claude only if it's actually configured — otherwise
+        # this would just mask a real Replicate problem as a Claude one.
+        if not result and CLAUDE_KEY:
+            print('[email_copy] Replicate failed, falling back to Claude')
+            result = generate_email_copy_claude(business_name, niche, city, owner_name, research)
+        return result
+    return generate_email_copy_claude(business_name, niche, city, owner_name, research)
 
 # ──────────────────────────────────────────────────────────────
 #  GEMINI SCORING
@@ -5012,8 +5081,40 @@ def run_step_bg(job_id, step_fn, step_name, *args):
         JOBS[job_id]['error'] = str(e)
         JOBS[job_id]['log'].append(f'Error: {e}')
 
+def run_generate_assets_bg(job_id, min_score):
+    """Wraps generate_assets_for_top_leads with a clear reason when it does
+    nothing — the plain function returns [] identically whether there were
+    zero eligible leads or whether email/image generation is just turned off
+    in Settings, which read as a silent, confusing no-op from the UI."""
+    try:
+        JOBS[job_id] = {'status': 'running', 'progress': 0, 'log': ['Starting: Generate email copy & assets...'], 'step': 'Generate Assets'}
+        if CONFIG['image_provider'] == 'none' and not CONFIG.get('auto_email_copy'):
+            JOBS[job_id]['status'] = 'completed'
+            JOBS[job_id]['progress'] = 100
+            JOBS[job_id]['log'].append(
+                'Done — 0 items processed. Both "Auto-generate email copy" and image generation are '
+                'OFF in Settings > Automation, so there was nothing to generate. Turn one on and run this again.')
+            JOBS[job_id]['results'] = {'total': 0}
+            return
+        results = generate_assets_for_top_leads(min_score)
+        count = len(results)
+        JOBS[job_id]['progress'] = 100
+        JOBS[job_id]['status'] = 'completed'
+        if count == 0:
+            JOBS[job_id]['log'].append(
+                'Done — 0 items processed. No enriched leads at or above the score threshold were '
+                'missing an email draft — nothing left to generate right now.')
+        else:
+            JOBS[job_id]['log'].append(f'Done — {count} items processed.')
+        JOBS[job_id]['results'] = {'total': count}
+    except Exception as e:
+        JOBS[job_id]['status'] = 'failed'
+        JOBS[job_id]['error'] = str(e)
+        JOBS[job_id]['log'].append(f'Error: {e}')
+
 def run_discover_bg(job_id, niche, city, country, filter_mode, density, find_more,
-                    original_query='', extra_cities=None, tenant_id=None, user_id=None):
+                    original_query='', extra_cities=None, tenant_id=None, user_id=None,
+                    hide_sources=False):
     """Discovery background job — runs the multi-source engine and reports live progress."""
     try:
         if job_id not in JOBS:
@@ -5074,7 +5175,8 @@ def run_discover_bg(job_id, niche, city, country, filter_mode, density, find_mor
         leads, status = discover_leads_smart(
             niche, city, country, original_query,
             filter_mode=filter_mode, density=density,
-            find_more=find_more, job_id=job_id, extra_cities=extra_cities, tenant_id=tenant_id)
+            find_more=find_more, job_id=job_id, extra_cities=extra_cities, tenant_id=tenant_id,
+            hide_sources=hide_sources)
             
         if tenant_id and leads:
             # Log to tenant history
@@ -7929,11 +8031,14 @@ def regenerate_email_for_lead(lead_id, extra_instructions=""):
     )
 
     if not email:
+        provider = CONFIG.get('email_copy_provider', 'claude')
         if not CONFIG.get('auto_email_copy', True):
-            return {"success": False, "error": "Claude email generation is OFF. Enable it in Settings > Pipeline Automation."}
-        if not CLAUDE_KEY:
-            return {"success": False, "error": "No Claude API key configured. Add one in Settings > API Keys."}
-        return {"success": False, "error": "Claude generation failed"}
+            return {"success": False, "error": "AI email generation is OFF. Enable it in Settings > Automation."}
+        if provider == 'replicate' and not REPLICATE_TOKEN:
+            return {"success": False, "error": "No Replicate API token configured. Add one in Settings > API Keys, or switch the provider to Claude."}
+        if provider != 'replicate' and not CLAUDE_KEY:
+            return {"success": False, "error": "No Claude API key configured. Add one in Settings > API Keys, or switch the provider to Replicate."}
+        return {"success": False, "error": f"{provider.title()} generation failed — check the server logs for details"}
 
     conn = db_conn(); cur = conn.cursor()
     # Delete old email copy
@@ -8806,9 +8911,11 @@ class Handler(BaseHTTPRequestHandler):
                 # 'service' (not a row in tenants) — never pass that into a
                 # uuid column, tag as untagged/admin-visible-only instead.
                 tag_tenant_id = tenant_id if tenant_id != 'service' else None
+                hide_sources = self.scope_tenant() is not None
                 _bg_thread(run_discover_bg,
                     job_id, parsed['niche'], parsed['city'], parsed.get('country', ''),
-                    filter_mode, density, find_more, query, state_cities, tag_tenant_id, user_id)
+                    filter_mode, density, find_more, query, state_cities, tag_tenant_id, user_id,
+                    hide_sources)
                 self.send_json(200, {'job_id': job_id, 'status': 'started',
                                      'parsed': parsed, 'find_more': find_more})
             except Exception as e:
@@ -8978,6 +9085,38 @@ class Handler(BaseHTTPRequestHandler):
                 cur.execute("DELETE FROM crm_connections WHERE id=%s", (cid,))
                 conn.commit(); cur.close(); conn.close()
                 self.send_json(200, {'success': True})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p == '/test-email':
+            # Admin-only: send a real email through the exact same Resend
+            # pipeline production outreach uses, to confirm sending (and,
+            # once the recipient checks their inbox, receiving) actually
+            # works end to end — including whichever specific domain they
+            # pick, not just the account-wide default.
+            if not self.require_admin(): return
+            try:
+                to_email = (body.get('to_email') or '').strip()
+                domain_id = body.get('domain_id')
+                if not to_email or '@' not in to_email:
+                    self.send_json(400, {'error': 'a valid to_email is required'}); return
+                from_email, from_name = None, None
+                domain_label = 'account default (Settings > API Keys > From Email)'
+                if domain_id:
+                    conn = db_conn(); cur = conn.cursor()
+                    cur.execute("SELECT domain, from_email, from_name FROM sending_domains WHERE id = %s", (domain_id,))
+                    row = cur.fetchone(); cur.close(); conn.close()
+                    if not row:
+                        self.send_json(404, {'error': 'no such sending domain'}); return
+                    domain_label, from_email, from_name = row[0], row[1], row[2]
+                result = send_email_via_resend(
+                    to_email,
+                    subject=f'Test email from {CONFIG.get("client_brand_name") or COMPANY_NAME}',
+                    body_text=f'This is a test email confirming your sending setup works.\\n\\nSent via: {domain_label}\\nIf this landed in spam, check that domain\'s SPF/DKIM/DMARC records in Settings.',
+                    from_email=from_email, from_name=from_name, skip_footer=True
+                )
+                result['sent_via'] = domain_label
+                self.send_json(200 if result.get('success') else 502, result)
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
@@ -9201,8 +9340,7 @@ class Handler(BaseHTTPRequestHandler):
                 CONFIG['image_provider'] = img_prov
                 min_score = body.get('min_score', 5)
                 job_id = f'job_{int(time.time())}'
-                JOBS[job_id] = {'status': 'running', 'progress': 0, 'log': ['Starting: Generate email copy & assets...'], 'step': 'Generate Assets'}
-                _bg_thread(run_step_bg, job_id, generate_assets_for_top_leads, 'Generate email copy & assets', min_score)
+                _bg_thread(run_generate_assets_bg, job_id, min_score)
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
