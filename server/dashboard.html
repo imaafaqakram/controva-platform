@@ -4507,8 +4507,8 @@ const SettingsPage = () => {
         <h3 className="font-semibold mb-3 flex items-center gap-2"><Icon name="ToggleRight" /> Automation</h3>
         <div className="space-y-2">
           {[
-            { key: 'auto_score', label: 'Auto-score with Gemini', cost: 'Cheap — Gemini free tier covers most use' },
-            { key: 'auto_email_copy', label: 'Auto-generate email copy', cost: `Uses ${config.email_copy_provider === 'replicate' ? 'Replicate' : 'Claude'} API credits — turn OFF to save spend` },
+            { key: 'auto_score', label: 'Auto-score leads', cost: `Uses ${config.ai_text_provider === 'gemini' ? 'Gemini' : 'Replicate'} — cheap either way` },
+            { key: 'auto_email_copy', label: 'Auto-generate email copy', cost: `Uses ${config.email_copy_provider === 'claude' ? 'Claude' : 'Replicate'} API credits — turn OFF to save spend` },
             { key: 'auto_image', label: 'Auto-generate mockup images', cost: 'Uses Replicate/imagine.art credits' },
           ].map(opt => (
             <label key={opt.key} className="flex items-start gap-3 p-3 bg-slate-50 dark:bg-slate-800 rounded-lg cursor-pointer">
@@ -4519,19 +4519,45 @@ const SettingsPage = () => {
               </div>
             </label>
           ))}
+
+          <div className="ml-1 p-3 border border-dashed border-slate-300 dark:border-slate-700 rounded-lg">
+            <div className="text-xs font-medium text-slate-500 mb-2">AI provider — scoring &amp; pain-point research</div>
+            <div className="flex gap-2">
+              {[
+                { id: 'replicate', label: 'Replicate (Llama 3)', desc: 'Same vendor as your mockup images' },
+                { id: 'gemini', label: 'Gemini', desc: 'Google — needs a Gemini API key' },
+              ].map(opt => (
+                <label key={opt.id} className={'flex-1 flex items-start gap-2 p-2.5 rounded-lg border-2 cursor-pointer text-sm ' + (
+                  (config.ai_text_provider || 'replicate') === opt.id
+                    ? 'border-accent-500 bg-accent-50 dark:bg-accent-900/20' : 'border-slate-200 dark:border-slate-700'
+                )}>
+                  <input type="radio" checked={(config.ai_text_provider || 'replicate') === opt.id}
+                    onChange={() => update('ai_text_provider', opt.id)} className="mt-0.5" />
+                  <div>
+                    <div className="font-medium">{opt.label}</div>
+                    <p className="text-xs text-slate-500 mt-0.5">{opt.desc}</p>
+                  </div>
+                </label>
+              ))}
+            </div>
+            <p className="text-[11px] text-slate-400 mt-2">
+              Falls back to Gemini automatically if Replicate fails and a Gemini key is configured.
+            </p>
+          </div>
+
           {!!config.auto_email_copy && (
             <div className="ml-1 p-3 border border-dashed border-slate-300 dark:border-slate-700 rounded-lg">
               <div className="text-xs font-medium text-slate-500 mb-2">Email copy AI provider</div>
               <div className="flex gap-2">
                 {[
-                  { id: 'claude', label: 'Claude', desc: 'Anthropic — needs a Claude API key' },
                   { id: 'replicate', label: 'Replicate (Llama 3)', desc: 'Same vendor as your mockup images' },
+                  { id: 'claude', label: 'Claude', desc: 'Anthropic — needs a Claude API key' },
                 ].map(opt => (
                   <label key={opt.id} className={'flex-1 flex items-start gap-2 p-2.5 rounded-lg border-2 cursor-pointer text-sm ' + (
-                    (config.email_copy_provider || 'claude') === opt.id
+                    (config.email_copy_provider || 'replicate') === opt.id
                       ? 'border-accent-500 bg-accent-50 dark:bg-accent-900/20' : 'border-slate-200 dark:border-slate-700'
                   )}>
-                    <input type="radio" checked={(config.email_copy_provider || 'claude') === opt.id}
+                    <input type="radio" checked={(config.email_copy_provider || 'replicate') === opt.id}
                       onChange={() => update('email_copy_provider', opt.id)} className="mt-0.5" />
                     <div>
                       <div className="font-medium">{opt.label}</div>
@@ -4541,7 +4567,7 @@ const SettingsPage = () => {
                 ))}
               </div>
               <p className="text-[11px] text-slate-400 mt-2">
-                If the chosen provider's key is missing or the call fails, it falls back to Claude automatically when a Claude key is configured.
+                Falls back to Claude automatically if Replicate fails and a Claude key is configured.
               </p>
             </div>
           )}

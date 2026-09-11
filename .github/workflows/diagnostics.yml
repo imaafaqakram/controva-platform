@@ -28,12 +28,31 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
-            echo "### REPLICATE EMAIL COPY — direct standalone reproduction (bypasses the app entirely, and its stdout buffering, so the real error is visible immediately) ###"
+            echo "### VERIFYING THE JUST-ROTATED GEMINI + REPLICATE KEYS DIRECTLY ###"
+            python3 -c "
+            import json, urllib.request, urllib.error
+            key = json.load(open('/opt/leadgen/config.json')).get('gemini_key', '')
+            print('gemini key present:', bool(key), '/ length:', len(key))
+            body = json.dumps({'contents':[{'parts':[{'text':'Respond with only the word OK.'}]}]}).encode()
+            req = urllib.request.Request(
+                f'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={key}',
+                data=body, method='POST', headers={'Content-Type':'application/json'}
+            )
+            try:
+                resp = urllib.request.urlopen(req, timeout=20)
+                print('gemini HTTP', resp.status)
+                print(resp.read().decode()[:500])
+            except urllib.error.HTTPError as e:
+                print('gemini HTTPError', e.code)
+                print(e.read().decode()[:500])
+            except Exception as e:
+                print('gemini Exception:', repr(e))
+            " 2>&1
             python3 -c "
             import json, urllib.request, urllib.error
             tok = json.load(open('/opt/leadgen/config.json')).get('replicate_token', '')
-            print('token present:', bool(tok), '/ length:', len(tok))
-            body = json.dumps({'input': {'prompt': 'Say hello in one word.', 'system_prompt': 'Reply with only the word.', 'max_tokens': 20}}).encode()
+            print('replicate token present:', bool(tok), '/ length:', len(tok))
+            body = json.dumps({'input': {'prompt': 'Say hello in one word.', 'max_tokens': 20}}).encode()
             req = urllib.request.Request(
                 'https://api.replicate.com/v1/models/meta/meta-llama-3-70b-instruct/predictions',
                 data=body, method='POST',
@@ -41,28 +60,13 @@ jobs:
             )
             try:
                 resp = urllib.request.urlopen(req, timeout=60)
-                print('llama HTTP', resp.status)
-                print(resp.read().decode()[:1500])
+                print('replicate HTTP', resp.status)
+                print(resp.read().decode()[:800])
             except urllib.error.HTTPError as e:
-                print('llama HTTPError', e.code)
-                print(e.read().decode()[:1500])
+                print('replicate HTTPError', e.code)
+                print(e.read().decode()[:800])
             except Exception as e:
-                print('llama Exception:', repr(e))
-            print('--- now the SAME token against the flux-schnell model already used for mockup images — is the token bad account-wide, or just for this one model? ---')
-            req2 = urllib.request.Request(
-                'https://api.replicate.com/v1/models/black-forest-labs/flux-schnell/predictions',
-                data=json.dumps({'input': {'prompt': 'test', 'num_outputs': 1}}).encode(), method='POST',
-                headers={'Authorization': f'Bearer {tok}', 'Content-Type': 'application/json', 'Prefer': 'wait'}
-            )
-            try:
-                resp2 = urllib.request.urlopen(req2, timeout=60)
-                print('flux HTTP', resp2.status)
-                print(resp2.read().decode()[:300])
-            except urllib.error.HTTPError as e:
-                print('flux HTTPError', e.code)
-                print(e.read().decode()[:500])
-            except Exception as e:
-                print('flux Exception:', repr(e))
+                print('replicate Exception:', repr(e))
             " 2>&1
 
             echo "### END-TO-END WORKFLOW ENGINE TEST (live API, all 12 node types, disconnected so every node takes its safe/zero-cost early-return branch — no leads touched, no cost) ###"
