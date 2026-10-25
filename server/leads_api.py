@@ -3452,22 +3452,37 @@ def _pain_context_block(research, max_pains=2):
         block += f"\nRecommended pitch angle: {research['recommended_angle']}"
     return block
 
-def _email_copy_prompt(business_name, niche, city, owner_name=None, research=None):
+def _email_copy_prompt(business_name, niche, city, owner_name=None, research=None, campaign=None):
     name_part = owner_name if owner_name else 'there'
     pain_block = _pain_context_block(research)
-    context_line = pain_block if pain_block else "Context: They have NO WEBSITE. I want to offer to build them a free mockup."
-    return f"""Write a 120-word personalized cold outreach message for a small business owner.
+    campaign_block = _campaign_block(campaign)
+    has_offer = bool(campaign and campaign.get('offer'))
+    if pain_block:
+        context_line = pain_block
+    elif has_offer:
+        context_line = "Context: no specific research is available for this business — don't claim to have noticed anything specific about it."
+    else:
+        context_line = "Context: They have NO WEBSITE. I want to offer to build them a free mockup."
+    if pain_block:
+        angle = "Reference the specific pain point(s) above, naturally, as if you noticed them researching the business"
+    elif has_offer:
+        angle = "In one sentence, connect what we sell to a typical challenge for this type of business"
+    else:
+        angle = "Mention we built a free website mockup for them"
+    audience = "a business decision-maker" if has_offer else "a small business owner"
+    return f"""Write a 120-word personalized cold outreach message for {audience}.
 
 Business: {business_name}
 Type: {niche}
 City: {city}
 Owner: {name_part}
 {context_line}
+{campaign_block}
 
 Requirements:
 - Subject line: max 7 words, curiosity-driven
 - Body: 100-130 words
-- {"Reference the specific pain point(s) above, naturally, as if you noticed them researching the business" if pain_block else "Mention we built a free website mockup for them"}
+- {angle}
 - Reference their specific niche
 - Direct, friendly tone (NOT salesy)
 - End with ONE clear question
@@ -3489,11 +3504,11 @@ def _extract_json_object(text):
     except (json.JSONDecodeError, ValueError):
         return None
 
-def generate_email_copy_claude(business_name, niche, city, owner_name=None, research=None):
+def generate_email_copy_claude(business_name, niche, city, owner_name=None, research=None, campaign=None):
     if not CLAUDE_KEY:
         print('[claude] skipped: no CLAUDE_KEY configured')
         return None
-    prompt = _email_copy_prompt(business_name, niche, city, owner_name, research)
+    prompt = _email_copy_prompt(business_name, niche, city, owner_name, research, campaign)
     try:
         body = json.dumps({
             'model': 'claude-opus-4-5',
@@ -3556,12 +3571,12 @@ def replicate_text_call(prompt, system_prompt='Respond with ONLY the requested J
         print(f'[{log_tag}] Replicate error: {e}')
     return None
 
-def generate_email_copy_replicate(business_name, niche, city, owner_name=None, research=None):
+def generate_email_copy_replicate(business_name, niche, city, owner_name=None, research=None, campaign=None):
     """Same prompt/contract as the Claude path, run on Meta's Llama 3 (hosted
     on Replicate) instead — for accounts that would rather standardize on one
     vendor (Replicate is already used for mockup images) or don't have a
     Claude key."""
-    prompt = _email_copy_prompt(business_name, niche, city, owner_name, research)
+    prompt = _email_copy_prompt(business_name, niche, city, owner_name, research, campaign)
     text = replicate_text_call(prompt, 'You are a cold-email copywriter. Respond with ONLY the requested JSON object, no other text.',
                                max_tokens=500, log_tag='email_copy')
     if text:
@@ -3571,25 +3586,26 @@ def generate_email_copy_replicate(business_name, niche, city, owner_name=None, r
         print(f'[replicate] email copy: no parseable JSON in output: {text[:200]}')
     return None
 
-def generate_email_copy(business_name, niche, city, owner_name=None, research=None, force=False):
+def generate_email_copy(business_name, niche, city, owner_name=None, research=None, force=False, campaign=None):
     if not force and not CONFIG.get('auto_email_copy', True):
         print('[email_copy] skipped: auto_email_copy disabled in settings')
         return None
     provider = CONFIG.get('email_copy_provider', 'claude')
     if provider == 'replicate':
-        result = generate_email_copy_replicate(business_name, niche, city, owner_name, research)
+        result = generate_email_copy_replicate(business_name, niche, city, owner_name, research, campaign)
         # Fall back to Claude only if it's actually configured — otherwise
         # this would just mask a real Replicate problem as a Claude one.
         if not result and CLAUDE_KEY:
             print('[email_copy] Replicate failed, falling back to Claude')
-            result = generate_email_copy_claude(business_name, niche, city, owner_name, research)
+            result = generate_email_copy_claude(business_name, niche, city, owner_name, research, campaign)
         return result
-    return generate_email_copy_claude(business_name, niche, city, owner_name, research)
+    return generate_email_copy_claude(business_name, niche, city, owner_name, research, campaign)
 
 # ──────────────────────────────────────────────────────────────
 #  LEAD SCORING (Gemini or Replicate, per Settings > Automation)
 # ──────────────────────────────────────────────────────────────
-def _lead_score_prompt(business_name, niche, city, phone, has_email, has_linkedin):
+def _lead_score_prompt(business_name, niche, city, phone, has_email, has_linkedin, campaign=None):
+    note = _campaign_block(campaign) if campaign and campaign.get('offer') else "Note: This business has NO WEBSITE."
     return f"""Score this B2B lead 1-10 for cold outreach.
 
 Business: {business_name}
@@ -3599,13 +3615,13 @@ Phone: {'Yes' if phone else 'No'}
 Email: {'Yes' if has_email else 'No'}
 LinkedIn: {'Yes' if has_linkedin else 'No'}
 
-Note: This business has NO WEBSITE.
+{note}
 
 Score: 9-10 (excellent), 7-8 (good), 5-6 (medium), 1-4 (low)
 Respond ONLY with JSON: {{"score":<1-10>,"reason":"<1 sentence>","best_channel":"<WhatsApp|Email|Phone>"}}"""
 
-def gemini_score(business_name, niche, city, phone, has_email, has_linkedin):
-    text = gemini_call(_lead_score_prompt(business_name, niche, city, phone, has_email, has_linkedin), 150)
+def gemini_score(business_name, niche, city, phone, has_email, has_linkedin, campaign=None):
+    text = gemini_call(_lead_score_prompt(business_name, niche, city, phone, has_email, has_linkedin, campaign), 150)
     if text:
         result = _extract_json_object(text)
         if result:
@@ -3613,8 +3629,8 @@ def gemini_score(business_name, niche, city, phone, has_email, has_linkedin):
             return result
     return None
 
-def score_lead_replicate(business_name, niche, city, phone, has_email, has_linkedin):
-    prompt = _lead_score_prompt(business_name, niche, city, phone, has_email, has_linkedin)
+def score_lead_replicate(business_name, niche, city, phone, has_email, has_linkedin, campaign=None):
+    prompt = _lead_score_prompt(business_name, niche, city, phone, has_email, has_linkedin, campaign)
     text = replicate_text_call(prompt, 'You score B2B sales leads. Respond with ONLY the requested JSON object, no other text.',
                                max_tokens=150, log_tag='score')
     if text:
@@ -3624,19 +3640,19 @@ def score_lead_replicate(business_name, niche, city, phone, has_email, has_linke
         print(f'[replicate] score: no parseable JSON in output: {text[:200]}')
     return None
 
-def score_lead_ai(business_name, niche, city, phone, has_email, has_linkedin):
+def score_lead_ai(business_name, niche, city, phone, has_email, has_linkedin, campaign=None):
     """Dispatches to whichever provider Settings > Automation has chosen for
     scoring/research (default: Replicate), falling back to Gemini if that
     fails and a Gemini key is configured, then a neutral default score."""
     provider = CONFIG.get('ai_text_provider', 'replicate')
     result = None
     if provider == 'replicate':
-        result = score_lead_replicate(business_name, niche, city, phone, has_email, has_linkedin)
+        result = score_lead_replicate(business_name, niche, city, phone, has_email, has_linkedin, campaign)
         if not result and GEMINI_KEY:
             print('[score] Replicate failed, falling back to Gemini')
-            result = gemini_score(business_name, niche, city, phone, has_email, has_linkedin)
+            result = gemini_score(business_name, niche, city, phone, has_email, has_linkedin, campaign)
     else:
-        result = gemini_score(business_name, niche, city, phone, has_email, has_linkedin)
+        result = gemini_score(business_name, niche, city, phone, has_email, has_linkedin, campaign)
     return result or {'score': 5, 'reason': 'Default (AI scoring unavailable)', 'best_channel': 'Phone'}
 
 def score_all_enriched():
@@ -3650,7 +3666,8 @@ def score_all_enriched():
     for ld in leads:
         lead_id, bname, niche, city, phone, email, linkedin = ld
         try:
-            s = score_lead_ai(bname, niche, city, phone, bool(email), bool(linkedin))
+            s = score_lead_ai(bname, niche, city, phone, bool(email), bool(linkedin),
+                              campaign=get_lead_campaign(lead_id))
             score = int(s.get('score', 5))
             cur.execute("UPDATE leads SET ai_score=%s, score_reason=%s WHERE id=%s",
                        (score, str(s.get('reason', ''))[:500], lead_id))
@@ -3683,7 +3700,8 @@ def generate_assets_for_top_leads(min_score=5):
                     cur.execute("INSERT INTO assets(lead_id,asset_type,content,model_used) VALUES(%s,'mockup_image',%s,%s)",
                                (lead_id, mockup_url, CONFIG['image_provider']))
             if CONFIG['auto_email_copy']:
-                email = generate_email_copy(bname, niche, city, owner, research=get_lead_research(lead_id))
+                email = generate_email_copy(bname, niche, city, owner, research=get_lead_research(lead_id),
+                                            campaign=get_lead_campaign(lead_id))
                 if email:
                     cur.execute("INSERT INTO assets(lead_id,asset_type,content,model_used) VALUES(%s,'email_subject',%s,'claude')",
                                (lead_id, email.get('subject', '')))
@@ -5908,17 +5926,25 @@ def ensure_m4_tables():
                         (seq_id, st['step'], st['delay_days'], st['kind']))
     conn.commit(); cur.close(); conn.close()
 
-def generate_followup_copy(business_name, niche, city, owner_name, kind, prev_subject='', research=None):
+def generate_followup_copy(business_name, niche, city, owner_name, kind, prev_subject='', research=None,
+                           campaign=None):
     """Claude-generated follow-up emails (sequence steps 2 and 3)."""
     if not CLAUDE_KEY:
         return None
     pain_block = _pain_context_block(research, max_pains=1)
+    campaign_block = _campaign_block(campaign)
+    has_offer = bool(campaign and campaign.get('offer'))
     cta = meeting_booking_cta()
     if kind == 'nudge':
+        if pain_block:
+            angle = "Reference the specific pain point below instead of the generic mockup angle."
+        elif has_offer:
+            angle = "Restate in one short line how what we sell could help them."
+        else:
+            angle = "Reference the mockup we made for them."
         spec = ("This is follow-up #2 of 3 (they got an initial email 3 days ago). "
                 "Keep it under 70 words. "
-                + ("Reference the specific pain point below instead of the generic mockup angle."
-                   if pain_block else "Reference the mockup we made for them.") +
+                + angle +
                 " One soft question. Friendly, zero pressure. DON'T apologize for emailing again."
                 + (f" Include this scheduling option naturally: {cta}" if cta else ""))
     else:
@@ -5927,14 +5953,17 @@ def generate_followup_copy(business_name, niche, city, owner_name, kind, prev_su
                 "close their file. Leave the door open. No guilt-tripping."
                 + (f" Include this scheduling option naturally: {cta}" if cta else ""))
     name_part = owner_name if owner_name else 'there'
-    prompt = f"""Write a cold-outreach follow-up email for a small business owner.
+    first_email = '(initial introduction)' if has_offer else '(initial offer of a free website mockup)'
+    audience = "a business decision-maker" if has_offer else "a small business owner"
+    prompt = f"""Write a cold-outreach follow-up email for {audience}.
 
 Business: {business_name}
 Type: {niche}
 City: {city}
 Owner: {name_part}
-Previous email subject: {prev_subject or '(initial offer of a free website mockup)'}
+Previous email subject: {prev_subject or first_email}
 {pain_block}
+{campaign_block}
 {spec}
 
 Respond ONLY with valid JSON:
@@ -6018,6 +6047,7 @@ def research_lead(lead_id):
         cur.close(); conn.close()
         return {'error': 'lead not found'}
     business_name, city, niche, website = row
+    campaign = get_lead_campaign(lead_id)
     cur.execute("""INSERT INTO lead_research (lead_id, status) VALUES (%s, 'running')
                    ON CONFLICT (lead_id) DO UPDATE SET status='running', error=NULL""", (lead_id,))
     conn.commit(); cur.close(); conn.close()
@@ -6065,7 +6095,8 @@ def research_lead(lead_id):
         print(f'[research] social scout failed: {e}')
 
     try:
-        n_added = capture_decision_makers(lead_id, business_name, city)
+        n_added = capture_decision_makers(lead_id, business_name, city,
+                                          titles=(campaign or {}).get('titles') or None)
         if n_added: sources.append(f'find_people ({n_added} additional contact(s))')
     except Exception as e:
         print(f'[research] decision-maker capture failed: {e}')
@@ -6077,7 +6108,7 @@ Tech stack detected: {', '.join(tech_stack) or 'none detected'}
 Review summary: {reviews_summary or 'no reviews found'}
 Hiring/intent signals: {'; '.join(hiring_signals) or 'none found'}
 Social presence: {', '.join(social_presence.keys()) or 'none found'}
-
+{_research_campaign_block(campaign)}
 Based only on the above, identify likely business pain points, with evidence drawn
 directly from the findings above. Respond ONLY with valid JSON:
 {{"pain_points": [{{"pain": "<short label>", "evidence": "<quote or fact from above>", "severity": <1-5>}}],
@@ -6507,7 +6538,7 @@ def handle_calendly_webhook(raw_body):
         return {'ok': False, 'error': str(e)}
 
 # ── Multi-decision-maker capture ────────────────────────────────
-def capture_decision_makers(lead_id, business_name, city):
+def capture_decision_makers(lead_id, business_name, city, titles=None):
     """Store find_people() results as additional title-aware contacts.
     Outreach still targets the single best-verified contact (existing
     ORDER BY has-email/confidence logic is untouched) — these are retained
@@ -6515,7 +6546,7 @@ def capture_decision_makers(lead_id, business_name, city):
     if not CONFIG.get('multi_decision_maker_capture', True):
         return 0
     try:
-        result = find_people(business_name, location=city)
+        result = find_people(business_name, titles=titles, location=city)
         people = (result.get('people') or [])[:5]
         if not people:
             return 0
@@ -6656,13 +6687,14 @@ def run_icp_bg(job_id, icp_id):
             JOBS[job_id]['progress'] = min(int(len(log_lines) / max(total_steps, 1) * 100), 95)
     try:
         conn = db_conn(); cur = conn.cursor()
-        cur.execute("""SELECT name, industries, geos, keywords, exclusions, source_mix
+        cur.execute("""SELECT name, industries, geos, keywords, exclusions, source_mix, tenant_id
                        FROM icp_profiles WHERE id=%s""", (icp_id,))
         row = cur.fetchone()
         if not row:
             JOBS[job_id]['status'] = 'failed'; JOBS[job_id]['error'] = 'ICP not found'
             return
-        name, industries, geos, keywords, exclusions, source_mix = row
+        name, industries, geos, keywords, exclusions, source_mix, icp_tenant = row
+        icp_tenant = str(icp_tenant) if icp_tenant else None
         industries_l = _split_list(industries)
         geos_l = _split_list(geos)
         combos = [(ind, g) for ind in industries_l for g in geos_l][:int(CONFIG.get('icp_daily_cap', 40))]
@@ -6681,11 +6713,12 @@ def run_icp_bg(job_id, icp_id):
                 before = _count_leads()
                 r = discover_leads_smart(niche=industry, city=city, country=country,
                                          original_query=q, filter_mode='all',
-                                         density='standard', find_more=False, job_id=None)
+                                         density='standard', find_more=False, job_id=None,
+                                         tenant_id=icp_tenant)
                 after = _count_leads()
                 new_leads = max(after - before, 0)
                 # Tag freshly discovered leads with this ICP
-                tag_leads_for_icp(industry, city, icp_id)
+                tag_leads_for_icp(industry, city, icp_id, icp_tenant)
                 found = (r if isinstance(r, int) else len(r)) if r else new_leads
                 found_total += found; new_total += new_leads
                 log(f'[{i+1}/{len(combos)}] {industry} · {city}: {new_leads} new')
@@ -6726,17 +6759,19 @@ def _count_leads():
     except Exception:
         return 0
 
-def tag_leads_for_icp(industry, city, icp_id):
-    """Attach untagged, matching leads to this ICP (best-effort attribution)."""
+def tag_leads_for_icp(industry, city, icp_id, tenant_id=None):
+    """Attach untagged, matching leads to this ICP (best-effort attribution).
+    A tenant-owned ICP only claims that tenant's leads."""
     try:
         conn = db_conn(); cur = conn.cursor()
         cur.execute("""UPDATE leads SET icp_id=%s
                        WHERE icp_id IS NULL AND lead_type IS NULL
                          AND created_at > NOW() - INTERVAL '15 minutes'
                          AND (LOWER(niche) LIKE LOWER(%s) OR LOWER(business_name) LIKE LOWER(%s))
-                         AND (city IS NULL OR LOWER(city) LIKE LOWER(%s))""",
+                         AND (city IS NULL OR LOWER(city) LIKE LOWER(%s))
+                         AND tenant_id IS NOT DISTINCT FROM %s""",
                     (icp_id, f'%{industry.lower()[:20]}%', f'%{industry.lower()[:20]}%',
-                     f'%{city.lower()}%'))
+                     f'%{city.lower()}%', tenant_id))
         n = cur.rowcount; conn.commit(); cur.close(); conn.close()
         return n
     except Exception as e:
@@ -6750,14 +6785,18 @@ def icp_scheduler_loop():
         try:
             if CONFIG.get('icp_scheduler_enabled', True):
                 conn = db_conn(); cur = conn.cursor()
-                cur.execute("""SELECT id FROM icp_profiles
+                cur.execute("""SELECT id, created_by FROM icp_profiles
                                WHERE is_active AND (last_run_at IS NULL
                                      OR last_run_at < NOW() - INTERVAL '20 hours')
                                ORDER BY last_run_at NULLS FIRST LIMIT 1""")
                 row = cur.fetchone(); cur.close(); conn.close()
                 if row:
                     print(f'[icp] scheduler: running ICP {row[0]}')
+                    # So the run's API cost counts toward the owner's
+                    # performance report rather than going unattributed.
+                    set_current_user(row[1])
                     run_icp_bg(f'icp_auto_{row[0]}_{int(time.time())}', row[0])
+                    set_current_user(None)
             run_crm_retry_bg()   # M9: retry failed CRM pushes every pass
         except Exception as e:
             print(f'[icp] scheduler error: {e}')
@@ -6871,7 +6910,8 @@ def get_sequence_step_assets(lead_id, step, kind, detail):
     copy = generate_followup_copy(detail['business_name'], detail['niche'], detail['city'],
                                   detail.get('owner_name'), kind,
                                   prev_subject=detail.get('email_subject') or '',
-                                  research=detail.get('research'))
+                                  research=detail.get('research'),
+                                  campaign=get_lead_campaign(lead_id))
     if not copy:
         return None, None
     conn = db_conn(); cur = conn.cursor()
@@ -7681,7 +7721,8 @@ def wf_score(config, input_ids, log_fn):
     leads = cur.fetchall()
     for lead_id, bname, niche, city, phone, email, linkedin in leads:
         try:
-            s = score_lead_ai(bname, niche, city, phone, bool(email), bool(linkedin))
+            s = score_lead_ai(bname, niche, city, phone, bool(email), bool(linkedin),
+                              campaign=get_lead_campaign(lead_id))
             cur.execute("UPDATE leads SET ai_score=%s, score_reason=%s WHERE id=%s",
                        (int(s.get('score', 5)), str(s.get('reason', ''))[:500], lead_id))
             conn.commit()
@@ -7715,7 +7756,8 @@ def wf_generate_assets(config, input_ids, log_fn):
     leads = cur.fetchall(); made = 0
     for lead_id, bname, niche, city, owner in leads:
         try:
-            email = generate_email_copy(bname, niche, city, owner, research=get_lead_research(lead_id))
+            email = generate_email_copy(bname, niche, city, owner, research=get_lead_research(lead_id),
+                                            campaign=get_lead_campaign(lead_id))
             if email:
                 cur.execute("INSERT INTO assets(lead_id,asset_type,content,model_used) VALUES(%s,'email_subject',%s,'claude')",
                            (lead_id, email.get('subject', '')))
@@ -7996,6 +8038,431 @@ def run_workflow_bg(job_id, workflow_id):
         if job_id in JOBS:
             JOBS[job_id]['status'] = 'failed'; JOBS[job_id]['error'] = str(e)
 
+# ──────────────────────────────────────────────────────────────
+#  M14: INDUSTRY TEMPLATES, CAMPAIGN OFFER, OUTCOMES & CHANNEL PERFORMANCE
+#  (B2B Prospecting Bot brief — target industries, measurable results,
+#  and benchmarking against paid ads / website leads)
+# ──────────────────────────────────────────────────────────────
+INDUSTRY_TEMPLATES = {
+    'construction_real_estate': {
+        'label': 'Construction & Real Estate',
+        'industries': ['construction companies', 'general contractors', 'real estate agencies',
+                       'property developers', 'property management companies'],
+        'match_terms': ['construction', 'contractor', 'builder', 'real estate', 'realtor', 'estate agent',
+                        'property', 'developer', 'roofing', 'remodel'],
+        'decision_maker_titles': ['Owner', 'Managing Director', 'Operations Director', 'Broker',
+                                  'Head of Business Development'],
+        'pain_hints': ['uneven project pipeline and seasonal demand', 'heavy reliance on referrals and listing portals',
+                       'slow follow-up on inbound inquiries', 'coordinating subcontractors and suppliers'],
+        'research_focus': 'project types and volume, active developments or listings, hiring for estimators, '
+                          'project managers or agents, and review complaints about responsiveness',
+        'compliance_note': '',
+        'min_lead_score': 60,
+    },
+    'banking_insurance': {
+        'label': 'Banking & Insurance',
+        'industries': ['insurance agencies', 'insurance brokers', 'community banks', 'credit unions',
+                       'mortgage brokers'],
+        'match_terms': ['insurance', 'insurer', 'broker', 'bank', 'credit union', 'mortgage', 'financial',
+                        'lending', 'underwrit'],
+        'decision_maker_titles': ['Agency Principal', 'Managing Director', 'Head of Sales', 'Branch Manager',
+                                  'Chief Marketing Officer'],
+        'pain_hints': ['high customer acquisition cost', 'low-quality leads from aggregators',
+                       'policy renewal and customer retention', 'compliance overhead on marketing'],
+        'research_focus': 'lines of business offered, new branches or product launches, hiring for producers, '
+                          'advisors or loan officers, and themes in customer reviews',
+        'compliance_note': 'Regulated financial-services business: never make claims about rates, returns or '
+                           'guarantees, and keep everything strictly business-to-business.',
+        'min_lead_score': 65,
+    },
+    'healthcare_clinics': {
+        'label': 'Healthcare — Clinics & Medical Practices',
+        'industries': ['private clinics', 'dental clinics', 'aesthetic clinics', 'medical centers',
+                       'physiotherapy clinics'],
+        'match_terms': ['clinic', 'dental', 'dentist', 'medical', 'health', 'aesthetic', 'physio',
+                        'orthodont', 'dermatolog'],
+        'decision_maker_titles': ['Practice Owner', 'Practice Manager', 'Medical Director', 'Clinic Manager',
+                                  'Operations Manager'],
+        'pain_hints': ['cost of acquiring new patients', 'empty appointment slots and no-shows',
+                       'front-desk workload', 'online reputation'],
+        'research_focus': 'services offered, number of locations and practitioners, new openings, hiring for '
+                          'clinical or front-desk staff, and review themes about booking and waiting times',
+        'compliance_note': 'Healthcare business: never collect, infer or mention patient information or health '
+                           'data. Use business-level facts only (services, locations, staffing, public reviews '
+                           'of the practice as a business).',
+        'min_lead_score': 60,
+    },
+}
+
+def industry_template_for(template_key=None, niche=''):
+    """Explicit template key wins; otherwise best-effort match on the lead's
+    niche text. Returns (key, template) or (None, None)."""
+    if template_key and template_key in INDUSTRY_TEMPLATES:
+        return template_key, INDUSTRY_TEMPLATES[template_key]
+    n = (niche or '').lower()
+    if n:
+        for key, tpl in INDUSTRY_TEMPLATES.items():
+            if any(term in n for term in tpl['match_terms']):
+                return key, tpl
+    return None, None
+
+def get_lead_campaign(lead_id):
+    """What we're selling to this lead and which industry playbook applies:
+    {'offer', 'template', 'industry', 'titles', 'pain_hints', 'research_focus',
+    'compliance'}. Returns None when there is neither an ICP offer nor a
+    matching industry, so callers keep the original no-website pitch untouched."""
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("""SELECT l.niche, p.offer, p.industry_template
+                       FROM leads l LEFT JOIN icp_profiles p ON p.id = l.icp_id
+                       WHERE l.id = %s""", (lead_id,))
+        row = cur.fetchone(); cur.close(); conn.close()
+    except Exception as e:
+        print(f'[campaign] lookup failed for {lead_id}: {e}')
+        return None
+    if not row:
+        return None
+    niche, offer, template_key = row
+    key, tpl = industry_template_for(template_key, niche)
+    offer = (offer or '').strip()
+    if not offer and not tpl:
+        return None
+    return {
+        'offer': offer,
+        'template': key,
+        'industry': tpl['label'] if tpl else '',
+        'titles': tpl['decision_maker_titles'] if tpl else [],
+        'pain_hints': tpl['pain_hints'] if tpl else [],
+        'research_focus': tpl['research_focus'] if tpl else '',
+        'compliance': tpl['compliance_note'] if tpl else '',
+    }
+
+def _campaign_block(campaign):
+    """Prompt block describing our offer + the industry playbook. Without an
+    offer only the compliance rule is kept, so a plain search whose niche
+    happens to match an industry still gets the original no-website pitch."""
+    if not campaign:
+        return ''
+    if not campaign.get('offer'):
+        return f"Compliance rule: {campaign['compliance']}" if campaign.get('compliance') else ''
+    lines = []
+    if campaign.get('offer'):
+        lines.append(f"What we sell: {campaign['offer']}")
+    if campaign.get('industry'):
+        lines.append(f"Industry: {campaign['industry']}")
+        if campaign.get('pain_hints'):
+            lines.append("Common challenges in this industry (only reference one if it plausibly fits): "
+                         + '; '.join(campaign['pain_hints']))
+    if campaign.get('compliance'):
+        lines.append(f"Compliance rule: {campaign['compliance']}")
+    return '\n'.join(lines)
+
+def _research_campaign_block(campaign):
+    """Industry research focus + compliance rule for the research synthesis
+    prompt ('' without a matching industry). Our offer is included so the
+    pains found are ones it could plausibly address."""
+    if not campaign:
+        return ''
+    lines = []
+    if campaign.get('research_focus'):
+        lines.append(f"For this industry, pay particular attention to: {campaign['research_focus']}.")
+    if campaign.get('offer'):
+        lines.append(f"We sell: {campaign['offer']} — prefer pains this could plausibly address.")
+    if campaign.get('compliance'):
+        lines.append(f"Compliance rule: {campaign['compliance']}")
+    return '\n'.join(lines) + '\n' if lines else ''
+
+def ensure_m14_tables():
+    conn = db_conn(); cur = conn.cursor()
+    # ICP ownership + what the client sells (drives outreach copy)
+    cur.execute("ALTER TABLE icp_profiles ADD COLUMN IF NOT EXISTS tenant_id UUID")
+    cur.execute("ALTER TABLE icp_profiles ADD COLUMN IF NOT EXISTS created_by VARCHAR(100)")
+    cur.execute("ALTER TABLE icp_profiles ADD COLUMN IF NOT EXISTS offer TEXT NOT NULL DEFAULT ''")
+    cur.execute("ALTER TABLE icp_profiles ADD COLUMN IF NOT EXISTS industry_template VARCHAR(40)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_icp_profiles_tenant ON icp_profiles(tenant_id)")
+    # Sales outcomes per lead
+    cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS meeting_attended BOOLEAN")
+    cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS deal_stage VARCHAR(20)")
+    cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS deal_value NUMERIC(12,2)")
+    cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS deal_closed_at TIMESTAMPTZ")
+    cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS outcome_notes TEXT")
+    cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS outcome_updated_at TIMESTAMPTZ")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_leads_deal_stage ON leads(deal_stage) WHERE deal_stage IS NOT NULL")
+    # Figures for the client's other lead channels, entered by hand per period
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS channel_benchmarks (
+            id                SERIAL PRIMARY KEY,
+            tenant_id         UUID,
+            channel           VARCHAR(30) NOT NULL,
+            label             VARCHAR(120) NOT NULL DEFAULT '',
+            period_start      DATE NOT NULL,
+            period_end        DATE NOT NULL,
+            spend             NUMERIC(12,2) NOT NULL DEFAULT 0,
+            leads             INT NOT NULL DEFAULT 0,
+            qualified_leads   INT,
+            meetings_booked   INT NOT NULL DEFAULT 0,
+            meetings_attended INT NOT NULL DEFAULT 0,
+            customers         INT NOT NULL DEFAULT 0,
+            revenue           NUMERIC(14,2) NOT NULL DEFAULT 0,
+            notes             TEXT NOT NULL DEFAULT '',
+            created_by        VARCHAR(100),
+            created_at        TIMESTAMPTZ DEFAULT NOW()
+        )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_channel_benchmarks_tenant ON channel_benchmarks(tenant_id, period_start)")
+    conn.commit(); cur.close(); conn.close()
+
+# ── Lead outcomes ────────────────────────────────────────────────
+DEAL_STAGES = ('open', 'won', 'lost')
+
+def update_lead_outcome(lead_id, body):
+    """Partial update: only keys present in body are changed. Closing a deal
+    (won/lost) stamps deal_closed_at; reopening or clearing it removes the stamp."""
+    sets, vals = [], []
+    if 'meeting_booked' in body:
+        booked = bool(body['meeting_booked'])
+        sets.append("meeting_booked=%s"); vals.append(booked)
+        sets.append("meeting_booked_at=" + ("COALESCE(meeting_booked_at, NOW())" if booked else "NULL"))
+    if 'meeting_attended' in body:
+        v = body['meeting_attended']
+        sets.append("meeting_attended=%s"); vals.append(None if v is None else bool(v))
+    if 'deal_stage' in body:
+        stage = body['deal_stage'] or None
+        if stage is not None and stage not in DEAL_STAGES:
+            return {'success': False, 'error': f'deal_stage must be one of {", ".join(DEAL_STAGES)}'}
+        sets.append("deal_stage=%s"); vals.append(stage)
+        if stage in ('won', 'lost'):
+            # Every SET expression sees the pre-update row, so this compares
+            # against the OLD stage: re-saving 'won' keeps the original date.
+            sets.append("deal_closed_at=CASE WHEN deal_stage IS DISTINCT FROM %s THEN NOW() "
+                        "ELSE COALESCE(deal_closed_at, NOW()) END")
+            vals.append(stage)
+        else:
+            sets.append("deal_closed_at=NULL")
+    if 'deal_value' in body:
+        raw = body['deal_value']
+        try:
+            value = None if raw in (None, '') else round(float(raw), 2)
+        except (TypeError, ValueError):
+            return {'success': False, 'error': 'deal_value must be a number'}
+        if value is not None and value < 0:
+            return {'success': False, 'error': 'deal_value cannot be negative'}
+        sets.append("deal_value=%s"); vals.append(value)
+    if 'notes' in body:
+        sets.append("outcome_notes=%s"); vals.append((body['notes'] or '')[:2000])
+    if not sets:
+        return {'success': False, 'error': 'nothing to update'}
+    sets.append("outcome_updated_at=NOW()")
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute(f"UPDATE leads SET {', '.join(sets)} WHERE id=%s", (*vals, lead_id))
+    n = cur.rowcount
+    conn.commit(); cur.close(); conn.close()
+    return {'success': bool(n)} if n else {'success': False, 'error': 'Lead not found'}
+
+# ── Channel performance ──────────────────────────────────────────
+BENCHMARK_CHANNELS = {
+    'meta_ads': 'Meta Ads (Facebook / Instagram)',
+    'google_ads': 'Google Ads',
+    'website': 'Website forms & inbound',
+    'other': 'Other channel',
+    'prospecting_costs': 'Prospecting — extra costs',   # added to this platform's spend, not a channel of its own
+}
+_BENCHMARK_NUMERIC = ('spend', 'leads', 'qualified_leads', 'meetings_booked', 'meetings_attended',
+                      'customers', 'revenue')
+
+def _ratio(num, den, scale=1.0):
+    return round(float(num) / float(den) * scale, 2) if den else None
+
+def _channel_metrics(row):
+    """Derived KPIs from raw counts — identical formulas for every channel so
+    the comparison is like for like. Conversion is measured from QUALIFIED
+    leads: a prospecting 'lead' is any discovered business, which isn't
+    comparable to an inbound inquiry, whereas a qualified lead is."""
+    spend = float(row.get('spend') or 0)
+    leads = row.get('leads') or 0
+    qualified = row.get('qualified_leads')
+    if qualified is None:
+        qualified = leads
+    row['qualified_leads'] = qualified
+    row['cost_per_lead'] = _ratio(spend, leads)
+    row['cost_per_qualified_lead'] = _ratio(spend, qualified)
+    row['icp_match_pct'] = _ratio(qualified, leads, 100)
+    row['positive_response_rate'] = _ratio(row.get('positive_responses'), row.get('contacted'), 100) \
+        if row.get('contacted') is not None else None
+    row['attendance_rate'] = _ratio(row.get('meetings_attended') or 0, row.get('meetings_booked') or 0, 100)
+    row['lead_to_customer_rate'] = _ratio(row.get('customers') or 0, qualified, 100)
+    row['customer_acquisition_cost'] = _ratio(spend, row.get('customers') or 0)
+    row['revenue_per_spend'] = _ratio(float(row.get('revenue') or 0), spend)
+    row['spend'] = round(spend, 2)
+    row['revenue'] = round(float(row.get('revenue') or 0), 2)
+    return row
+
+def performance_report(tenant_id, date_from, date_to):
+    """Prospecting-channel KPIs computed from live data, side by side with the
+    hand-entered figures for the client's other channels. tenant_id=None
+    reports across every tenant (admin's platform-wide view)."""
+    conn = db_conn(); cur = conn.cursor()
+    lt = "AND l.tenant_id = %s" if tenant_id else ""
+    tp = (tenant_id,) if tenant_id else ()
+    rng = (date_from, date_to)
+    default_threshold = int(CONFIG.get('qualified_score_threshold', 60))
+
+    cur.execute(f"""
+        SELECT COUNT(*),
+               COUNT(*) FILTER (WHERE COALESCE(l.icp_score, l.ai_score * 10, 0)
+                                      >= COALESCE(p.min_lead_score, %s))
+        FROM leads l LEFT JOIN icp_profiles p ON p.id = l.icp_id
+        WHERE l.lead_type IS NULL AND l.created_at >= %s AND l.created_at < %s::date + 1 {lt}""",
+        (default_threshold, *rng, *tp))
+    leads_total, qualified = cur.fetchone()
+
+    cur.execute(f"""
+        SELECT COUNT(DISTINCT o.lead_id) FILTER (WHERE o.sent_at >= %s AND o.sent_at < %s::date + 1),
+               COUNT(DISTINCT o.lead_id) FILTER (WHERE o.replied_at >= %s AND o.replied_at < %s::date + 1),
+               COUNT(DISTINCT o.lead_id) FILTER (WHERE o.replied_at >= %s AND o.replied_at < %s::date + 1
+                                                   AND o.reply_classification = 'interested')
+        FROM outreach_log o JOIN leads l ON l.id = o.lead_id
+        WHERE 1=1 {lt}""", (*rng, *rng, *rng, *tp))
+    contacted, replied, positive = cur.fetchone()
+
+    cur.execute(f"""
+        SELECT COUNT(*) FILTER (WHERE l.meeting_booked AND l.meeting_booked_at >= %s
+                                  AND l.meeting_booked_at < %s::date + 1),
+               COUNT(*) FILTER (WHERE l.meeting_booked AND l.meeting_attended
+                                  AND l.meeting_booked_at >= %s AND l.meeting_booked_at < %s::date + 1),
+               COUNT(*) FILTER (WHERE l.deal_stage = 'won' AND l.deal_closed_at >= %s
+                                  AND l.deal_closed_at < %s::date + 1),
+               COALESCE(SUM(l.deal_value) FILTER (WHERE l.deal_stage = 'won' AND l.deal_closed_at >= %s
+                                  AND l.deal_closed_at < %s::date + 1), 0)
+        FROM leads l WHERE l.lead_type IS NULL {lt}""", (*rng, *rng, *rng, *rng, *tp))
+    booked, attended, customers, revenue = cur.fetchone()
+
+    # Spend: logged API cost of the tenant's own users, plus any extra costs
+    # (subscriptions, staff time) they entered as 'prospecting_costs'.
+    if tenant_id:
+        cur.execute("""SELECT COALESCE(SUM(u.cost), 0) FROM api_usage u
+                       WHERE u.created_at >= %s AND u.created_at < %s::date + 1
+                         AND u.username IN (SELECT username FROM auth_users WHERE tenant_id = %s)""",
+                    (*rng, tenant_id))
+    else:
+        cur.execute("""SELECT COALESCE(SUM(cost), 0) FROM api_usage
+                       WHERE created_at >= %s AND created_at < %s::date + 1""", rng)
+    api_spend = float(cur.fetchone()[0] or 0)
+
+    bt = "AND tenant_id = %s" if tenant_id else ""
+    cur.execute(f"""
+        SELECT channel, COUNT(*), COALESCE(SUM(spend),0), COALESCE(SUM(leads),0),
+               SUM(qualified_leads), COUNT(qualified_leads), COALESCE(SUM(meetings_booked),0),
+               COALESCE(SUM(meetings_attended),0), COALESCE(SUM(customers),0), COALESCE(SUM(revenue),0)
+        FROM channel_benchmarks
+        WHERE period_start <= %s AND period_end >= %s {bt}
+        GROUP BY channel""", (date_to, date_from, *tp))
+    bench_rows = cur.fetchall()
+
+    cur.execute(f"""
+        SELECT id, channel, label, to_char(period_start,'YYYY-MM-DD'), to_char(period_end,'YYYY-MM-DD'),
+               spend, leads, qualified_leads, meetings_booked, meetings_attended, customers, revenue, notes
+        FROM channel_benchmarks
+        WHERE period_start <= %s AND period_end >= %s {bt}
+        ORDER BY period_start DESC, id DESC""", (date_to, date_from, *tp))
+    entries = [dict(zip(['id', 'channel', 'label', 'period_start', 'period_end', 'spend', 'leads',
+                         'qualified_leads', 'meetings_booked', 'meetings_attended', 'customers',
+                         'revenue', 'notes'], r)) for r in cur.fetchall()]
+    cur.close(); conn.close()
+    for e in entries:
+        e['spend'] = float(e['spend'] or 0); e['revenue'] = float(e['revenue'] or 0)
+
+    extra_costs = 0.0
+    channels = []
+    for ch, n, spend, leads, q_sum, q_count, mb, ma, cust, rev in bench_rows:
+        if ch == 'prospecting_costs':
+            extra_costs += float(spend or 0)
+            continue
+        channels.append(_channel_metrics({
+            'channel': ch, 'label': BENCHMARK_CHANNELS.get(ch, ch), 'entries': n,
+            'spend': float(spend or 0), 'leads': int(leads),
+            # If some periods left "qualified" blank, fall back to total leads
+            # rather than mixing a partial sum with a full one.
+            'qualified_leads': int(q_sum) if q_count == n else None,
+            'meetings_booked': int(mb), 'meetings_attended': int(ma),
+            'customers': int(cust), 'revenue': float(rev or 0),
+        }))
+    channels.sort(key=lambda c: list(BENCHMARK_CHANNELS).index(c['channel'])
+                  if c['channel'] in BENCHMARK_CHANNELS else 99)
+
+    prospecting = _channel_metrics({
+        'channel': 'prospecting', 'label': 'Prospecting (this platform)',
+        'spend': api_spend + extra_costs, 'api_spend': round(api_spend, 2), 'extra_costs': round(extra_costs, 2),
+        'leads': int(leads_total), 'qualified_leads': int(qualified),
+        'contacted': int(contacted), 'replied': int(replied), 'positive_responses': int(positive),
+        'meetings_booked': int(booked), 'meetings_attended': int(attended),
+        'customers': int(customers), 'revenue': float(revenue or 0),
+    })
+    return {'from': date_from, 'to': date_to, 'prospecting': prospecting,
+            'channels': channels, 'entries': entries,
+            'qualified_threshold_default': default_threshold}
+
+def save_channel_benchmark(body, tenant_id, username):
+    """Insert or update one channel figures row. tenant_id is the owner to
+    write as; updates only match a row owned by that tenant."""
+    channel = body.get('channel')
+    if channel not in BENCHMARK_CHANNELS:
+        return {'success': False, 'error': 'unknown channel'}
+    from datetime import date as _date
+    try:
+        start = _date.fromisoformat(str(body.get('period_start', '')))
+        end = _date.fromisoformat(str(body.get('period_end', '')))
+    except ValueError:
+        return {'success': False, 'error': 'period_start and period_end must be YYYY-MM-DD'}
+    if end < start:
+        return {'success': False, 'error': 'period_end is before period_start'}
+    nums = {}
+    for k in _BENCHMARK_NUMERIC:
+        raw = body.get(k)
+        if raw in (None, ''):
+            nums[k] = None if k == 'qualified_leads' else 0
+            continue
+        try:
+            v = float(raw)
+        except (TypeError, ValueError):
+            return {'success': False, 'error': f'{k} must be a number'}
+        if v < 0:
+            return {'success': False, 'error': f'{k} cannot be negative'}
+        nums[k] = round(v, 2) if k in ('spend', 'revenue') else int(v)
+    label = (body.get('label') or '').strip()[:120]
+    notes = (body.get('notes') or '').strip()[:2000]
+    conn = db_conn(); cur = conn.cursor()
+    if body.get('id'):
+        cur.execute("""UPDATE channel_benchmarks SET channel=%s, label=%s, period_start=%s, period_end=%s,
+                         spend=%s, leads=%s, qualified_leads=%s, meetings_booked=%s, meetings_attended=%s,
+                         customers=%s, revenue=%s, notes=%s
+                       WHERE id=%s AND tenant_id IS NOT DISTINCT FROM %s RETURNING id""",
+                    (channel, label, start, end, *[nums[k] for k in _BENCHMARK_NUMERIC], notes,
+                     body['id'], tenant_id))
+    else:
+        cur.execute("""INSERT INTO channel_benchmarks (tenant_id, channel, label, period_start, period_end,
+                         spend, leads, qualified_leads, meetings_booked, meetings_attended, customers,
+                         revenue, notes, created_by)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                    (tenant_id, channel, label, start, end, *[nums[k] for k in _BENCHMARK_NUMERIC],
+                     notes, username))
+    row = cur.fetchone()
+    conn.commit(); cur.close(); conn.close()
+    return {'success': True, 'id': row[0]} if row else {'success': False, 'error': 'Entry not found'}
+
+def icp_in_scope(icp_id, tenant_id):
+    """Like lead_in_scope() for ICP profiles: True for unscoped (admin) callers
+    or when the profile belongs to that tenant."""
+    if not tenant_id:
+        return True
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("SELECT 1 FROM icp_profiles WHERE id = %s AND tenant_id = %s", (icp_id, tenant_id))
+        ok = cur.fetchone() is not None
+        cur.close(); conn.close()
+        return ok
+    except Exception:
+        return False
+
 def approve_lead(lead_id):
     conn = db_conn(); cur = conn.cursor()
     cur.execute("UPDATE leads SET status='approved' WHERE id=%s", (lead_id,))
@@ -8040,7 +8507,10 @@ def get_lead_detail(lead_id, tenant_id=None):
                rs.status, rs.pain_points, rs.needs_summary, rs.recommended_angle,
                rs.reviews_summary, rs.tech_stack, rs.sources,
                to_char(rs.researched_at,'YYYY-MM-DD HH24:MI') as researched_at,
-               l.icp_score, l.score_breakdown, l.meeting_booked
+               l.icp_score, l.score_breakdown, l.meeting_booked,
+               l.meeting_attended, l.deal_stage, l.deal_value,
+               to_char(l.deal_closed_at,'YYYY-MM-DD'), l.outcome_notes,
+               to_char(l.meeting_booked_at,'YYYY-MM-DD')
         FROM leads l
         LEFT JOIN LATERAL (
             SELECT full_name, email, email_status, linkedin_url, job_title FROM contacts
@@ -8079,7 +8549,14 @@ def get_lead_detail(lead_id, tenant_id=None):
         },
         "icp_score": r[29],
         "score_breakdown": r[30] or {},
-        "meeting_booked": bool(r[31])
+        "meeting_booked": bool(r[31]),
+        "meeting_attended": r[32],
+        "deal_stage": r[33],
+        "deal_value": float(r[34]) if r[34] is not None else None,
+        "deal_closed_at": r[35],
+        "outcome_notes": r[36] or "",
+        "meeting_booked_at": r[37],
+        "campaign": get_lead_campaign(lead_id),
     }
 
 def regenerate_email_for_lead(lead_id, extra_instructions=""):
@@ -8094,6 +8571,7 @@ def regenerate_email_for_lead(lead_id, extra_instructions=""):
         detail["city"],
         detail["owner_name"],
         research=detail.get("research"),
+        campaign=get_lead_campaign(lead_id),
         force=True  # a manual per-lead regenerate should always run, regardless
                     # of the bulk pipeline's "Auto Email Copy" automation toggle
     )
@@ -8563,25 +9041,40 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
+        elif p == '/icp/templates':
+            self.send_json(200, {'templates': [
+                {'key': k, 'label': t['label'], 'industries': ', '.join(t['industries']),
+                 'decision_maker_titles': t['decision_maker_titles'], 'pain_hints': t['pain_hints'],
+                 'compliance_note': t['compliance_note'], 'min_lead_score': t['min_lead_score']}
+                for k, t in INDUSTRY_TEMPLATES.items()]})
+
         elif p == '/icp':
             try:
+                scope = self.scope_tenant()
                 conn = db_conn(); cur = conn.cursor()
                 cur.execute("""SELECT p.id, p.name, p.industries, p.geos, p.keywords, p.exclusions,
                                       p.source_mix, p.min_lead_score, p.push_to_crm, p.is_active,
                                       to_char(p.last_run_at,'YYYY-MM-DD HH24:MI'),
                                       (SELECT COUNT(*) FROM leads l WHERE l.icp_id=p.id),
                                       (SELECT COUNT(*) FROM leads l WHERE l.icp_id=p.id
-                                        AND COALESCE(l.icp_score, l.ai_score * 10, 0) >= p.min_lead_score)
-                               FROM icp_profiles p ORDER BY p.id DESC""")
+                                        AND COALESCE(l.icp_score, l.ai_score * 10, 0) >= p.min_lead_score),
+                                      p.offer, p.industry_template
+                               FROM icp_profiles p {where} ORDER BY p.id DESC""".format(
+                                   where="WHERE p.tenant_id = %s" if scope else ""),
+                            (scope,) if scope else ())
                 rows = cur.fetchall()
                 cur.execute("""SELECT r.icp_id, r.leads_found, r.leads_new, r.status,
                                       to_char(r.started_at,'YYYY-MM-DD HH24:MI')
-                               FROM icp_runs r ORDER BY r.id DESC LIMIT 20""")
+                               FROM icp_runs r JOIN icp_profiles p ON p.id = r.icp_id {where}
+                               ORDER BY r.id DESC LIMIT 20""".format(
+                                   where="WHERE p.tenant_id = %s" if scope else ""),
+                            (scope,) if scope else ())
                 runs = cur.fetchall(); cur.close(); conn.close()
                 self.send_json(200, {
                     'profiles': [dict(zip(['id','name','industries','geos','keywords','exclusions',
                                            'source_mix','min_lead_score','push_to_crm','is_active',
-                                           'last_run','lead_count','qualified_count'], r)) for r in rows],
+                                           'last_run','lead_count','qualified_count',
+                                           'offer','industry_template'], r)) for r in rows],
                     'recent_runs': [dict(zip(['icp_id','found','new','status','started'], r)) for r in runs],
                     'scheduler_enabled': bool(CONFIG.get('icp_scheduler_enabled', True)),
                 })
@@ -8785,6 +9278,41 @@ class Handler(BaseHTTPRequestHandler):
         elif p == '/outreach':
             try:
                 self.send_json(200, {'total': 0, 'log': get_outreach_log(100, self.scope_tenant())})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p == '/performance':
+            try:
+                from datetime import date as _date, timedelta as _td
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                try:
+                    date_to = _date.fromisoformat((qs.get('to') or [''])[0] or _date.today().isoformat())
+                    date_from = _date.fromisoformat((qs.get('from') or [''])[0]
+                                                    or (date_to - _td(days=29)).isoformat())
+                except ValueError:
+                    self.send_json(400, {'error': 'from/to must be YYYY-MM-DD'}); return
+                if date_from > date_to:
+                    self.send_json(400, {'error': 'from is after to'}); return
+                scope = self.scope_tenant()
+                tenants = None
+                if not scope:
+                    # Admin: platform-wide by default, or one company's view.
+                    conn = db_conn(); cur = conn.cursor()
+                    cur.execute("""SELECT t.id, t.name, string_agg(u.username, ', ' ORDER BY u.username)
+                                   FROM tenants t JOIN auth_users u ON u.tenant_id = t.id
+                                   GROUP BY t.id, t.name ORDER BY t.name""")
+                    tenants = [{'id': str(r[0]), 'name': r[1], 'users': r[2]} for r in cur.fetchall()]
+                    cur.close(); conn.close()
+                    wanted = (qs.get('tenant_id') or [''])[0]
+                    if wanted:
+                        if wanted not in {t['id'] for t in tenants}:
+                            self.send_json(404, {'error': 'unknown tenant'}); return
+                        scope = wanted
+                report = performance_report(scope, date_from.isoformat(), date_to.isoformat())
+                report['tenant_id'] = scope
+                report['tenants'] = tenants
+                report['channel_options'] = BENCHMARK_CHANNELS
+                self.send_json(200, report)
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
@@ -9252,6 +9780,30 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
+        elif p == '/performance/save':
+            try:
+                owner = self.scope_tenant()
+                if not owner:
+                    # Admin writes for the company it is viewing, else its own.
+                    owner = body.get('tenant_id') or get_user_tenant_id(self.current_username())
+                result = save_channel_benchmark(body, owner, self.current_username())
+                self.send_json(200 if result.get('success') else 400, result)
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p == '/performance/delete':
+            try:
+                scope = self.scope_tenant()
+                conn = db_conn(); cur = conn.cursor()
+                cur.execute("DELETE FROM channel_benchmarks WHERE id=%s {tc}".format(
+                                tc="AND tenant_id = %s" if scope else ""),
+                            (body.get('id'), scope) if scope else (body.get('id'),))
+                n = cur.rowcount
+                conn.commit(); cur.close(); conn.close()
+                self.send_json(200 if n else 404, {'success': bool(n)} if n else {'error': 'Entry not found'})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
         elif p == '/icp/save':
             try:
                 pid = body.get('id')
@@ -9259,12 +9811,24 @@ class Handler(BaseHTTPRequestHandler):
                                                    'source_mix','min_lead_score','push_to_crm','is_active')}
                 if not fields.get('name'):
                     self.send_json(400, {'error': 'name required'}); return
+                fields['offer'] = (body.get('offer') or '').strip()[:2000]
+                tpl = body.get('industry_template') or None
+                if tpl and tpl not in INDUSTRY_TEMPLATES:
+                    self.send_json(400, {'error': 'unknown industry_template'}); return
+                fields['industry_template'] = tpl
+                if pid and not icp_in_scope(pid, self.scope_tenant()):
+                    self.send_json(404, {'error': 'ICP not found'}); return
                 conn = db_conn(); cur = conn.cursor()
                 if pid:
                     sets = ', '.join(f"{k}=%s" for k in fields)
                     cur.execute(f"UPDATE icp_profiles SET {sets} WHERE id=%s",
                                 (*fields.values(), pid))
                 else:
+                    # New profiles belong to the creator's own company, so
+                    # their runs' leads land in that company's workspace.
+                    username = self.current_username()
+                    fields['tenant_id'] = get_user_tenant_id(username)
+                    fields['created_by'] = username
                     cols = ', '.join(fields); vals = ', '.join(['%s']*len(fields))
                     cur.execute(f"INSERT INTO icp_profiles ({cols}) VALUES ({vals}) RETURNING id",
                                 tuple(fields.values()))
@@ -9277,6 +9841,8 @@ class Handler(BaseHTTPRequestHandler):
         elif p == '/icp/delete':
             try:
                 pid = body.get('id')
+                if not icp_in_scope(pid, self.scope_tenant()):
+                    self.send_json(404, {'error': 'ICP not found'}); return
                 conn = db_conn(); cur = conn.cursor()
                 cur.execute("DELETE FROM icp_profiles WHERE id=%s", (pid,))
                 conn.commit(); cur.close(); conn.close()
@@ -9287,6 +9853,8 @@ class Handler(BaseHTTPRequestHandler):
         elif p == '/icp/run':
             try:
                 pid = body.get('id')
+                if not icp_in_scope(pid, self.scope_tenant()):
+                    self.send_json(404, {'error': 'ICP not found'}); return
                 job_id = f'job_{int(time.time() * 1000)}'
                 JOBS[job_id] = {'status': 'running', 'progress': 0, 'log': ['Starting ICP run…'], 'step': 'ICP Discovery'}
                 _bg_thread(run_icp_bg, job_id, pid)
@@ -9801,6 +10369,16 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
+        elif p.startswith('/lead/') and p.endswith('/outcome'):
+            try:
+                lead_id = p.split('/')[2]
+                if not lead_in_scope(lead_id, self.scope_tenant()):
+                    self.send_json(404, {'error': 'Lead not found'}); return
+                result = update_lead_outcome(lead_id, body)
+                self.send_json(200 if result.get('success') else 400, result)
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
         elif p.startswith('/lead/') and p.endswith('/approve'):
             try:
                 lead_id = p.split('/')[2]
@@ -9928,6 +10506,7 @@ if __name__ == '__main__':
         ensure_phase2_columns()
         ensure_sending_domains_table()
         ensure_workflow_tables()
+        ensure_m14_tables()
         print('Schema migration: OK')
     except Exception as e:
         print(f'Schema migration warning (non-fatal): {e}')

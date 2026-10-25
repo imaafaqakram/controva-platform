@@ -679,6 +679,32 @@ Pipeline counters (hot_leads, total, enriched, ready, with_email, cities, etc.).
 ### GET /stats-chart
 Time-series data for charts (leads_per_day, status_breakdown, niche_breakdown, city_breakdown, score_distribution).
 
+### GET /performance?from=YYYY-MM-DD&to=YYYY-MM-DD[&tenant_id=...]
+Prospecting KPIs vs the other lead channels (M14). Defaults to the last 30 days. Client accounts always get their own company; admin gets every company combined, or one with `tenant_id`.
+Returns `prospecting` and `channels[]` (each: spend, leads, qualified_leads, cost_per_lead, cost_per_qualified_lead, icp_match_pct, positive_response_rate, meetings_booked, attendance_rate, customers, lead_to_customer_rate, customer_acquisition_cost, revenue, revenue_per_spend), the raw `entries[]`, and for admin a `tenants[]` list.
+
+### POST /performance/save
+Add or update one period of figures for another channel.
+```json
+{"channel": "meta_ads", "period_start": "2026-10-01", "period_end": "2026-10-31",
+ "spend": 1000, "leads": 50, "qualified_leads": 20, "meetings_booked": 5,
+ "meetings_attended": 3, "customers": 2, "revenue": 8000, "label": "", "notes": ""}
+```
+`channel`: `meta_ads` | `google_ads` | `website` | `other` | `prospecting_costs` (extra prospecting spend, e.g. subscription). Pass `id` to update. Omit `qualified_leads` to treat every lead as qualified.
+
+### POST /performance/delete
+`{"id": 3}` — deletes one entry (clients: only their own company's).
+
+### POST /lead/{id}/outcome
+Record sales outcomes; only the keys you send change.
+```json
+{"meeting_booked": true, "meeting_attended": true, "deal_stage": "won", "deal_value": 5000, "notes": "12-month contract"}
+```
+`deal_stage`: `open` | `won` | `lost` | `null`. Won/lost stamps the close date (kept if re-saved with the same stage). `GET /lead/{id}` now also returns these fields plus `campaign` (offer + industry playbook in effect).
+
+### GET /icp/templates
+The industry playbooks (`construction_real_estate`, `banking_insurance`, `healthcare_clinics`) with industries, decision-maker titles, typical challenges and compliance notes. `POST /icp/save` accepts `offer` and `industry_template`.
+
 ---
 
 ## Static Files

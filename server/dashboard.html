@@ -4582,6 +4582,82 @@ const SettingsPage = () => {
 // ─────────────────────────────────────────────────
 //  Lead Detail Modal
 // ─────────────────────────────────────────────────
+// Sales outcome for one lead — feeds the Performance page (meetings
+// attended, customers won, revenue) so prospecting can be compared with ads.
+const LeadOutcomePanel = ({ lead, onSaved }) => {
+  const initial = () => ({
+    meeting_booked: !!lead.meeting_booked,
+    meeting_attended: lead.meeting_attended,
+    deal_stage: lead.deal_stage || '',
+    deal_value: lead.deal_value ?? '',
+    notes: lead.outcome_notes || '',
+  });
+  const [f, setF] = useState(initial);
+  const [saving, setSaving] = useState(false);
+  const { showToast } = useToast();
+  useEffect(() => { setF(initial()); }, [lead.id]);
+  const set = (k, v) => setF(prev => ({ ...prev, [k]: v }));
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      const r = await api.post('/lead/' + lead.id + '/outcome', {
+        ...f, deal_stage: f.deal_stage || null,
+        meeting_attended: f.meeting_booked ? f.meeting_attended : null,
+      });
+      if (r.success) { showToast('Outcome saved'); if (onSaved) onSaved(); }
+      else showToast('Save failed: ' + (r.error || ''), 'error');
+    } catch (e) { showToast('Save failed: ' + e.message, 'error'); }
+    setSaving(false);
+  };
+
+  const pill = (active, onClick, label) => (
+    <button type="button" onClick={onClick}
+      className={'px-2.5 py-1 rounded-md text-xs font-medium border ' + (active
+        ? 'bg-accent-50 dark:bg-accent-900/30 border-accent-400 text-accent-700 dark:text-accent-400'
+        : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700')}>
+      {label}
+    </button>
+  );
+
+  return (
+    <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg space-y-3">
+      <p className="text-xs text-slate-500 uppercase font-medium">Sales outcome</p>
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <span className="text-slate-500 w-20">Meeting</span>
+        {pill(!f.meeting_booked, () => set('meeting_booked', false), 'None')}
+        {pill(f.meeting_booked, () => set('meeting_booked', true), 'Booked')}
+        {lead.meeting_booked_at && <span className="text-slate-400">on {lead.meeting_booked_at}</span>}
+      </div>
+      {f.meeting_booked && (
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <span className="text-slate-500 w-20">Attended?</span>
+          {pill(f.meeting_attended == null, () => set('meeting_attended', null), 'Not yet')}
+          {pill(f.meeting_attended === true, () => set('meeting_attended', true), 'Attended')}
+          {pill(f.meeting_attended === false, () => set('meeting_attended', false), 'No-show')}
+        </div>
+      )}
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <span className="text-slate-500 w-20">Deal</span>
+        {pill(!f.deal_stage, () => set('deal_stage', ''), 'None')}
+        {pill(f.deal_stage === 'open', () => set('deal_stage', 'open'), 'Open')}
+        {pill(f.deal_stage === 'won', () => set('deal_stage', 'won'), 'Won')}
+        {pill(f.deal_stage === 'lost', () => set('deal_stage', 'lost'), 'Lost')}
+        {lead.deal_closed_at && <span className="text-slate-400">closed {lead.deal_closed_at}</span>}
+      </div>
+      {f.deal_stage && (
+        <div className="flex items-center gap-2 text-xs">
+          <span className="text-slate-500 w-20">Deal value</span>
+          <Input type="number" value={f.deal_value} onChange={v => set('deal_value', v)} placeholder="0.00" className="w-40" />
+        </div>
+      )}
+      <textarea value={f.notes} onChange={e => set('notes', e.target.value)} rows={2} placeholder="Notes (optional)"
+        className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-xs px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500" />
+      <Button size="sm" variant="primary" icon="Check" onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Save outcome'}</Button>
+    </div>
+  );
+};
+
 const LeadDetailModal = ({ leadId, onClose, onUpdate }) => {
   const [lead, setLead] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -4778,6 +4854,11 @@ const LeadDetailModal = ({ leadId, onClose, onUpdate }) => {
                 </div>
               </div>
 
+              <LeadOutcomePanel lead={lead} onSaved={() => {
+                api.get('/lead/' + leadId).then(d => setLead(l => ({ ...l, ...d }))).catch(() => {});
+                if (onUpdate) onUpdate();
+              }} />
+
               {/* AI Research */}
               <div>
                 <div className="flex items-center justify-between mb-2">
@@ -4903,11 +4984,14 @@ const LeadDetailModal = ({ leadId, onClose, onUpdate }) => {
 // ─────────────────────────────────────────────────
 //  ICP Page - Autonomous ideal-customer prospecting (M6)
 // ─────────────────────────────────────────────────
+const ICP_BLANK = { name: '', industries: '', geos: '', keywords: '', exclusions: '', source_mix: 'all', min_lead_score: 60, push_to_crm: false, is_active: true, offer: '', industry_template: '' };
+
 const ICPPage = ({ setPage }) => {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(null);   // null | {} | profile
   const [runJob, setRunJob] = useState(null);
+  const [templates, setTemplates] = useState([]);
   const { showToast } = useToast();
 
   const refresh = () => {
@@ -4915,6 +4999,12 @@ const ICPPage = ({ setPage }) => {
     api.get('/icp').then(d => { setData(d); setLoading(false); }).catch(() => setLoading(false));
   };
   useEffect(refresh, []);
+  useEffect(() => { api.get('/icp/templates').then(d => setTemplates(d.templates || [])).catch(() => {}); }, []);
+  const templateLabel = (key) => (templates.find(t => t.key === key) || {}).label;
+  const applyTemplate = (t) => setEditing(e => ({
+    ...e, industry_template: t.key, industries: t.industries, min_lead_score: t.min_lead_score,
+    name: e.name || t.label,
+  }));
 
   useEffect(() => {
     if (!runJob) return;
@@ -4964,7 +5054,7 @@ const ICPPage = ({ setPage }) => {
             {data && data.scheduler_enabled ? ' · scheduler ON' : ' · scheduler OFF (Settings)'}
           </p>
         </div>
-        <Button variant="primary" icon="Plus" onClick={() => setEditing({ name: '', industries: '', geos: '', keywords: '', exclusions: '', source_mix: 'all', min_lead_score: 60, push_to_crm: false, is_active: true })}>
+        <Button variant="primary" icon="Plus" onClick={() => setEditing({ ...ICP_BLANK })}>
           New ICP
         </Button>
       </div>
@@ -4996,7 +5086,7 @@ const ICPPage = ({ setPage }) => {
           <Icon name="Target" className="w-12 h-12 mx-auto mb-3 opacity-30" />
           <p className="font-medium">No ICPs yet</p>
           <p className="text-sm mt-1">Create one: "Dental clinics — Dubai, Abu Dhabi" and watch leads arrive daily.</p>
-          <Button variant="primary" className="mt-4" onClick={() => setEditing({ name: '', industries: '', geos: '', keywords: '', exclusions: '', source_mix: 'all', min_lead_score: 60, push_to_crm: false, is_active: true })}>Create your first ICP</Button>
+          <Button variant="primary" className="mt-4" onClick={() => setEditing({ ...ICP_BLANK })}>Create your first ICP</Button>
         </div></Card>
       ) : (
         <div className="grid gap-4 md:grid-cols-2">
@@ -5008,6 +5098,10 @@ const ICPPage = ({ setPage }) => {
                   <p className="text-xs text-slate-500 mt-0.5 truncate">
                     {pr.industries} · {pr.geos}
                   </p>
+                  {pr.industry_template && <p className="mt-1"><Badge variant="info">{templateLabel(pr.industry_template) || pr.industry_template}</Badge></p>}
+                  {pr.offer
+                    ? <p className="text-[11px] text-slate-500 mt-1 line-clamp-2" title={pr.offer}>Selling: {pr.offer}</p>
+                    : <p className="text-[11px] text-amber-600 mt-1">No offer set — emails use the default website-mockup pitch</p>}
                   {!pr.is_active && <p className="text-[11px] text-slate-400 mt-0.5">Won't run on the daily schedule — Run Now still works</p>}
                 </div>
                 <Badge variant={pr.is_active ? 'success' : 'grey'}>{pr.is_active ? 'Auto-run: Active' : 'Auto-run: Paused'}</Badge>
@@ -5058,12 +5152,46 @@ const ICPPage = ({ setPage }) => {
           <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-sm p-5 w-full max-w-lg max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
             <h3 className="font-semibold mb-4">{p.id ? 'Edit ICP' : 'New ICP'}</h3>
             <div className="space-y-3">
+              {templates.length > 0 && (
+                <div>
+                  <label className="text-xs font-medium text-slate-500 block mb-1">Industry playbook</label>
+                  <div className="flex flex-wrap gap-2">
+                    {templates.map(t => (
+                      <button key={t.key} type="button" onClick={() => applyTemplate(t)}
+                        className={'px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ' + (p.industry_template === t.key
+                          ? 'bg-accent-50 dark:bg-accent-900/30 border-accent-400 text-accent-700 dark:text-accent-400'
+                          : 'border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800')}>
+                        {t.label}
+                      </button>
+                    ))}
+                    {p.industry_template && (
+                      <button type="button" onClick={() => setF('industry_template', '')} className="px-2 text-xs text-slate-400 hover:text-slate-600">None</button>
+                    )}
+                  </div>
+                  {(() => {
+                    const t = templates.find(x => x.key === p.industry_template);
+                    if (!t) return <p className="text-[11px] text-slate-400 mt-1">Picking one fills in the industries and tunes research, decision-maker search and email copy for that market.</p>;
+                    return (
+                      <div className="text-[11px] text-slate-500 mt-2 space-y-0.5 bg-slate-50 dark:bg-slate-800 rounded-lg p-2">
+                        <div><span className="font-medium">Decision-makers searched:</span> {t.decision_maker_titles.join(', ')}</div>
+                        <div><span className="font-medium">Typical challenges:</span> {t.pain_hints.join('; ')}</div>
+                        {t.compliance_note && <div className="text-amber-700 dark:text-amber-400"><span className="font-medium">Compliance:</span> {t.compliance_note}</div>}
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
               <div><label className="text-xs font-medium text-slate-500 block mb-1">Profile name</label>
                 <Input value={p.name || ''} onChange={v => setF('name', v)} placeholder="Dental clinics — UAE" /></div>
               <div><label className="text-xs font-medium text-slate-500 block mb-1">Industries (comma separated)</label>
                 <Input value={p.industries || ''} onChange={v => setF('industries', v)} placeholder="dental clinics, vet clinics" /></div>
               <div><label className="text-xs font-medium text-slate-500 block mb-1">Locations ("City CC" comma separated)</label>
                 <Input value={p.geos || ''} onChange={v => setF('geos', v)} placeholder="Dubai AE, Abu Dhabi AE, London GB" /></div>
+              <div><label className="text-xs font-medium text-slate-500 block mb-1">What you sell to these companies</label>
+                <textarea value={p.offer || ''} onChange={e => setF('offer', e.target.value)} rows={2}
+                  placeholder="e.g. An AI receptionist that answers calls 24/7 and fills cancelled appointment slots"
+                  className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg text-sm px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500" />
+                <p className="text-[11px] text-slate-400 mt-1">Outreach emails and AI scoring for this ICP's leads pitch this. Leave blank to keep the default website-mockup pitch.</p></div>
               <div><label className="text-xs font-medium text-slate-500 block mb-1">Extra keywords (optional)</label>
                 <Input value={p.keywords || ''} onChange={v => setF('keywords', v)} placeholder="implants, cosmetic" /></div>
               <div><label className="text-xs font-medium text-slate-500 block mb-1">Exclusions (optional)</label>
@@ -5829,6 +5957,247 @@ const AnalyticsPage = () => {
 };
 
 // ─────────────────────────────────────────────────
+//  Performance (M14) — prospecting vs the client's other lead channels,
+//  on the brief's KPIs: cost per qualified lead, ICP match, positive
+//  replies, meetings, attendance, conversion, CAC and revenue.
+// ─────────────────────────────────────────────────
+const PERF_METRICS = [
+  { key: 'spend',                     label: 'Spend',                       fmt: 'money' },
+  { key: 'leads',                     label: 'Leads',                       fmt: 'int' },
+  { key: 'qualified_leads',           label: 'Qualified leads',             fmt: 'int' },
+  { key: 'icp_match_pct',             label: 'Match ideal customer profile', fmt: 'pct',  better: 'high' },
+  { key: 'cost_per_lead',             label: 'Cost per lead',               fmt: 'money', better: 'low' },
+  { key: 'cost_per_qualified_lead',   label: 'Cost per qualified lead',     fmt: 'money', better: 'low' },
+  { key: 'positive_response_rate',    label: 'Positive response rate',      fmt: 'pct',   better: 'high' },
+  { key: 'meetings_booked',           label: 'Meetings booked',             fmt: 'int' },
+  { key: 'attendance_rate',           label: 'Meeting attendance rate',     fmt: 'pct',   better: 'high' },
+  { key: 'customers',                 label: 'Customers won',               fmt: 'int' },
+  { key: 'lead_to_customer_rate',     label: 'Qualified lead → customer',   fmt: 'pct',   better: 'high' },
+  { key: 'customer_acquisition_cost', label: 'Customer acquisition cost',   fmt: 'money', better: 'low' },
+  { key: 'revenue',                   label: 'Revenue',                     fmt: 'money' },
+  { key: 'revenue_per_spend',         label: 'Revenue per $1 spent',        fmt: 'x',     better: 'high' },
+];
+
+const fmtPerf = (v, fmt) => {
+  if (v === null || v === undefined) return '—';
+  const n = Number(v);
+  if (fmt === 'money') return '$' + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (fmt === 'pct') return n.toFixed(1) + '%';
+  if (fmt === 'x') return n.toFixed(2) + '×';
+  return n.toLocaleString();
+};
+
+const isoDay = (d) => d.toISOString().slice(0, 10);
+const daysAgo = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return isoDay(d); };
+
+const BENCH_BLANK = { channel: 'meta_ads', label: '', period_start: '', period_end: '', spend: '', leads: '', qualified_leads: '', meetings_booked: '', meetings_attended: '', customers: '', revenue: '', notes: '' };
+
+const PerformancePage = () => {
+  const [range, setRange] = useState({ from: daysAgo(29), to: isoDay(new Date()) });
+  const [tenantId, setTenantId] = useState('');
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [editing, setEditing] = useState(null);
+  const { showToast } = useToast();
+
+  const refresh = () => {
+    setLoading(true);
+    const qs = '?from=' + range.from + '&to=' + range.to + (tenantId ? '&tenant_id=' + tenantId : '');
+    api.get('/performance' + qs)
+      .then(d => { setData(d); setLoading(false); })
+      .catch(e => { showToast('Failed to load: ' + e.message, 'error'); setLoading(false); });
+  };
+  useEffect(refresh, [range.from, range.to, tenantId]);
+
+  const save = async () => {
+    try {
+      const r = await api.post('/performance/save', { ...editing, tenant_id: tenantId || undefined });
+      if (r.success) { showToast('Figures saved'); setEditing(null); refresh(); }
+      else showToast('Save failed: ' + (r.error || ''), 'error');
+    } catch (e) { showToast('Save failed: ' + e.message, 'error'); }
+  };
+  const del = async (e) => {
+    if (!confirm('Delete these ' + (data.channel_options[e.channel] || e.channel) + ' figures?')) return;
+    try { await api.post('/performance/delete', { id: e.id }); refresh(); }
+    catch (err) { showToast('Delete failed: ' + err.message, 'error'); }
+  };
+
+  const columns = data ? [data.prospecting, ...data.channels] : [];
+  // Highlight the best value in each efficiency row (raw totals mostly
+  // reflect how much was spent, so they aren't ranked), when there's a comparison.
+  const bestIndex = (m) => {
+    if (!m.better) return -1;
+    const vals = columns.map(c => c[m.key]);
+    const present = vals.filter(v => v !== null && v !== undefined);
+    if (present.length < 2) return -1;
+    const target = m.better === 'low' ? Math.min(...present) : Math.max(...present);
+    return vals.indexOf(target);
+  };
+  const quick = [['30 days', 29], ['90 days', 89], ['12 months', 364]];
+  const e = editing || {};
+  const setE = (k, v) => setEditing({ ...e, [k]: v });
+  const numField = (k, label, placeholder = '0') => (
+    <div><label className="text-xs font-medium text-slate-500 block mb-1">{label}</label>
+      <Input type="number" value={e[k] ?? ''} onChange={v => setE(k, v)} placeholder={placeholder} /></div>
+  );
+
+  return (
+    <div className="space-y-6 fade-in">
+      <div className="flex items-start justify-between flex-wrap gap-3">
+        <div>
+          <h1 className="text-2xl font-bold">Performance</h1>
+          <p className="text-sm text-slate-500 mt-1">Prospecting compared with your other lead channels</p>
+        </div>
+        <Button variant="primary" icon="Plus" onClick={() => setEditing({ ...BENCH_BLANK, period_start: range.from, period_end: range.to })}>
+          Add channel figures
+        </Button>
+      </div>
+
+      <Card>
+        <div className="flex flex-wrap items-end gap-3">
+          <div><label className="text-xs font-medium text-slate-500 block mb-1">From</label>
+            <Input type="date" value={range.from} onChange={v => v && setRange({ ...range, from: v })} /></div>
+          <div><label className="text-xs font-medium text-slate-500 block mb-1">To</label>
+            <Input type="date" value={range.to} onChange={v => v && setRange({ ...range, to: v })} /></div>
+          <div className="flex gap-1">
+            {quick.map(([label, n]) => (
+              <Button key={label} size="sm" variant="ghost" onClick={() => setRange({ from: daysAgo(n), to: isoDay(new Date()) })}>{label}</Button>
+            ))}
+          </div>
+          {data && data.tenants && (
+            <div className="ml-auto"><label className="text-xs font-medium text-slate-500 block mb-1">Company</label>
+              <select value={tenantId} onChange={ev => setTenantId(ev.target.value)}
+                className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm max-w-[16rem]">
+                <option value="">All companies</option>
+                {data.tenants.map(t => <option key={t.id} value={t.id}>{t.users}</option>)}
+              </select></div>
+          )}
+        </div>
+      </Card>
+
+      {loading && !data ? (
+        <div className="py-16 text-center"><Spinner size="w-6 h-6" /></div>
+      ) : data && (
+        <>
+          <Card noPad>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-slate-200 dark:border-slate-800">
+                    <th className="text-left font-medium text-slate-500 text-xs uppercase px-4 py-3">Metric</th>
+                    {columns.map(c => (
+                      <th key={c.channel} className={'text-right font-semibold px-4 py-3 whitespace-nowrap ' + (c.channel === 'prospecting' ? 'text-accent-700 dark:text-accent-400' : '')}>
+                        {c.label}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {PERF_METRICS.map(m => {
+                    const best = bestIndex(m);
+                    return (
+                      <tr key={m.key} className="border-b border-slate-100 dark:border-slate-800/60 last:border-0">
+                        <td className="px-4 py-2.5 text-slate-600 dark:text-slate-400 whitespace-nowrap">{m.label}</td>
+                        {columns.map((c, i) => (
+                          <td key={c.channel} className={'px-4 py-2.5 text-right font-mono whitespace-nowrap ' + (i === best ? 'text-green-600 dark:text-green-400 font-semibold' : '')}>
+                            {fmtPerf(c[m.key], m.fmt)}
+                          </td>
+                        ))}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </Card>
+
+          <div className="text-xs text-slate-500 space-y-1">
+            <p>
+              Prospecting spend = {fmtPerf(data.prospecting.api_spend, 'money')} logged API cost
+              {data.prospecting.extra_costs > 0 && <> + {fmtPerf(data.prospecting.extra_costs, 'money')} extra costs you entered</>}.
+              Prospecting replies: {data.prospecting.positive_responses} positive of {data.prospecting.replied} replies from {data.prospecting.contacted} leads emailed.
+            </p>
+            <p>
+              A qualified lead scores at least its ICP's threshold (default {data.qualified_threshold_default}/100). Conversion is measured from qualified leads so every channel compares like for like.
+              Other channels use the figures you enter below; an entry whose period overlaps the date range counts in full, so enter them month by month.
+              {columns.length === 1 && ' Add your Meta Ads, Google Ads or website figures to see the comparison.'}
+            </p>
+          </div>
+
+          <Card>
+            <h3 className="font-semibold mb-3 text-sm">Channel figures in this range</h3>
+            {data.entries.length === 0 ? (
+              <p className="text-sm text-slate-500 py-4 text-center">None yet. Use “Add channel figures” to enter what your ads and website produced.</p>
+            ) : (
+              <div className="space-y-1.5">
+                {data.entries.map(en => (
+                  <div key={en.id} className="flex flex-wrap items-center gap-x-4 gap-y-1 bg-slate-50 dark:bg-slate-800 rounded-lg px-3 py-2 text-xs">
+                    <span className="font-medium min-w-[10rem]">{data.channel_options[en.channel] || en.channel}{en.label ? ' · ' + en.label : ''}</span>
+                    <span className="text-slate-500 font-mono">{en.period_start} → {en.period_end}</span>
+                    <span>{fmtPerf(en.spend, 'money')} spend</span>
+                    {en.channel !== 'prospecting_costs' && <>
+                      <span>{en.leads} lead{en.leads === 1 ? '' : 's'}</span>
+                      <span>{en.customers} customer{en.customers === 1 ? '' : 's'}</span>
+                      <span>{fmtPerf(en.revenue, 'money')} revenue</span>
+                    </>}
+                    <span className="ml-auto flex gap-1">
+                      <Button size="sm" variant="ghost" icon="Edit3" onClick={() => setEditing({ ...en, qualified_leads: en.qualified_leads ?? '' })}> </Button>
+                      <Button size="sm" variant="ghost" className="text-red-500" icon="Trash2" onClick={() => del(en)}> </Button>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
+        </>
+      )}
+
+      {editing && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={() => setEditing(null)}>
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-sm p-5 w-full max-w-lg max-h-[90vh] overflow-y-auto" onClick={ev => ev.stopPropagation()}>
+            <h3 className="font-semibold mb-4">{e.id ? 'Edit channel figures' : 'Add channel figures'}</h3>
+            <div className="space-y-3">
+              <div><label className="text-xs font-medium text-slate-500 block mb-1">Channel</label>
+                <select value={e.channel} onChange={ev => setE('channel', ev.target.value)}
+                  className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm">
+                  {Object.entries(data?.channel_options || {}).map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+                </select>
+                {e.channel === 'prospecting_costs' && <p className="text-[11px] text-slate-400 mt-1">Costs of prospecting beyond API usage (subscription, staff time). Added to the prospecting column's spend.</p>}
+              </div>
+              <div><label className="text-xs font-medium text-slate-500 block mb-1">Label (optional)</label>
+                <Input value={e.label || ''} onChange={v => setE('label', v)} placeholder={e.channel === 'prospecting_costs' ? 'Platform subscription' : 'Spring campaign'} /></div>
+              <div className="grid grid-cols-2 gap-3">
+                <div><label className="text-xs font-medium text-slate-500 block mb-1">Period start</label>
+                  <Input type="date" value={e.period_start || ''} onChange={v => setE('period_start', v)} /></div>
+                <div><label className="text-xs font-medium text-slate-500 block mb-1">Period end</label>
+                  <Input type="date" value={e.period_end || ''} onChange={v => setE('period_end', v)} /></div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                {numField('spend', e.channel === 'prospecting_costs' ? 'Cost ($)' : 'Spend ($)')}
+                {e.channel !== 'prospecting_costs' && <>
+                  {numField('leads', 'Leads')}
+                  {numField('qualified_leads', 'Qualified leads', 'same as leads')}
+                  {numField('meetings_booked', 'Meetings booked')}
+                  {numField('meetings_attended', 'Meetings attended')}
+                  {numField('customers', 'Customers won')}
+                  {numField('revenue', 'Revenue ($)')}
+                </>}
+              </div>
+              <div><label className="text-xs font-medium text-slate-500 block mb-1">Notes (optional)</label>
+                <Input value={e.notes || ''} onChange={v => setE('notes', v)} /></div>
+            </div>
+            <div className="flex gap-2 mt-5">
+              <Button variant="primary" onClick={save}>{e.id ? 'Save' : 'Add'}</Button>
+              <Button variant="ghost" onClick={() => setEditing(null)}>Cancel</Button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────
 //  Auth: Login Screen
 // ─────────────────────────────────────────────────
 const LoginScreen = ({ onLogin }) => {
@@ -5924,6 +6293,7 @@ const App = ({ role = 'admin' }) => {
     { id: 'outreach',  label: 'Email & Outreach', icon: 'Send' },
     { id: 'workflows', label: 'Workflows', icon: 'Repeat' },
     { id: 'analytics', label: 'Analytics', icon: 'Activity' },
+    { id: 'performance', label: 'Performance', icon: 'BarChart3' },
     { section: 'Research Tools' },
     { id: 'seo',         label: 'SEO',         icon: 'TrendingUp' },
     { id: 'competitor',  label: 'Competitors', icon: 'Target' },
@@ -5949,6 +6319,7 @@ const App = ({ role = 'admin' }) => {
   else if (page === 'workflows') CurrentPage = WorkflowsPage;
   else if (page === 'outreach') CurrentPage = OutreachPage;
   else if (page === 'analytics') CurrentPage = AnalyticsPage;
+  else if (page === 'performance') CurrentPage = PerformancePage;
   else if (page === 'intent') CurrentPage = IntentPage;
   else if (page === 'activity' && isAdmin) CurrentPage = ActivityLogPage;
   else if (page === 'n8n' && isAdmin) CurrentPage = N8nWorkflowsPage;

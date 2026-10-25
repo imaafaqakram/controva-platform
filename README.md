@@ -38,14 +38,15 @@ real Pipedrive/Calendly accounts.
 12. [Multi-Domain Sending & Outreach Automation (M11)](#multi-domain-sending--outreach-automation-m11)
 13. [Activity Log (M12)](#activity-log-m12)
 14. [Workflow Builder & N8N (M13)](#workflow-builder--n8n-m13)
-15. [Deployment & CI/CD](#deployment--cicd)
-16. [Configuration & API Keys](#configuration--api-keys)
-17. [Architecture](#architecture)
-18. [Database Schema](#database-schema)
-19. [Troubleshooting](#troubleshooting)
-20. [User Roles](#user-roles)
-21. [Security Checklist](#security-checklist)
-22. [Changelog](#changelog)
+15. [Industry Playbooks, Outcomes & Channel Performance (M14)](#industry-playbooks-outcomes--channel-performance-m14)
+16. [Deployment & CI/CD](#deployment--cicd)
+17. [Configuration & API Keys](#configuration--api-keys)
+18. [Architecture](#architecture)
+19. [Database Schema](#database-schema)
+20. [Troubleshooting](#troubleshooting)
+21. [User Roles](#user-roles)
+22. [Security Checklist](#security-checklist)
+23. [Changelog](#changelog)
 
 ---
 
@@ -60,6 +61,7 @@ Controva is a full B2B lead generation pipeline, self-hosted on your own VPS:
 | **Qualify** *(M8)* | Composite scoring: ICP fit × detected need × intent, with full breakdown |
 | **CRM** *(M9)* | Qualified opportunities pushed to Pipedrive or any signed webhook (Zapier/n8n/GoHighLevel) automatically |
 | **Phase 2** *(M10)* | Replies classified by AI, meeting booking via Calendly, extra decision-makers captured, white-label branding, daily digest email |
+| **Measure** *(M14)* | Industry playbooks (Construction & Real Estate, Banking & Insurance, Healthcare), the client's own offer in every email, meeting/deal outcomes per lead, and a Performance page comparing prospecting with Meta Ads, Google Ads and website leads |
 | **Search** | Type "pest control companies in New Jersey" — AI parses it, searches 4 sources simultaneously |
 | **Discover** | Finds businesses via Google Places, OpenStreetMap, and HERE Maps |
 | **Verify** | Checks whether each business actually has a live website |
@@ -468,6 +470,36 @@ Natural fast-follows if needed.
 
 ---
 
+## Industry Playbooks, Outcomes & Channel Performance (M14)
+
+Built for the *B2B Prospecting Bot* product brief: prospecting is sold to companies in three
+target markets as an additional lead source next to paid ads and website forms, and has to prove
+itself on real results.
+
+| Capability | Configure | What happens |
+|---|---|---|
+| **Industry playbooks** | ICP → New ICP → pick *Construction & Real Estate*, *Banking & Insurance* or *Healthcare — Clinics & Medical Practices* | Fills in the industries to search and a qualification threshold, and tunes the rest of the pipeline for that market: the decision-maker titles searched for (e.g. Practice Manager, Agency Principal), what AI research looks for, and the industry's typical challenges. Banking & Insurance and Healthcare also carry a compliance rule into every research, scoring and email prompt (no rate/return claims; never collect or mention patient data). |
+| **What you sell** | ICP → *What you sell to these companies* | The client's own offer. Emails, follow-ups and AI scoring for that ICP's leads pitch it instead of the original "no website → free mockup" angle. Leave it blank and nothing changes for that ICP. |
+| **Sales outcomes** | Leads → open a lead → *Sales outcome* | Record meeting booked / attended / no-show, deal open / won / lost, deal value and notes. Calendly bookings (M10) still set *Meeting booked* automatically. |
+| **Performance page** | Nav → **Performance** | The brief's KPIs, prospecting vs every other channel side by side: cost per lead and per qualified lead, % matching the ICP, positive response rate, meetings booked, attendance rate, qualified-lead→customer rate, customer acquisition cost, revenue and revenue per $1 spent. Best value in each efficiency row is highlighted. |
+| **Other channels' figures** | Performance → *Add channel figures* | Enter what Meta Ads, Google Ads, website forms or another channel produced for a period (spend, leads, qualified, meetings, customers, revenue). *Prospecting — extra costs* adds subscription or staff time to prospecting's spend on top of logged API cost. |
+
+How the numbers are computed:
+- **Prospecting** is live data for the date range: leads created, qualified = score ≥ the lead's ICP
+  threshold (default 60/100), emails sent / replies / *interested* replies, meetings by booking
+  date, deals won by close date. Spend = API cost logged by the company's own users + extra costs.
+- **Conversion** is measured from *qualified* leads for every channel, because a discovered business
+  isn't comparable to an inbound inquiry but a qualified lead is.
+- **Other channels**: an entry whose period overlaps the range counts in full, so enter them monthly.
+- **Who sees what**: client accounts see only their own company. The admin sees every company
+  combined, or picks one company from the selector.
+
+ICP profiles now belong to the company that created them: client accounts only see, edit and run
+their own, and an ICP run's leads land in that company's workspace (previously they were saved with
+no owner, so client accounts never saw them).
+
+---
+
 ## Deployment & CI/CD
 
 ### Auto-deploy (GitHub Actions)
@@ -722,6 +754,17 @@ Before going to production:
 ---
 
 ## Changelog
+
+### v8.5 — October 2026 (M14)
+
+**New features**
+- **Industry playbooks** for Construction & Real Estate, Banking & Insurance and Healthcare — Clinics & Medical Practices: industries, decision-maker titles, research focus, typical challenges and compliance rules.
+- **Per-ICP offer** ("what you sell") used by email copy, follow-ups and AI scoring instead of the website-mockup pitch.
+- **Sales outcomes per lead**: meeting attended / no-show, deal stage, deal value, notes.
+- **Performance page**: prospecting vs Meta Ads / Google Ads / website / other channels on cost per qualified lead, ICP match, positive response rate, meetings, attendance, conversion, CAC and revenue.
+
+**Bug fixes**
+- **ICP profiles were shared across every client account** and an ICP run's leads were saved with no company, so clients never saw them. Profiles now have an owner. Clients only see and run their own, and runs tag leads with the ICP owner's company. Scheduled runs now record their API cost under the ICP's creator.
 
 ### v8.4 — September 2026 (M13 workflow nodes + polling fix)
 
