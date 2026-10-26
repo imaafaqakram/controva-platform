@@ -6187,6 +6187,10 @@ never invent one."""
     except Exception as e:
         print(f'[research] synthesis failed for {business_name}: {e}')
 
+    if campaign and campaign.get('minimize_personal_data'):
+        # Data minimisation (healthcare): keep only the business-level
+        # conclusions, not the raw review text they were drawn from.
+        reviews_summary = 'Not stored: review text can contain patient information.' if reviews_summary else ''
     conn = db_conn(); cur = conn.cursor()
     cur.execute("""
         UPDATE lead_research SET status='completed', web_findings=%s, reviews_summary=%s,
@@ -8253,6 +8257,9 @@ INDUSTRY_TEMPLATES = {
         'compliance_note': 'Healthcare business: never collect, infer or mention patient information or health '
                            'data. Use business-level facts only (services, locations, staffing, public reviews '
                            'of the practice as a business).',
+        # Review text about a clinic can describe patients' treatment, so it is
+        # used for the AI's analysis but never stored (see research_lead).
+        'minimize_personal_data': True,
         'min_lead_score': 60,
     },
 }
@@ -8302,6 +8309,7 @@ def get_lead_campaign(lead_id):
         'pain_hints': tpl['pain_hints'] if tpl else [],
         'research_focus': tpl['research_focus'] if tpl else '',
         'compliance': tpl['compliance_note'] if tpl else '',
+        'minimize_personal_data': bool(tpl and tpl.get('minimize_personal_data')),
     }
 
 def _campaign_block(campaign):
@@ -8991,6 +8999,45 @@ def run_company_digest(tenant_id, recipient):
         lines += ['', f"{ready} leads have email copy ready — review and send them in Email & Outreach."]
     return send_email_via_resend(recipient, f'{brand} daily prospecting digest', '\n'.join(lines),
                                  skip_footer=True)
+
+def ensure_data_erasure_table():
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS data_erasures (
+            id            SERIAL PRIMARY KEY,
+            tenant_id     UUID,
+            business_hash VARCHAR(64),
+            emails_suppressed INT NOT NULL DEFAULT 0,
+            erased_by     VARCHAR(100),
+            erased_at     TIMESTAMPTZ DEFAULT NOW()
+        )""")
+    conn.commit(); cur.close(); conn.close()
+
+def erase_lead_personal_data(lead_id, erased_by=None):
+    """Right to erasure: suppress every email we hold for this lead (so it is
+    never contacted again, by any company on the platform), then delete the
+    lead with its contacts, research, emails and outreach history. Leaves an
+    audit row with a hash, not the data."""
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("SELECT business_name, tenant_id FROM leads WHERE id = %s", (lead_id,))
+    row = cur.fetchone()
+    if not row:
+        cur.close(); conn.close()
+        return {'success': False, 'error': 'Lead not found'}
+    name, tenant_id = row
+    cur.execute("""SELECT DISTINCT LOWER(email) FROM contacts WHERE lead_id = %s AND COALESCE(email,'') <> ''
+                   UNION SELECT DISTINCT LOWER(email_to) FROM outreach_log WHERE lead_id = %s""", (lead_id, lead_id))
+    emails = [r[0] for r in cur.fetchall() if r[0]]
+    cur.close(); conn.close()
+    for e in emails:
+        add_suppression(e, 'erasure', None, 'personal data erased on request')
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("DELETE FROM leads WHERE id = %s", (lead_id,))
+    cur.execute("""INSERT INTO data_erasures (tenant_id, business_hash, emails_suppressed, erased_by)
+                   VALUES (%s, %s, %s, %s)""",
+                (tenant_id, hashlib.sha256((name or '').encode()).hexdigest(), len(emails), erased_by))
+    conn.commit(); cur.close(); conn.close()
+    return {'success': True, 'emails_suppressed': len(emails)}
 
 def approve_lead(lead_id):
     conn = db_conn(); cur = conn.cursor()
@@ -11149,6 +11196,16 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
+        elif p.startswith('/lead/') and p.endswith('/erase'):
+            try:
+                lead_id = p.split('/')[2]
+                if not lead_in_scope(lead_id, self.scope_tenant()):
+                    self.send_json(404, {'error': 'Lead not found'}); return
+                result = erase_lead_personal_data(lead_id, self.current_username())
+                self.send_json(200 if result.get('success') else 404, result)
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
         elif p.startswith('/lead/') and p.endswith('/outcome'):
             try:
                 lead_id = p.split('/')[2]
@@ -11289,6 +11346,7 @@ if __name__ == '__main__':
         ensure_workflow_tables()
         ensure_m14_tables()
         ensure_m15_tables()
+        ensure_data_erasure_table()
         print('Schema migration: OK')
     except Exception as e:
         print(f'Schema migration warning (non-fatal): {e}')

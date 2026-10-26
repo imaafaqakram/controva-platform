@@ -4781,6 +4781,14 @@ const LeadDetailModal = ({ leadId, onClose, onUpdate }) => {
     try { await api.post('/lead/' + leadId + '/approve', {}); showToast('Approved'); if (onUpdate) onUpdate(); }
     catch (e) { showToast('Failed', 'error'); }
   };
+  const erase = async () => {
+    if (!confirm('Erase all personal data for ' + lead.business_name + '?\n\nIts emails are added to the do-not-contact list, then the lead, its contacts, research and email history are permanently deleted. This cannot be undone.')) return;
+    try {
+      const r = await api.post('/lead/' + leadId + '/erase', {});
+      if (r.success) { showToast('Erased — ' + r.emails_suppressed + ' email(s) will never be contacted again'); if (onUpdate) onUpdate(); onClose(); }
+      else showToast('Failed: ' + (r.error || ''), 'error');
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+  };
   const reject = async () => {
     if (!confirm('Reject this lead?')) return;
     try { await api.post('/lead/' + leadId + '/reject', {}); showToast('Rejected'); if (onUpdate) onUpdate(); onClose(); }
@@ -5008,6 +5016,7 @@ const LeadDetailModal = ({ leadId, onClose, onUpdate }) => {
                 </Button>
                 <Button onClick={approve} variant="primary" icon="Check">Approve</Button>
                 <Button onClick={reject} variant="danger" icon="XCircle">Reject</Button>
+                <Button onClick={erase} variant="ghost" icon="Trash2" className="ml-auto text-red-500">Erase personal data</Button>
               </div>
             </div>
           </>
