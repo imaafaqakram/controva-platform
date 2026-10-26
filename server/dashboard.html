@@ -166,6 +166,7 @@ const ICONS = {
   History:       'M3 3v5h5M3.05 13A9 9 0 1015 4M12 7v5l3 2',
   Link2:         'M9 17H7A5 5 0 017 7h2M15 7h2a5 5 0 010 10h-2M8 12h8',
   Building2:     'M3 21h18M5 21V7l7-4 7 4v14M9 9h6M9 13h6M9 17h6',
+  Calendar:      'M8 2v4M16 2v4M3 10h18M5 4h14a2 2 0 012 2v14a2 2 0 01-2 2H5a2 2 0 01-2-2V6a2 2 0 012-2z',
   User:          'M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2M16 7a4 4 0 11-8 0 4 4 0 018 0z',
   CheckCircle2:  'M22 11.08V12a10 10 0 11-5.93-9.14M22 4L12 14.01l-3-3',
   Tag:           'M20.59 13.41L13.42 20.58a2 2 0 01-2.83 0L2 12V2h10l8.59 8.59a2 2 0 010 2.82zM7 7h.01',
@@ -3877,17 +3878,23 @@ const IntentPage = () => {
   );
 };
 
-const CrmConnectionsEditor = () => {
+// tenantId (Company page) = only that company's connections, new ones are
+// created for it; without it (admin Settings) every connection, labelled.
+const CrmConnectionsEditor = ({ tenantId }) => {
   const [connections, setConnections] = useState([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(null);   // null | {} (new) | connection object (edit)
   const [pushing, setPushing] = useState(false);
   const { showToast } = useToast();
 
-  const load = () => api.get('/crm/connections').then(d => { setConnections(d.connections || []); setLoading(false); }).catch(() => setLoading(false));
-  useEffect(() => { load(); }, []);
+  const load = () => api.get('/crm/connections').then(d => {
+    const all = d.connections || [];
+    setConnections(tenantId ? all.filter(c => c.tenant_id === tenantId) : all);
+    setLoading(false);
+  }).catch(() => setLoading(false));
+  useEffect(() => { load(); }, [tenantId]);
 
-  const blank = { type: 'pipedrive', name: '', config: {}, is_active: true };
+  const blank = { type: 'pipedrive', name: '', config: {}, is_active: true, tenant_id: tenantId };
   const f = editing || {};
   const setF = (patch) => setEditing({ ...f, ...patch });
 
@@ -3928,7 +3935,7 @@ const CrmConnectionsEditor = () => {
               <span className="truncate">{c.name}</span>
               <Badge variant={c.is_active ? 'success' : 'grey'}>{c.is_active ? 'Active' : 'Paused'}</Badge>
             </div>
-            <p className="text-xs text-slate-500 mt-0.5">{c.pushed_ok} pushed · {c.pushed_failed} failed</p>
+            <p className="text-xs text-slate-500 mt-0.5">{c.pushed_ok} pushed · {c.pushed_failed} failed{!tenantId && <> · {c.company || 'platform (unassigned)'}</>}</p>
           </div>
           <div className="flex gap-2 flex-shrink-0">
             <Button size="sm" variant="secondary" onClick={() => pushQualified(c.id)} disabled={pushing}>Push Qualified</Button>
@@ -3976,12 +3983,13 @@ const CrmConnectionsEditor = () => {
 
 const SendingDomainsEditor = () => {
   const [domains, setDomains] = useState([]);
+  const [companies, setCompanies] = useState([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(null);   // null | {} (new) | domain object (edit)
   const { showToast } = useToast();
 
   const load = () => api.get('/sending-domains').then(d => { setDomains(d.domains || []); setLoading(false); }).catch(() => setLoading(false));
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); api.get('/companies').then(d => setCompanies(d.companies || [])).catch(() => {}); }, []);
 
   const blank = { domain: '', from_email: '', from_name: 'Controva', daily_cap: 20, is_active: true };
   const f = editing || {};
@@ -4024,7 +4032,7 @@ const SendingDomainsEditor = () => {
                 <Badge variant={d.is_active ? 'success' : 'grey'}>{d.is_active ? 'Active' : 'Paused'}</Badge>
               </div>
               <p className="text-xs text-slate-500 mt-0.5">
-                {d.sent_today}/{d.daily_cap} sent today · {d.bad_7d}/{d.sent_7d || 0} bounced or complained (7d)
+                {d.sent_today}/{d.daily_cap} sent today · {d.bad_7d}/{d.sent_7d || 0} bounced or complained (7d) · {d.company || 'platform (unassigned)'}
               </p>
               {d.paused_reason && <p className="text-xs text-red-500 mt-0.5">{d.paused_reason}</p>}
             </div>
@@ -4044,6 +4052,14 @@ const SendingDomainsEditor = () => {
           <Input value={f.domain || ''} onChange={v => setF('domain', v.trim().toLowerCase())} placeholder="Domain (must be verified in Resend), e.g. mail-two.com" />
           <Input value={f.from_email || ''} onChange={v => setF('from_email', v)} placeholder="From address, e.g. hello@mail-two.com" />
           <Input value={f.from_name || ''} onChange={v => setF('from_name', v)} placeholder="From name" />
+          <div>
+            <label className="text-xs font-medium text-slate-500 block mb-1">Used by</label>
+            <select value={f.tenant_id || ''} onChange={e => setF('tenant_id', e.target.value || null)}
+              className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-2 text-sm">
+              <option value="">Platform (your own outreach)</option>
+              {companies.filter(c => !c.is_operator).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </div>
           <div>
             <label className="text-xs font-medium text-slate-500 block mb-1">Daily cap — {f.daily_cap ?? 20}</label>
             <input type="range" min="5" max="200" step="5" value={f.daily_cap ?? 20}
@@ -4116,11 +4132,17 @@ const UserAccountsEditor = () => {
   const [adding, setAdding] = useState(false);
   const [newUsername, setNewUsername] = useState('');
   const [newPassword, setNewPassword] = useState('');
+  const [newCompany, setNewCompany] = useState('');       // '' = new company, else tenant id
+  const [newCompanyName, setNewCompanyName] = useState('');
+  const [companies, setCompanies] = useState([]);
   const [resettingUser, setResettingUser] = useState(null); // username being reset, or null
   const [resetPassword, setResetPassword] = useState('');
   const { showToast } = useToast();
 
-  const load = () => api.get('/users').then(d => { setUsers(d.users || []); setLoading(false); }).catch(() => setLoading(false));
+  const load = () => {
+    api.get('/users').then(d => { setUsers(d.users || []); setLoading(false); }).catch(() => setLoading(false));
+    api.get('/companies').then(d => setCompanies((d.companies || []).filter(c => !c.is_operator))).catch(() => {});
+  };
   useEffect(() => { load(); }, []);
 
   const genRandomPassword = () => {
@@ -4129,13 +4151,16 @@ const UserAccountsEditor = () => {
     for (let i = 0; i < 14; i++) out += chars[Math.floor(Math.random() * chars.length)];
     return out;
   };
+  const genPassword = () => setNewPassword(genRandomPassword());
 
   const create = async () => {
     if (!newUsername.trim() || !newPassword.trim()) { showToast('Username and password required', 'error'); return; }
     try {
-      await api.post('/users/create', { username: newUsername.trim(), password: newPassword });
-      showToast(`Client account "${newUsername.trim()}" created — its own isolated workspace, invisible to other clients`);
-      setAdding(false); setNewUsername(''); setNewPassword('');
+      await api.post('/users/create', { username: newUsername.trim(), password: newPassword,
+                                        tenant_id: newCompany || undefined, company_name: newCompany ? undefined : newCompanyName });
+      showToast(newCompany ? `"${newUsername.trim()}" added to the company — they share its leads and settings`
+                           : `Client account "${newUsername.trim()}" created — its own company workspace, invisible to other clients`);
+      setAdding(false); setNewUsername(''); setNewPassword(''); setNewCompany(''); setNewCompanyName('');
       load();
     } catch (e) { showToast('Failed: ' + e.message, 'error'); }
   };
@@ -4160,8 +4185,8 @@ const UserAccountsEditor = () => {
   return (
     <div className="space-y-3">
       <p className="text-xs text-slate-500">
-        Each client account below has its own private workspace — they only ever see leads they themselves fetch,
-        never yours (admin) or another client's. You can see everyone's data from your own admin login.
+        Each client company has its own private workspace — its users only ever see that company's leads,
+        never yours (admin) or another company's. Several logins can share one company. You can see everyone's data from your own admin login.
       </p>
       {users.length === 0 && !adding && (
         <p className="text-xs text-slate-500">No client accounts yet.</p>
@@ -4174,7 +4199,7 @@ const UserAccountsEditor = () => {
                 <span className="truncate">{u.username}</span>
                 <Badge variant="grey">{u.role}</Badge>
               </div>
-              <p className="text-xs text-slate-500 mt-0.5">workspace {(u.tenant_id || '').slice(0, 8)}… · created {u.created_at ? new Date(u.created_at).toLocaleDateString() : ''}</p>
+              <p className="text-xs text-slate-500 mt-0.5">{u.company || 'workspace ' + (u.tenant_id || '').slice(0, 8) + '…'} · created {u.created_at ? new Date(u.created_at).toLocaleDateString() : ''}</p>
             </div>
             <div className="flex gap-1 flex-shrink-0">
               <Button size="sm" variant="ghost" icon="Lock"
@@ -4204,6 +4229,12 @@ const UserAccountsEditor = () => {
         <div className="p-3 border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-lg space-y-2">
           <h4 className="text-xs font-semibold text-slate-500">New Client Account</h4>
           <Input value={newUsername} onChange={v => setNewUsername(v.trim().toLowerCase())} placeholder="username, e.g. acme-corp" />
+          <select value={newCompany} onChange={e => setNewCompany(e.target.value)}
+            className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-2 text-sm">
+            <option value="">New company…</option>
+            {companies.map(c => <option key={c.id} value={c.id}>Join {c.name}</option>)}
+          </select>
+          {!newCompany && <Input value={newCompanyName} onChange={setNewCompanyName} placeholder="Company name, e.g. Acme Inc." />}
           <div className="flex gap-2">
             <Input value={newPassword} onChange={setNewPassword} placeholder="password" revealable />
             <Button size="sm" variant="secondary" onClick={genPassword}>Generate</Button>
@@ -6198,6 +6229,181 @@ const PerformancePage = () => {
 };
 
 // ─────────────────────────────────────────────────
+//  Company settings (M15) — each client company sends as itself: identity,
+//  legal footer, Calendly, reply inbox, digest, branding and its own CRM.
+//  Clients edit their own company; admin picks any company.
+// ─────────────────────────────────────────────────
+const COMPANY_FIELD_GROUPS = [
+  { title: 'Sending identity', icon: 'Send', note: 'Who prospects see the email from. Replies go to the reply-to address when set.', fields: [
+    ['from_name', 'From name', 'Dana at Acme'],
+    ['from_email', 'From email', 'dana@acme.com'],
+    ['reply_to', 'Reply-to (optional)', 'sales@acme.com'],
+  ] },
+  { title: 'Legal footer', icon: 'Shield', note: 'Required in every commercial email (CAN-SPAM): your company name and a postal address. Outreach is blocked until both are set.', fields: [
+    ['company_name', 'Company name', 'Acme Inc.'],
+    ['company_address', 'Postal address', '100 Main St, Austin TX 78701'],
+    ['footer_text', 'Extra footer line (optional)', ''],
+  ] },
+  { title: 'Meetings', icon: 'Calendar', note: 'Follow-up emails offer this booking link.', fields: [
+    ['calendly_url', 'Calendly link', 'https://calendly.com/you/intro'],
+  ] },
+  { title: 'Reply inbox', icon: 'Inbox', note: 'The inbox replies arrive in (IMAP). Checked every 15 minutes: replies stop follow-ups, get classified, and count towards your response rate.', fields: [
+    ['imap_host', 'IMAP server', 'imap.gmail.com'],
+    ['imap_user', 'Inbox login', 'sales@acme.com'],
+    ['imap_pass', 'Inbox password / app password', '', 'password'],
+  ] },
+  { title: 'Branding', icon: 'Image', note: 'Name and colour shown in this dashboard for your team.', fields: [
+    ['brand_name', 'Brand name', 'Acme Prospecting'],
+    ['brand_color', 'Brand colour', '#0f766e'],
+  ] },
+];
+
+const CompanyPage = () => {
+  const [tenantId, setTenantId] = useState('');
+  const [data, setData] = useState(null);
+  const [form, setForm] = useState({});
+  const [displayName, setDisplayName] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [testTo, setTestTo] = useState('');
+  const { showToast } = useToast();
+
+  const load = () => {
+    api.get('/company/settings' + (tenantId ? '?tenant_id=' + tenantId : '')).then(d => {
+      setData(d); setForm(d.settings || {}); setDisplayName(d.company_name || '');
+      if (!tenantId && d.companies) setTenantId(d.tenant_id);
+    }).catch(e => showToast('Failed to load: ' + e.message, 'error'));
+  };
+  useEffect(load, [tenantId]);
+
+  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+  const save = async () => {
+    setSaving(true);
+    try {
+      const r = await api.post('/company/settings/save', { tenant_id: tenantId || undefined, settings: form, company_display_name: displayName });
+      if (r.success) { showToast('Company settings saved'); load(); }
+      else showToast('Save failed: ' + (r.error || ''), 'error');
+    } catch (e) { showToast('Save failed: ' + e.message, 'error'); }
+    setSaving(false);
+  };
+  const sendTest = async () => {
+    try {
+      const r = await api.post('/company/test-email', { tenant_id: tenantId || undefined, to_email: testTo });
+      if (r.success) showToast('Test email sent as ' + r.sent_as);
+      else showToast('Test failed: ' + (r.error || ''), 'error');
+    } catch (e) { showToast('Test failed: ' + e.message, 'error'); }
+  };
+
+  if (!data) return <div className="py-16 text-center"><Spinner size="w-6 h-6" /></div>;
+  const webhookUrl = data.calendly_webhook_url.startsWith('/') ? window.location.origin + data.calendly_webhook_url : data.calendly_webhook_url;
+  const r = data.readiness || {};
+
+  return (
+    <div className="space-y-6 fade-in">
+      <div className="flex items-start justify-between flex-wrap gap-3">
+        <div>
+          <h1 className="text-2xl font-bold">Company</h1>
+          <p className="text-sm text-slate-500 mt-1">How your outreach is sent, where replies and bookings land, and where qualified leads go</p>
+        </div>
+        {data.companies && (
+          <div><label className="text-xs font-medium text-slate-500 block mb-1">Company</label>
+            <select value={tenantId} onChange={e => setTenantId(e.target.value)}
+              className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm max-w-[18rem]">
+              {data.companies.map(c => <option key={c.id} value={c.id}>{c.name} ({c.users})</option>)}
+            </select></div>
+        )}
+      </div>
+
+      <Card className={r.can_send ? '' : 'border-2 border-amber-300'}>
+        <div className="flex items-start gap-3">
+          <Icon name={r.can_send ? 'CheckCircle2' : 'AlertCircle'} className={'w-5 h-5 mt-0.5 ' + (r.can_send ? 'text-green-600' : 'text-amber-600')} />
+          <div className="text-sm">
+            {r.can_send
+              ? <p>Outreach sends as <span className="font-mono">{r.from}</span></p>
+              : <p className="text-amber-700 dark:text-amber-400">{r.reason}</p>}
+            {data.is_operator && <p className="text-xs text-slate-500 mt-1">This is the platform's own workspace: anything left blank here uses the server-wide values in Settings.</p>}
+          </div>
+        </div>
+      </Card>
+
+      <Card>
+        <label className="text-xs font-medium text-slate-500 block mb-1">Company display name</label>
+        <Input value={displayName} onChange={setDisplayName} placeholder="Acme Inc." />
+      </Card>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        {COMPANY_FIELD_GROUPS.map(g => (
+          <Card key={g.title}>
+            <h3 className="font-semibold text-sm flex items-center gap-2"><Icon name={g.icon} /> {g.title}</h3>
+            <p className="text-xs text-slate-500 mt-1 mb-3">{g.note}</p>
+            <div className="space-y-3">
+              {g.fields.map(([k, label, ph, type]) => (
+                <div key={k}><label className="text-xs font-medium text-slate-500 block mb-1">{label}</label>
+                  <Input value={form[k] || ''} onChange={v => set(k, v)} placeholder={ph} revealable={type === 'password'} /></div>
+              ))}
+              {g.title === 'Meetings' && (
+                <div className="text-[11px] text-slate-500 bg-slate-50 dark:bg-slate-800 rounded-lg p-2 break-all">
+                  To mark meetings as booked automatically, add this webhook in Calendly (event: invitee created):<br />
+                  <span className="font-mono">{webhookUrl}</span>
+                </div>
+              )}
+              {g.title === 'Reply inbox' && form.imap_pass && String(form.imap_pass).startsWith('••••') && (
+                <p className="text-[11px] text-slate-400">Password saved — leave it as is to keep it, or type a new one.</p>
+              )}
+            </div>
+          </Card>
+        ))}
+        <Card>
+          <h3 className="font-semibold text-sm flex items-center gap-2"><Icon name="Mail" /> Daily digest</h3>
+          <p className="text-xs text-slate-500 mt-1 mb-3">A morning email with yesterday's new and qualified leads, replies, meetings and deals.</p>
+          <label className="flex items-center gap-2 text-sm mb-3">
+            <input type="checkbox" checked={!!form.digest_enabled} onChange={e => set('digest_enabled', e.target.checked)} /> Send the daily digest
+          </label>
+          <label className="text-xs font-medium text-slate-500 block mb-1">Send it to</label>
+          <Input value={form.digest_email || ''} onChange={v => set('digest_email', v)} placeholder="you@acme.com" />
+        </Card>
+        {data.admin_keys_editable && (
+          <Card>
+            <h3 className="font-semibold text-sm flex items-center gap-2"><Icon name="Lock" /> Limits (admin)</h3>
+            <p className="text-xs text-slate-500 mt-1 mb-3">Most emails this company may send per 24 hours, on top of the server-wide caps. Blank = no extra cap.</p>
+            <Input type="number" value={form.daily_send_limit ?? ''} onChange={v => set('daily_send_limit', v)} placeholder="e.g. 50" />
+          </Card>
+        )}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-3">
+        <Button variant="primary" icon="Check" onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Save company settings'}</Button>
+        <div className="flex items-center gap-2 ml-auto">
+          <Input value={testTo} onChange={setTestTo} placeholder="send a test to…" className="w-56" />
+          <Button variant="secondary" icon="Send" onClick={sendTest} disabled={!testTo}>Send test email</Button>
+        </div>
+      </div>
+
+      <Card>
+        <h3 className="font-semibold text-sm mb-1">Sending domains</h3>
+        <p className="text-xs text-slate-500 mb-3">Domains verified for sending, rotated by daily headroom. {data.admin_keys_editable ? 'Assign domains to this company in Settings → Sending Domains.' : 'Ask your account manager to add one.'} Without any, email goes out from the from-address above.</p>
+        {data.domains.length === 0 ? <p className="text-sm text-slate-500">None assigned.</p> : (
+          <div className="space-y-1.5">
+            {data.domains.map(d => (
+              <div key={d.id} className="flex items-center gap-2 text-sm bg-slate-50 dark:bg-slate-800 rounded-lg px-3 py-2">
+                <span className="font-mono">{d.from_name} &lt;{d.from_email}&gt;</span>
+                <Badge variant={d.is_active ? 'success' : 'grey'}>{d.is_active ? 'Active' : 'Paused'}</Badge>
+                <span className="text-xs text-slate-500 ml-auto">cap {d.daily_cap}/day</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      <Card>
+        <h3 className="font-semibold text-sm mb-1">CRM</h3>
+        <p className="text-xs text-slate-500 mb-3">Where this company's qualified leads are pushed. ICPs with “Push qualified to CRM” use the first active connection.</p>
+        <CrmConnectionsEditor tenantId={data.tenant_id} />
+      </Card>
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────
 //  Auth: Login Screen
 // ─────────────────────────────────────────────────
 const LoginScreen = ({ onLogin }) => {
@@ -6294,6 +6500,7 @@ const App = ({ role = 'admin' }) => {
     { id: 'workflows', label: 'Workflows', icon: 'Repeat' },
     { id: 'analytics', label: 'Analytics', icon: 'Activity' },
     { id: 'performance', label: 'Performance', icon: 'BarChart3' },
+    { id: 'company',   label: 'Company',   icon: 'Building2' },
     { section: 'Research Tools' },
     { id: 'seo',         label: 'SEO',         icon: 'TrendingUp' },
     { id: 'competitor',  label: 'Competitors', icon: 'Target' },
@@ -6320,6 +6527,7 @@ const App = ({ role = 'admin' }) => {
   else if (page === 'outreach') CurrentPage = OutreachPage;
   else if (page === 'analytics') CurrentPage = AnalyticsPage;
   else if (page === 'performance') CurrentPage = PerformancePage;
+  else if (page === 'company') CurrentPage = CompanyPage;
   else if (page === 'intent') CurrentPage = IntentPage;
   else if (page === 'activity' && isAdmin) CurrentPage = ActivityLogPage;
   else if (page === 'n8n' && isAdmin) CurrentPage = N8nWorkflowsPage;

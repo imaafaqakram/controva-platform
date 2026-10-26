@@ -5973,14 +5973,14 @@ def ensure_m4_tables():
     conn.commit(); cur.close(); conn.close()
 
 def generate_followup_copy(business_name, niche, city, owner_name, kind, prev_subject='', research=None,
-                           campaign=None):
+                           campaign=None, cta=None):
     """Claude-generated follow-up emails (sequence steps 2 and 3)."""
     if not CLAUDE_KEY:
         return None
     pain_block = _pain_context_block(research, max_pains=1)
     campaign_block = _campaign_block(campaign)
     has_offer = bool(campaign and campaign.get('offer'))
-    cta = meeting_booking_cta()
+    cta = meeting_booking_cta() if cta is None else cta
     if kind == 'nudge':
         if pain_block:
             angle = "Reference the specific pain point below instead of the generic mockup angle."
@@ -6411,11 +6411,13 @@ def crm_push_lead(lead_id, connection_id):
     if not detail:
         return False, None, {'error': 'lead not found'}
     conn = db_conn(); cur = conn.cursor()
-    cur.execute("SELECT type, config FROM crm_connections WHERE id=%s AND is_active=TRUE", (connection_id,))
+    cur.execute("SELECT type, config, tenant_id FROM crm_connections WHERE id=%s AND is_active=TRUE", (connection_id,))
     row = cur.fetchone(); cur.close(); conn.close()
     if not row:
         return False, None, {'error': 'connection not found or inactive'}
-    ctype, config = row
+    ctype, config, conn_tenant = row
+    if not crm_connection_allowed(conn_tenant, lead_tenant(lead_id)):
+        return False, None, {'error': "this CRM connection belongs to another company"}
     config = config or {}
     if ctype == 'pipedrive':
         ok, ext_id, resp = pipedrive_push(detail, config)
@@ -6486,25 +6488,24 @@ def crm_auto_push_for_icp(icp_id):
     that has push_to_crm enabled, to the first active CRM connection."""
     try:
         conn = db_conn(); cur = conn.cursor()
-        cur.execute("SELECT push_to_crm, min_lead_score FROM icp_profiles WHERE id=%s", (icp_id,))
+        cur.execute("SELECT push_to_crm, tenant_id FROM icp_profiles WHERE id=%s", (icp_id,))
         row = cur.fetchone()
         if not row or not row[0]:
             cur.close(); conn.close()
             return
-        min_score = row[1] or 0
-        cur.execute("SELECT id FROM crm_connections WHERE is_active=TRUE ORDER BY id LIMIT 1")
-        conn_row = cur.fetchone()
-        if not conn_row:
+        # The ICP owner's own CRM (unassigned connections for the operator).
+        connection_id = first_crm_connection_for(str(row[1]) if row[1] else None)
+        if not connection_id:
             cur.close(); conn.close()
             return
-        connection_id = conn_row[0]
-        cur.execute("""
+        cur.execute(f"""
             SELECT l.id FROM leads l
+            JOIN icp_profiles p ON p.id = l.icp_id
             LEFT JOIN crm_push_log pl ON pl.lead_id = l.id AND pl.connection_id = %s AND pl.status = 'ok'
             WHERE l.icp_id = %s AND pl.id IS NULL
-              AND COALESCE(l.icp_score, l.ai_score * 10, 0) >= %s
+              AND {QUALIFIED_SQL}
             LIMIT 200
-        """, (connection_id, icp_id, min_score))
+        """, (connection_id, icp_id))
         lead_ids = [r[0] for r in cur.fetchall()]
         cur.close(); conn.close()
         for lid in lead_ids:
@@ -6555,13 +6556,15 @@ Respond ONLY with valid JSON:
     return 'unclear', ''
 
 # ── Meeting booking (Calendly) ──────────────────────────────────
-def meeting_booking_cta():
-    """CTA line to append to sequence steps when a Calendly link is configured.
+def meeting_booking_cta(tenant_id=None):
+    """CTA line to append to sequence steps when a Calendly link is configured
+    (the lead's company's own link; the server-wide one for the operator).
     Empty string when not configured — callers already handle '' as no-op."""
-    url = CONFIG.get('calendly_url', '')
+    url = get_tenant_settings(tenant_id).get('calendly_url') or \
+          (CONFIG.get('calendly_url', '') if tenant_is_operator(tenant_id) else '')
     return f"If it's easier, grab a time directly: {url}" if url else ''
 
-def handle_calendly_webhook(raw_body):
+def handle_calendly_webhook(raw_body, tenant_id=None):
     """Calendly 'invitee.created' webhook — matches the invitee email against
     outreach_log/contacts and marks the lead meeting_booked. No signature
     verification here since Calendly's payload has no shared secret by default
@@ -6572,9 +6575,18 @@ def handle_calendly_webhook(raw_body):
         if not email:
             return {'ok': False, 'error': 'no invitee email in payload'}
         conn = db_conn(); cur = conn.cursor()
-        cur.execute("""SELECT DISTINCT lead_id FROM outreach_log WHERE LOWER(email_to) = %s
-                       UNION
-                       SELECT DISTINCT lead_id FROM contacts WHERE LOWER(email) = %s""", (email, email))
+        # A company's own webhook URL (/webhook/calendly/<token>) only marks
+        # that company's leads; the legacy URL only the operator's.
+        if tenant_id:
+            owner = "l.tenant_id = %s"; owner_p = (tenant_id,)
+        else:
+            owner = ("(l.tenant_id IS NULL OR l.tenant_id IN (SELECT tenant_id FROM auth_users "
+                     "WHERE role IN ('admin','service') AND tenant_id IS NOT NULL))"); owner_p = ()
+        cur.execute(f"""SELECT DISTINCT x.lead_id FROM (
+                           SELECT lead_id FROM outreach_log WHERE LOWER(email_to) = %s
+                           UNION
+                           SELECT lead_id FROM contacts WHERE LOWER(email) = %s) x
+                        JOIN leads l ON l.id = x.lead_id WHERE {owner}""", (email, email, *owner_p))
         rows = cur.fetchall()
         for (lead_id,) in rows:
             cur.execute("UPDATE leads SET meeting_booked=TRUE, meeting_booked_at=NOW() WHERE id=%s", (lead_id,))
@@ -6621,6 +6633,17 @@ _last_digest_date = None
 def run_daily_digest():
     """Morning summary: new qualified leads, research highlights, cost — reuses
     the M5 api_usage cost query. No-op when disabled or no recipient set."""
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("""SELECT tenant_id, settings->>'digest_email' FROM tenant_settings
+                       WHERE (settings->>'digest_enabled')::boolean IS TRUE
+                         AND COALESCE(settings->>'digest_email','') <> ''""")
+        companies = cur.fetchall(); cur.close(); conn.close()
+        for tid, recipient in companies:
+            try: run_company_digest(str(tid), recipient)
+            except Exception as e: print(f'[digest] company {tid} failed: {e}')
+    except Exception as e:
+        print(f'[digest] company digests failed: {e}')
     if not CONFIG.get('daily_digest_enabled') or not CONFIG.get('digest_recipient_email'):
         return
     try:
@@ -7013,7 +7036,8 @@ def get_sequence_step_assets(lead_id, step, kind, detail):
                                   detail.get('owner_name'), kind,
                                   prev_subject=detail.get('email_subject') or '',
                                   research=detail.get('research'),
-                                  campaign=get_lead_campaign(lead_id))
+                                  campaign=get_lead_campaign(lead_id),
+                                  cta=meeting_booking_cta(lead_tenant(lead_id)))
     if not copy:
         return None, None
     conn = db_conn(); cur = conn.cursor()
@@ -7084,23 +7108,28 @@ def process_due_enrollments():
         body_html = body.replace('\n', '<br>')
         if detail.get('mockup_url'):
             body_html += f'<br><br><img src="{detail["mockup_url"]}" alt="Website Mockup" style="max-width:100%; border-radius:8px;">'
-        sd = pick_sending_domain()   # M11: rotate across configured sending domains
-        if not sd and has_sending_domains_configured():
-            print(f'[sequence] all sending domains paused/at cap — skipping lead {lead_id} this tick')
+        # Company-level blocks (no identity yet, its domains or its cap used
+        # up) only skip that company's leads; other companies keep sending.
+        tenant_id = lead_tenant(lead_id)
+        ok, why = company_throttle_status(tenant_id)
+        sender, err = resolve_sender(tenant_id) if ok else (None, why)
+        if not sender:
+            print(f'[sequence] lead {lead_id} skipped this tick: {err}')
             skipped += 1
-            break   # same treatment as the throttle cap above — stop, retry next tick
+            continue
+        sd = {'id': sender['domain_id']}
         result = send_email_via_resend(email, subject, body, body_html,
-                                       from_email=sd['from_email'] if sd else None,
-                                       from_name=sd['from_name'] if sd else None,
-                                       unsub_url=build_unsub_url(unsub_token))
+                                       from_email=sender['from_email'], from_name=sender['from_name'],
+                                       unsub_url=build_unsub_url(unsub_token),
+                                       reply_to=sender['reply_to'], footer=sender['footer'])
         try:
             conn = db_conn(); cur = conn.cursor()
             if result.get('success'):
                 cur.execute("""INSERT INTO outreach_log (lead_id, email_to, email_subject, email_body,
-                               mockup_url, sent_at, status, resend_message_id, sending_domain_id)
-                               VALUES (%s,%s,%s,%s,%s,NOW(),'sent',%s,%s)""",
+                               mockup_url, sent_at, status, resend_message_id, sending_domain_id, tenant_id)
+                               VALUES (%s,%s,%s,%s,%s,NOW(),'sent',%s,%s,%s)""",
                             (lead_id, email, subject, body, detail.get('mockup_url') or '',
-                             result.get('message_id'), sd['id'] if sd else None))
+                             result.get('message_id'), sd['id'], tenant_id))
                 # advance; gap to next step from the schedule (absolute days → difference)
                 cur.execute("""SELECT ns.delay_days - ss.delay_days FROM enrollments e
                                JOIN sequence_steps ss ON ss.sequence_id=e.sequence_id AND ss.step_number=e.current_step
@@ -7340,67 +7369,26 @@ def handle_resend_webhook(headers, raw_body):
 # ──────────────────────────────────────────────────────────────
 #  M3: REPLY DETECTION via IMAP (lightweight)
 # ──────────────────────────────────────────────────────────────
-def run_check_replies_bg(job_id):
-    """Scan the reply mailbox via IMAP for messages that answer our outreach.
-    Matches senders against outreach_log, marks replied_at + lead status."""
-    import imaplib
-    import email as _email_lib
+def run_check_replies_bg(job_id, tenant_scope=None):
+    """Scan the reply mailboxes via IMAP for messages that answer our outreach.
+    Matches senders against outreach_log, marks replied_at + lead status.
+    Each company's own inbox (Company settings) only matches that company's
+    outreach; the server-wide inbox matches companies without their own."""
     try:
         JOBS[job_id] = {'status': 'running', 'progress': 0,
-                        'log': [f'Connecting to {IMAP_HOST}…'], 'step': 'Check Replies'}
-        if not (IMAP_HOST and IMAP_USER and IMAP_PASS):
-            JOBS[job_id]['log'].append('IMAP not configured — set imap_host/user/pass in Settings')
+                        'log': ['Checking reply inboxes…'], 'step': 'Check Replies'}
+        boxes = reply_mailboxes(tenant_scope)
+        if not boxes:
+            JOBS[job_id]['log'].append('No reply inbox configured — set the IMAP inbox in Company settings'
+                                       + ('' if tenant_scope else ' (or Settings for the server-wide one)'))
             JOBS[job_id]['status'] = 'failed'
             return
-
-        imap = imaplib.IMAP4_SSL(IMAP_HOST)
-        imap.login(IMAP_USER, IMAP_PASS)
-        imap.select('INBOX')
-        # Search messages addressed to us that look like replies (auto "Re:")
-        _, msg_ids = imap.search(None, 'TO', f'"{IMAP_USER}"', 'SUBJECT', '"Re:"')
-        ids = (msg_ids[0] or b'').split()
-        JOBS[job_id]['log'].append(f'Found {len(ids)} reply-candidates in INBOX')
-
         matched = 0
-        for num in ids[-200:]:   # newest 200 max
-            _, msg_data = imap.fetch(num, '(RFC822)')
-            raw = msg_data[0][1]
-            msg = _email_lib.message_from_bytes(raw)
-            sender = (_email_lib.utils.parseaddr(msg.get('From', ''))[1] or '').lower()
-            if not sender:
-                continue
+        for box_tenant, host, user, password in boxes:
             try:
-                conn = db_conn(); cur = conn.cursor()
-                cur.execute("""SELECT o.id, o.lead_id FROM outreach_log o
-                               WHERE LOWER(o.email_to) = %s
-                                 AND o.replied_at IS NULL
-                                 AND o.status IN ('sent','delivered','opened')""",
-                            (sender,))
-                row = cur.fetchone()
-                if row:
-                    body_preview = ''
-                    if msg.is_multipart():
-                        for part in msg.walk():
-                            if part.get_content_type() == 'text/plain':
-                                body_preview = (part.get_payload(decode=True) or b'')[:2000].decode('utf-8', 'ignore')
-                                break
-                    else:
-                        body_preview = (msg.get_payload(decode=True) or b'')[:2000].decode('utf-8', 'ignore')
-                    reply_class, reply_digest = classify_reply(body_preview)
-                    cur.execute("""UPDATE outreach_log SET replied_at=NOW(), status='replied',
-                                   reply_content=%s, reply_classification=%s, reply_digest=%s
-                                   WHERE id=%s""", (body_preview, reply_class, reply_digest, row[0]))
-                    cur.execute("UPDATE leads SET status='replied' WHERE id=%s", (row[1],))
-                    stop_enrollment(row[1], 'replied', 'reply detected via IMAP')
-                    if reply_class == 'unsubscribe_intent':
-                        try: add_suppression(sender, 'unsubscribe', row[1], 'reply asked to stop')
-                        except Exception as e: print(f'[replies] suppression failed: {e}')
-                    conn.commit(); matched += 1
-                    JOBS[job_id]['log'].append(f'Reply matched: {sender} [{reply_class}]')
-                cur.close(); conn.close()
+                matched += _check_reply_mailbox(job_id, box_tenant, host, user, password)
             except Exception as e:
-                print(f'[replies] {sender}: {e}')
-        imap.logout()
+                JOBS[job_id]['log'].append(f'{user}@{host}: {str(e)[:120]}')
         JOBS[job_id]['log'].append(f'Done — {matched} new replies matched to outreach')
         JOBS[job_id]['progress'] = 100
         JOBS[job_id]['status'] = 'completed'
@@ -7409,6 +7397,65 @@ def run_check_replies_bg(job_id):
         JOBS[job_id]['status'] = 'failed'
         JOBS[job_id]['error'] = str(e)
         JOBS[job_id]['log'].append(f'Error: {e}')
+
+def _check_reply_mailbox(job_id, box_tenant, host, user, password):
+    import imaplib
+    import email as _email_lib
+    if box_tenant:
+        owner = "l.tenant_id = %s"; owner_p = (box_tenant,)
+    else:
+        owner = ("(l.tenant_id IS NULL OR l.tenant_id NOT IN (SELECT tenant_id FROM tenant_settings "
+                 "WHERE COALESCE(settings->>'imap_host','') <> ''))"); owner_p = ()
+    JOBS[job_id]['log'].append(f'Connecting to {host} as {user}…')
+    imap = imaplib.IMAP4_SSL(host)
+    imap.login(user, password)
+    imap.select('INBOX')
+    # Search messages addressed to us that look like replies (auto "Re:")
+    _, msg_ids = imap.search(None, 'TO', f'"{user}"', 'SUBJECT', '"Re:"')
+    ids = (msg_ids[0] or b'').split()
+    JOBS[job_id]['log'].append(f'Found {len(ids)} reply-candidates in INBOX')
+
+    matched = 0
+    for num in ids[-200:]:   # newest 200 max
+        _, msg_data = imap.fetch(num, '(RFC822)')
+        raw = msg_data[0][1]
+        msg = _email_lib.message_from_bytes(raw)
+        sender = (_email_lib.utils.parseaddr(msg.get('From', ''))[1] or '').lower()
+        if not sender:
+            continue
+        try:
+            conn = db_conn(); cur = conn.cursor()
+            cur.execute(f"""SELECT o.id, o.lead_id FROM outreach_log o JOIN leads l ON l.id = o.lead_id
+                           WHERE LOWER(o.email_to) = %s
+                             AND o.replied_at IS NULL
+                             AND o.status IN ('sent','delivered','opened') AND {owner}""",
+                        (sender, *owner_p))
+            row = cur.fetchone()
+            if row:
+                body_preview = ''
+                if msg.is_multipart():
+                    for part in msg.walk():
+                        if part.get_content_type() == 'text/plain':
+                            body_preview = (part.get_payload(decode=True) or b'')[:2000].decode('utf-8', 'ignore')
+                            break
+                else:
+                    body_preview = (msg.get_payload(decode=True) or b'')[:2000].decode('utf-8', 'ignore')
+                reply_class, reply_digest = classify_reply(body_preview)
+                cur.execute("""UPDATE outreach_log SET replied_at=NOW(), status='replied',
+                               reply_content=%s, reply_classification=%s, reply_digest=%s
+                               WHERE id=%s""", (body_preview, reply_class, reply_digest, row[0]))
+                cur.execute("UPDATE leads SET status='replied' WHERE id=%s", (row[1],))
+                stop_enrollment(row[1], 'replied', 'reply detected via IMAP')
+                if reply_class == 'unsubscribe_intent':
+                    try: add_suppression(sender, 'unsubscribe', row[1], 'reply asked to stop')
+                    except Exception as e: print(f'[replies] suppression failed: {e}')
+                conn.commit(); matched += 1
+                JOBS[job_id]['log'].append(f'Reply matched: {sender} [{reply_class}]')
+            cur.close(); conn.close()
+        except Exception as e:
+            print(f'[replies] {sender}: {e}')
+    imap.logout()
+    return matched
 
 def handle_unsubscribe(token):
     """Process an unsubscribe click. Returns a plain confirmation page (HTML string).
@@ -7451,26 +7498,30 @@ def handle_unsubscribe(token):
                 '<h2>Something went wrong</h2>'
                 '<p style="color:#666;">Please reply to the email with "unsubscribe".</p></body></html>')
 
-def build_compliance_footer(unsub_url=None):
+def build_compliance_footer(unsub_url=None, footer=None):
     """CAN-SPAM/GDPR footer: unsubscribe mechanism + company name + postal address.
-    Every commercial email must carry these — non-negotiable. White-label (M10):
-    client_brand_name overrides the sender name shown when set."""
-    brand = CONFIG.get('client_brand_name') or COMPANY_NAME
+    Every commercial email must carry these — non-negotiable. footer (M15) is
+    the sending company's own {company, address, text}; without it the
+    server-wide values apply (client_brand_name overrides the name when set)."""
+    if footer is None:
+        footer = {'company': CONFIG.get('client_brand_name') or COMPANY_NAME,
+                  'address': COMPANY_ADDRESS, 'text': CONFIG.get('client_footer_text', '')}
+    brand, address = footer.get('company', ''), footer.get('address', '')
     lines = ['—']
     if unsub_url:
         lines.append(f'Don\'t want emails from us? <a href="{unsub_url}" style="color:#888;">Unsubscribe</a>')
     else:
         lines.append(f'Don\'t want emails from us? Reply with "unsubscribe" and we\'ll remove you immediately.')
-    if COMPANY_ADDRESS:
-        lines.append(f'{brand} · {COMPANY_ADDRESS}')
+    if address:
+        lines.append(f'{brand} · {address}')
     elif brand:
         lines.append(brand)
-    if CONFIG.get('client_footer_text'):
-        lines.append(CONFIG['client_footer_text'])
+    if footer.get('text'):
+        lines.append(footer['text'])
     return '\n'.join(lines)
 
 def send_email_via_resend(to_email, subject, body_text, body_html=None, from_email=None,
-                          from_name=None, unsub_url=None, skip_footer=False):
+                          from_name=None, unsub_url=None, skip_footer=False, reply_to=None, footer=None):
     """Send an email via Resend.com API. Appends the compliance footer unless
     skip_footer is set (use ONLY for non-commercial transactional mail)."""
     if not body_html:
@@ -7481,8 +7532,8 @@ def send_email_via_resend(to_email, subject, body_text, body_html=None, from_ema
     if not skip_footer:
         footer_html = ('<div style="margin-top:24px; padding-top:12px; border-top:1px solid #eee;'
                        ' font-size:12px; color:#888; line-height:1.5;">'
-                       + build_compliance_footer(unsub_url) + '</div>')
-        footer_text = '\n\n' + re.sub(r'<[^>]+>', '', build_compliance_footer(unsub_url))
+                       + build_compliance_footer(unsub_url, footer) + '</div>')
+        footer_text = '\n\n' + re.sub(r'<[^>]+>', '', build_compliance_footer(unsub_url, footer))
         body_html = body_html.replace('</body>', footer_html + '</body>')
         body_text = body_text + footer_text
 
@@ -7493,6 +7544,8 @@ def send_email_via_resend(to_email, subject, body_text, body_html=None, from_ema
         "html": body_html,
         "text": body_text
     }
+    if reply_to:
+        payload["reply_to"] = reply_to
     if unsub_url:
         # RFC 8058 one-click unsubscribe. Gmail/Yahoo/Microsoft's 2024 bulk-sender
         # rules weight this heavily for inbox (vs spam) placement, and Gmail/Yahoo
@@ -7545,24 +7598,25 @@ def ensure_sending_domains_table():
     cur.execute("ALTER TABLE outreach_log ADD COLUMN IF NOT EXISTS sending_domain_id INTEGER REFERENCES sending_domains(id)")
     conn.commit(); cur.close(); conn.close()
 
-def pick_sending_domain():
+def pick_sending_domain(tenant_id=None, operator=True):
     """Choose the active sending domain with the most daily headroom left
-    (least sent in the trailing 24h first — spreads volume evenly).
+    (least sent in the trailing 24h first — spreads volume evenly), among the
+    domains this company may use (its own; unassigned ones for the operator).
     Returns a dict, or None when no domains are configured/available —
-    callers fall back to the single global FROM_EMAIL/FROM_NAME in that case."""
+    callers fall back to the company's own from-address in that case."""
     try:
         conn = db_conn(); cur = conn.cursor()
-        cur.execute("""
+        cur.execute(f"""
             SELECT d.id, d.domain, d.from_email, d.from_name, d.daily_cap,
                    COUNT(o.id) FILTER (WHERE o.sent_at > NOW() - INTERVAL '24 hours') as sent_today
             FROM sending_domains d
             LEFT JOIN outreach_log o ON o.sending_domain_id = d.id
-            WHERE d.is_active = TRUE
+            WHERE d.is_active = TRUE AND {_domain_owner_sql()}
             GROUP BY d.id
             HAVING COUNT(o.id) FILTER (WHERE o.sent_at > NOW() - INTERVAL '24 hours') < d.daily_cap
             ORDER BY sent_today ASC, d.id ASC
             LIMIT 1
-        """)
+        """, (tenant_id or NO_TENANT, operator))
         row = cur.fetchone()
         cur.close(); conn.close()
         if not row: return None
@@ -7571,14 +7625,15 @@ def pick_sending_domain():
     except Exception:
         return None
 
-def has_sending_domains_configured():
+def has_sending_domains_configured(tenant_id=None, operator=True):
     """True when at least one sending domain row exists (active or not).
     Distinguishes 'no domains set up — use the global FROM_EMAIL' (fine)
     from 'domains are set up but all are paused/at cap' (should block,
     not silently escape to an unmanaged default sender)."""
     try:
         conn = db_conn(); cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM sending_domains")
+        cur.execute(f"SELECT COUNT(*) FROM sending_domains d WHERE {_domain_owner_sql()}",
+                    (tenant_id or NO_TENANT, operator))
         n = cur.fetchone()[0]
         cur.close(); conn.close()
         return n > 0
@@ -7653,7 +7708,7 @@ def send_lead_email(lead_id, forced_domain_id=None):
     domain is gone or paused) rather than silently falling back to another."""
     conn = db_conn(); cur = conn.cursor()
     cur.execute("""
-        SELECT l.id, l.business_name, l.niche, l.city,
+        SELECT l.id, l.business_name, l.niche, l.city, l.tenant_id,
                c.email, c.full_name,
                (SELECT content FROM assets WHERE lead_id=l.id AND asset_type='email_subject' LIMIT 1) as subj,
                (SELECT content FROM assets WHERE lead_id=l.id AND asset_type='email_body' LIMIT 1) as body,
@@ -7667,7 +7722,8 @@ def send_lead_email(lead_id, forced_domain_id=None):
         cur.close(); conn.close()
         return {"success": False, "error": "Lead not found"}
 
-    lead_id, name, niche, city, email, full_name, subj, body, mockup = row
+    lead_id, name, niche, city, tenant_id, email, full_name, subj, body, mockup = row
+    tenant_id = str(tenant_id) if tenant_id else None
 
     if not subj or not body:
         cur.close(); conn.close()
@@ -7692,6 +7748,9 @@ def send_lead_email(lead_id, forced_domain_id=None):
     ok, throttle_info = send_throttle_status()
     if not ok:
         return {"success": False, "error": f"Blocked: {throttle_info}"}
+    ok, throttle_info = company_throttle_status(tenant_id)
+    if not ok:
+        return {"success": False, "error": f"Blocked: {throttle_info}"}
 
     # Build HTML version with mockup if available
     body_html = body.replace("\\n", "<br>")
@@ -7699,37 +7758,26 @@ def send_lead_email(lead_id, forced_domain_id=None):
         body_html += f'<br><br><img src="{mockup}" alt="Website Mockup for {name}" style="max-width:100%; border-radius:8px;">'
     body_html = f"""<html><body style="font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: 15px; line-height: 1.6; color: #333; max-width: 600px; padding: 16px;">{body_html}</body></html>"""
 
+    # M11 domain rotation + M15 company identity: the lead's own company's
+    # domains / from-address / footer (forced_domain_id pins one domain).
+    sender, err = resolve_sender(tenant_id, forced_domain_id)
+    if not sender:
+        return {"success": False, "error": err}
     unsub_token = get_or_create_unsub_token(lead_id)
-    if forced_domain_id:
-        conn = db_conn(); cur = conn.cursor()
-        cur.execute("SELECT id, domain, from_email, from_name, is_active FROM sending_domains WHERE id=%s",
-                    (forced_domain_id,))
-        drow = cur.fetchone(); cur.close(); conn.close()
-        if not drow:
-            return {"success": False, "error": "The sending domain selected for this step no longer exists"}
-        if not drow[4]:
-            return {"success": False, "error": f"Sending domain {drow[1]} is paused — pick another or resume it in Settings"}
-        sd = {'id': drow[0], 'domain': drow[1], 'from_email': drow[2], 'from_name': drow[3]}
-    else:
-        # M11: rotate across configured sending domains when any are set up;
-        # falls back to the single global FROM_EMAIL/FROM_NAME otherwise.
-        sd = pick_sending_domain()
-        if not sd and has_sending_domains_configured():
-            return {"success": False, "error": "Blocked: all sending domains are paused or at their "
-                                               "daily cap — check Settings → Sending Domains"}
     result = send_email_via_resend(email, subj, body, body_html,
-                                   from_email=sd['from_email'] if sd else None,
-                                   from_name=sd['from_name'] if sd else None,
-                                   unsub_url=build_unsub_url(unsub_token))
+                                   from_email=sender['from_email'], from_name=sender['from_name'],
+                                   unsub_url=build_unsub_url(unsub_token),
+                                   reply_to=sender['reply_to'], footer=sender['footer'])
 
     if result.get("success"):
         conn = db_conn(); cur = conn.cursor()
         cur.execute("""
             INSERT INTO outreach_log
-              (lead_id, email_to, email_subject, email_body, mockup_url, sent_at, status, resend_message_id, sending_domain_id)
-            VALUES (%s, %s, %s, %s, %s, NOW(), 'sent', %s, %s)
+              (lead_id, email_to, email_subject, email_body, mockup_url, sent_at, status, resend_message_id,
+               sending_domain_id, tenant_id)
+            VALUES (%s, %s, %s, %s, %s, NOW(), 'sent', %s, %s, %s)
             RETURNING id
-        """, (lead_id, email, subj, body, mockup or "", result.get("message_id"), sd['id'] if sd else None))
+        """, (lead_id, email, subj, body, mockup or "", result.get("message_id"), sender['domain_id'], tenant_id))
         cur.execute("UPDATE leads SET status='sent' WHERE id=%s", (lead_id,))
         conn.commit()
         cur.close(); conn.close()
@@ -8383,6 +8431,11 @@ BENCHMARK_CHANNELS = {
 _BENCHMARK_NUMERIC = ('spend', 'leads', 'qualified_leads', 'meetings_booked', 'meetings_attended',
                       'customers', 'revenue')
 
+# One definition of a qualified lead, used by the ICP cards, CRM auto-push,
+# digests and the Performance page. Needs aliases l (leads) and p (the lead's
+# icp_profiles row, LEFT JOINed).
+QUALIFIED_SQL = "COALESCE(l.icp_score, l.ai_score * 10, 0) >= COALESCE(p.min_lead_score, 60)"
+
 def _ratio(num, den, scale=1.0):
     return round(float(num) / float(den) * scale, 2) if den else None
 
@@ -8588,6 +8641,266 @@ def icp_in_scope(icp_id, tenant_id):
         return ok
     except Exception:
         return False
+
+# ──────────────────────────────────────────────────────────────
+#  M15: PER-COMPANY SETTINGS — each client company sends as itself
+#  (identity, legal footer, domains, daily cap), books into its own
+#  Calendly, reads replies from its own inbox, pushes to its own CRM
+#  and gets its own branding and daily digest.
+# ──────────────────────────────────────────────────────────────
+# Keys a company may set for itself / keys only the platform admin may set.
+COMPANY_SETTING_KEYS = ('from_name', 'from_email', 'reply_to', 'company_name', 'company_address',
+                        'footer_text', 'brand_name', 'brand_color', 'calendly_url',
+                        'digest_enabled', 'digest_email', 'imap_host', 'imap_user', 'imap_pass')
+COMPANY_ADMIN_KEYS = ('daily_send_limit',)
+COMPANY_SECRET_KEYS = ('imap_pass',)
+
+def ensure_m15_tables():
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS tenant_settings (
+            tenant_id   UUID PRIMARY KEY,
+            settings    JSONB NOT NULL DEFAULT '{}',
+            updated_at  TIMESTAMPTZ DEFAULT NOW()
+        )""")
+    cur.execute("ALTER TABLE sending_domains ADD COLUMN IF NOT EXISTS tenant_id UUID")
+    cur.execute("ALTER TABLE crm_connections ADD COLUMN IF NOT EXISTS tenant_id UUID")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_outreach_log_tenant ON outreach_log(tenant_id)")
+    conn.commit(); cur.close(); conn.close()
+
+def get_tenant_settings(tenant_id):
+    if not tenant_id:
+        return {}
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("SELECT settings FROM tenant_settings WHERE tenant_id = %s", (tenant_id,))
+        row = cur.fetchone(); cur.close(); conn.close()
+        return dict(row[0] or {}) if row else {}
+    except Exception:
+        return {}
+
+def save_tenant_settings(tenant_id, updates):
+    current = get_tenant_settings(tenant_id)
+    for k, v in updates.items():
+        # A masked secret round-tripped from GET must not overwrite the real one.
+        if k in COMPANY_SECRET_KEYS and isinstance(v, str) and v.startswith('••••'):
+            continue
+        current[k] = v
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("""INSERT INTO tenant_settings (tenant_id, settings, updated_at) VALUES (%s, %s, NOW())
+                   ON CONFLICT (tenant_id) DO UPDATE SET settings = EXCLUDED.settings, updated_at = NOW()""",
+                (tenant_id, json.dumps(current)))
+    conn.commit(); cur.close(); conn.close()
+    return current
+
+def tenant_is_operator(tenant_id):
+    """True for no tenant or the platform admin's own workspace — those keep
+    using the server-wide sender, footer and settings as before."""
+    if not tenant_id:
+        return True
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("SELECT 1 FROM auth_users WHERE tenant_id = %s AND role IN ('admin','service') LIMIT 1",
+                    (tenant_id,))
+        ok = cur.fetchone() is not None
+        cur.close(); conn.close()
+        return ok
+    except Exception:
+        return False
+
+def lead_tenant(lead_id):
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("SELECT tenant_id FROM leads WHERE id = %s", (lead_id,))
+        row = cur.fetchone(); cur.close(); conn.close()
+        return str(row[0]) if row and row[0] else None
+    except Exception:
+        return None
+
+def _domain_owner_sql(alias='d'):
+    """WHERE fragment for "sending domains this company may use": its own,
+    plus unassigned ones for the operator."""
+    return f"({alias}.tenant_id = %s OR (%s AND {alias}.tenant_id IS NULL))"
+
+def resolve_sender(tenant_id, forced_domain_id=None):
+    """Who an outreach email for this company is from, and what its legal
+    footer says. Returns (sender, None) or (None, reason it can't send).
+    sender = {domain_id, from_email, from_name, reply_to, footer}."""
+    op = tenant_is_operator(tenant_id)
+    st = get_tenant_settings(tenant_id)
+    owner = (tenant_id or NO_TENANT, op)
+    sd = None
+    if forced_domain_id:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute(f"""SELECT id, domain, from_email, from_name, is_active FROM sending_domains d
+                        WHERE id = %s AND {_domain_owner_sql()}""", (forced_domain_id, *owner))
+        drow = cur.fetchone(); cur.close(); conn.close()
+        if not drow:
+            return None, "The sending domain selected for this step no longer exists"
+        if not drow[4]:
+            return None, f"Sending domain {drow[1]} is paused — pick another or resume it in Settings"
+        sd = {'id': drow[0], 'domain': drow[1], 'from_email': drow[2], 'from_name': drow[3]}
+    else:
+        sd = pick_sending_domain(tenant_id, op)
+        if not sd and has_sending_domains_configured(tenant_id, op):
+            return None, ("Blocked: all of this company's sending domains are paused or at their "
+                          "daily cap — check its sending domains")
+    footer = {
+        'company': st.get('company_name') or st.get('brand_name')
+                   or ((CONFIG.get('client_brand_name') or COMPANY_NAME) if op else ''),
+        'address': st.get('company_address') or (COMPANY_ADDRESS if op else ''),
+        'text': st.get('footer_text') or (CONFIG.get('client_footer_text', '') if op else ''),
+    }
+    if sd:
+        # A client company's own From name wins over the domain's default.
+        from_email = sd['from_email']
+        from_name = (st.get('from_name') if not op else '') or sd['from_name']
+    else:
+        from_email = st.get('from_email') or (FROM_EMAIL if op else '')
+        from_name = st.get('from_name') or (FROM_NAME if op else footer['company'])
+    if not op:
+        # A client company must send as itself, with the postal address the
+        # law requires in commercial email — never fall back to ours.
+        missing = [label for label, ok in (('a from address', from_email),
+                                           ('a company name', footer['company']),
+                                           ('a postal address', footer['address'])) if not ok]
+        if missing:
+            needs = missing[0] if len(missing) == 1 else ', '.join(missing[:-1]) + ' and ' + missing[-1]
+            return None, f'Blocked: this company still needs {needs} for outreach — add it in Company settings'
+    return {'domain_id': sd['id'] if sd else None, 'from_email': from_email, 'from_name': from_name,
+            'reply_to': st.get('reply_to') or None, 'footer': footer}, None
+
+def company_send_readiness(tenant_id):
+    sender, err = resolve_sender(tenant_id)
+    return {'can_send': sender is not None, 'reason': err,
+            'from': f"{sender['from_name']} <{sender['from_email']}>" if sender else None}
+
+def company_throttle_status(tenant_id):
+    """Per-company daily cap (admin-set), checked on top of the server-wide caps."""
+    limit = get_tenant_settings(tenant_id).get('daily_send_limit') if tenant_id else None
+    if not limit:
+        return True, ''
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("""SELECT COUNT(*) FROM outreach_log o JOIN leads l ON l.id = o.lead_id
+                       WHERE l.tenant_id = %s AND o.sent_at > NOW() - INTERVAL '24 hours'""", (tenant_id,))
+        n = cur.fetchone()[0]; cur.close(); conn.close()
+    except Exception:
+        return True, ''
+    if n >= int(limit):
+        return False, f"This company's daily send cap is reached ({n}/{limit})"
+    return True, ''
+
+def calendly_webhook_token(tenant_id):
+    st = get_tenant_settings(tenant_id)
+    if not st.get('calendly_webhook_token'):
+        st = save_tenant_settings(tenant_id, {'calendly_webhook_token': _h_secrets.token_urlsafe(18)})
+    return st['calendly_webhook_token']
+
+def tenant_for_calendly_token(token):
+    if not token:
+        return None
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("SELECT tenant_id FROM tenant_settings WHERE settings->>'calendly_webhook_token' = %s",
+                    (token,))
+        row = cur.fetchone(); cur.close(); conn.close()
+        return str(row[0]) if row else None
+    except Exception:
+        return None
+
+def company_settings_view(tenant_id, include_admin_keys):
+    """Settings payload for the Company page (secrets masked)."""
+    st = get_tenant_settings(tenant_id)
+    keys = COMPANY_SETTING_KEYS + (COMPANY_ADMIN_KEYS if include_admin_keys else ())
+    out = {k: st.get(k, '') for k in keys}
+    for k in COMPANY_SECRET_KEYS:
+        if out.get(k):
+            out[k] = '••••' + out[k][-2:]
+    return out
+
+def reply_mailboxes(tenant_scope=None):
+    """[(tenant_id or None, host, user, password)] to scan for replies.
+    tenant_scope set = that company's inbox only. None = the server-wide inbox
+    plus every company inbox."""
+    boxes = []
+    if tenant_scope is None and IMAP_HOST and IMAP_USER and IMAP_PASS:
+        boxes.append((None, IMAP_HOST, IMAP_USER, IMAP_PASS))
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("""SELECT tenant_id, settings->>'imap_host', settings->>'imap_user', settings->>'imap_pass'
+                       FROM tenant_settings
+                       WHERE COALESCE(settings->>'imap_host','') <> '' AND COALESCE(settings->>'imap_user','') <> ''
+                         AND COALESCE(settings->>'imap_pass','') <> '' {tc}""".format(
+                        tc="AND tenant_id = %s" if tenant_scope else ""),
+                    (tenant_scope,) if tenant_scope else ())
+        boxes += [(str(r[0]), r[1], r[2], r[3]) for r in cur.fetchall()]
+        cur.close(); conn.close()
+    except Exception as e:
+        print(f'[replies] mailbox lookup failed: {e}')
+    return boxes
+
+def reply_check_loop():
+    """Background thread: check every reply inbox every 15 minutes so reply
+    rates, sequence auto-stops and positive-reply counts stay current
+    without anyone clicking Check Replies."""
+    while True:
+        time.sleep(int(CONFIG.get('reply_check_interval_sec', 900)))
+        try:
+            if reply_mailboxes(None):
+                run_check_replies_bg(f'replies_auto_{int(time.time())}')
+        except Exception as e:
+            print(f'[replies] scheduled check failed: {e}')
+
+def crm_connection_allowed(connection_tenant, lead_tenant_id):
+    """A CRM connection only receives its own company's leads; unassigned
+    (legacy) connections serve the operator's leads."""
+    if connection_tenant:
+        return str(connection_tenant) == (lead_tenant_id or '')
+    return tenant_is_operator(lead_tenant_id)
+
+def first_crm_connection_for(tenant_id):
+    op = tenant_is_operator(tenant_id)
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("""SELECT id FROM crm_connections c
+                   WHERE is_active = TRUE AND (c.tenant_id = %s OR (%s AND c.tenant_id IS NULL))
+                   ORDER BY (c.tenant_id IS NULL), id LIMIT 1""", (tenant_id or NO_TENANT, op))
+    row = cur.fetchone(); cur.close(); conn.close()
+    return row[0] if row else None
+
+def run_company_digest(tenant_id, recipient):
+    """A client company's own morning summary — its leads, replies, meetings
+    and deals only. Sent from the server account with no marketing footer."""
+    tc = (tenant_id,)
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute(f"""SELECT COUNT(*),
+                           COUNT(*) FILTER (WHERE {QUALIFIED_SQL})
+                    FROM leads l LEFT JOIN icp_profiles p ON p.id = l.icp_id
+                    WHERE l.tenant_id = %s AND l.lead_type IS NULL
+                      AND l.created_at > NOW() - INTERVAL '24 hours'""", tc)
+    new_leads, qualified = cur.fetchone()
+    cur.execute("""SELECT COUNT(*) FILTER (WHERE o.sent_at > NOW() - INTERVAL '24 hours'),
+                          COUNT(*) FILTER (WHERE o.replied_at > NOW() - INTERVAL '24 hours'),
+                          COUNT(*) FILTER (WHERE o.replied_at > NOW() - INTERVAL '24 hours'
+                                             AND o.reply_classification = 'interested')
+                   FROM outreach_log o JOIN leads l ON l.id = o.lead_id WHERE l.tenant_id = %s""", tc)
+    sent, replies, interested = cur.fetchone()
+    cur.execute("""SELECT COUNT(*) FILTER (WHERE meeting_booked_at > NOW() - INTERVAL '24 hours'),
+                          COUNT(*) FILTER (WHERE deal_stage = 'won' AND deal_closed_at > NOW() - INTERVAL '24 hours')
+                   FROM leads WHERE tenant_id = %s""", tc)
+    meetings, won = cur.fetchone()
+    cur.execute("SELECT COUNT(*) FROM leads WHERE tenant_id = %s AND status = 'ready'", tc)
+    ready = cur.fetchone()[0]
+    cur.close(); conn.close()
+    st = get_tenant_settings(tenant_id)
+    brand = st.get('brand_name') or st.get('company_name') or 'Prospecting'
+    lines = [f"New leads (24h): {new_leads}", f"Qualified: {qualified}",
+             f"Emails sent: {sent}", f"Replies: {replies} ({interested} interested)",
+             f"Meetings booked: {meetings}", f"Deals won: {won}"]
+    if ready:
+        lines += ['', f"{ready} leads have email copy ready — review and send them in Email & Outreach."]
+    return send_email_via_resend(recipient, f'{brand} daily prospecting digest', '\n'.join(lines),
+                                 skip_footer=True)
 
 def approve_lead(lead_id):
     conn = db_conn(); cur = conn.cursor()
@@ -8885,6 +9198,36 @@ class Handler(BaseHTTPRequestHandler):
             token = (qs.get('token') or [''])[0]
         return auth_check(token)
 
+    def target_company(self, requested=None):
+        """Company a settings request acts on: a client's own, always; for
+        admin the requested company (validated), else the admin's own."""
+        scope = self.scope_tenant()
+        if scope:
+            return scope
+        if requested:
+            try:
+                conn = db_conn(); cur = conn.cursor()
+                cur.execute("SELECT 1 FROM tenants WHERE id = %s", (requested,))
+                ok = cur.fetchone() is not None
+                cur.close(); conn.close()
+            except Exception:
+                ok = False
+            return requested if ok else None
+        return get_user_tenant_id(self.current_username())
+
+    def crm_connection_in_scope(self, connection_id):
+        scope = self.scope_tenant()
+        if scope is None:
+            return True
+        try:
+            conn = db_conn(); cur = conn.cursor()
+            cur.execute("SELECT 1 FROM crm_connections WHERE id = %s AND tenant_id = %s", (connection_id, scope))
+            ok = cur.fetchone() is not None
+            cur.close(); conn.close()
+            return ok
+        except Exception:
+            return False
+
     def job_visible(self, job):
         """Admin sees every job; a client only its own company's."""
         scope = self.scope_tenant()
@@ -9001,7 +9344,14 @@ class Handler(BaseHTTPRequestHandler):
                 # app shell needs to render — never internal enrichment
                 # strategy, automation settings, or cost/budget config.
                 safe_keys = ('client_brand_name', 'client_brand_color', 'calendly_url', 'client_footer_text')
-                self.send_json(200, {k: CONFIG.get(k, '') for k in safe_keys})
+                out = {k: CONFIG.get(k, '') for k in safe_keys}
+                # M15: the company's own branding wins over the server-wide one
+                st = get_tenant_settings(self.scope_tenant())
+                for src, dst in (('brand_name', 'client_brand_name'), ('brand_color', 'client_brand_color'),
+                                 ('calendly_url', 'calendly_url'), ('footer_text', 'client_footer_text')):
+                    if st.get(src):
+                        out[dst] = st[src]
+                self.send_json(200, out)
         elif p == '/health':
             self.send_json(200, {
                 'status': 'ok', 'version': '5.0',
@@ -9060,10 +9410,12 @@ class Handler(BaseHTTPRequestHandler):
             if not self.require_admin(): return
             try:
                 conn = db_conn(); cur = conn.cursor()
-                cur.execute("""SELECT username, role, tenant_id, created_at FROM auth_users
-                               WHERE role != 'admin' ORDER BY created_at""")
+                cur.execute("""SELECT u.username, u.role, u.tenant_id, u.created_at, t.name FROM auth_users u
+                               LEFT JOIN tenants t ON t.id = u.tenant_id
+                               WHERE u.role != 'admin' ORDER BY t.name, u.created_at""")
                 users = [{'username': r[0], 'role': r[1], 'tenant_id': str(r[2]) if r[2] else None,
-                          'created_at': r[3].isoformat() if r[3] else None} for r in cur.fetchall()]
+                          'created_at': r[3].isoformat() if r[3] else None, 'company': r[4]}
+                         for r in cur.fetchall()]
                 cur.close(); conn.close()
                 self.send_json(200, {'users': users})
             except Exception as e:
@@ -9100,17 +9452,79 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
-        elif p == '/crm/connections':
+        elif p == '/companies':
+            # Admin: every client company with its users and activity
             if not self.require_admin(): return
             try:
                 conn = db_conn(); cur = conn.cursor()
-                cur.execute("""SELECT id, type, name, config, is_active, created_at,
+                cur.execute("""SELECT t.id, t.name, t.created_at,
+                                      COALESCE(json_agg(json_build_object('username', u.username, 'role', u.role)
+                                               ORDER BY u.username) FILTER (WHERE u.username IS NOT NULL), '[]'),
+                                      (SELECT COUNT(*) FROM leads l WHERE l.tenant_id = t.id AND l.lead_type IS NULL),
+                                      (SELECT COUNT(*) FROM icp_profiles p WHERE p.tenant_id = t.id)
+                               FROM tenants t LEFT JOIN auth_users u ON u.tenant_id = t.id
+                               GROUP BY t.id ORDER BY t.name""")
+                rows = cur.fetchall(); cur.close(); conn.close()
+                companies = []
+                for tid, name, created, users, n_leads, n_icps in rows:
+                    tid = str(tid)
+                    companies.append({'id': tid, 'name': name, 'users': users, 'leads': n_leads, 'icps': n_icps,
+                                      'created_at': created.isoformat() if created else None,
+                                      'is_operator': any(u['role'] in ('admin', 'service') for u in users),
+                                      'readiness': company_send_readiness(tid)})
+                self.send_json(200, {'companies': companies})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p == '/company/settings':
+            try:
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                is_admin = self.scope_tenant() is None
+                tid = self.target_company((qs.get('tenant_id') or [''])[0])
+                if not tid:
+                    self.send_json(404, {'error': 'unknown company'}); return
+                conn = db_conn(); cur = conn.cursor()
+                cur.execute("SELECT name FROM tenants WHERE id = %s", (tid,))
+                row = cur.fetchone()
+                cur.execute("""SELECT d.id, d.domain, d.from_email, d.from_name, d.daily_cap, d.is_active, d.paused_reason
+                               FROM sending_domains d WHERE d.tenant_id = %s ORDER BY d.id""", (tid,))
+                domains = [dict(zip(['id', 'domain', 'from_email', 'from_name', 'daily_cap', 'is_active',
+                                     'paused_reason'], r)) for r in cur.fetchall()]
+                companies = None
+                if is_admin:
+                    cur.execute("""SELECT t.id, t.name, string_agg(u.username, ', ' ORDER BY u.username)
+                                   FROM tenants t JOIN auth_users u ON u.tenant_id = t.id
+                                   GROUP BY t.id, t.name ORDER BY t.name""")
+                    companies = [{'id': str(r[0]), 'name': r[1], 'users': r[2]} for r in cur.fetchall()]
+                cur.close(); conn.close()
+                base = PUBLIC_BASE_URL.rstrip('/') if PUBLIC_BASE_URL else ''
+                self.send_json(200, {
+                    'tenant_id': tid, 'company_name': row[0] if row else '',
+                    'is_operator': tenant_is_operator(tid),
+                    'settings': company_settings_view(tid, include_admin_keys=True),
+                    'admin_keys_editable': is_admin,
+                    'domains': domains,
+                    'readiness': company_send_readiness(tid),
+                    'calendly_webhook_url': f"{base}/webhook/calendly/{calendly_webhook_token(tid)}",
+                    'companies': companies,
+                })
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p == '/crm/connections':
+            try:
+                scope = self.scope_tenant()
+                conn = db_conn(); cur = conn.cursor()
+                cur.execute("""SELECT c.id, c.type, c.name, c.config, c.is_active, c.created_at,
                                       (SELECT COUNT(*) FROM crm_push_log WHERE connection_id=c.id AND status='ok'),
-                                      (SELECT COUNT(*) FROM crm_push_log WHERE connection_id=c.id AND status='failed')
-                               FROM crm_connections c ORDER BY id DESC""")
+                                      (SELECT COUNT(*) FROM crm_push_log WHERE connection_id=c.id AND status='failed'),
+                                      c.tenant_id, t.name
+                               FROM crm_connections c LEFT JOIN tenants t ON t.id = c.tenant_id
+                               {where} ORDER BY c.id DESC""".format(where="WHERE c.tenant_id = %s" if scope else ""),
+                            (scope,) if scope else ())
                 rows = cur.fetchall(); cur.close(); conn.close()
                 conns = []
-                for cid, ctype, name, config, active, created, ok_n, fail_n in rows:
+                for cid, ctype, name, config, active, created, ok_n, fail_n, c_tenant, c_company in rows:
                     config = dict(config or {})
                     # Mask secrets — never echo tokens/webhook secrets back to the client
                     for k in ('api_token', 'webhook_secret'):
@@ -9118,7 +9532,8 @@ class Handler(BaseHTTPRequestHandler):
                             config[k] = '••••' + config[k][-4:] if len(config[k]) > 4 else '••••'
                     conns.append({'id': cid, 'type': ctype, 'name': name, 'config': config,
                                   'is_active': active, 'created_at': created.isoformat() if created else None,
-                                  'pushed_ok': ok_n, 'pushed_failed': fail_n})
+                                  'pushed_ok': ok_n, 'pushed_failed': fail_n,
+                                  'tenant_id': str(c_tenant) if c_tenant else None, 'company': c_company})
                 self.send_json(200, {'connections': conns})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
@@ -9131,13 +9546,16 @@ class Handler(BaseHTTPRequestHandler):
                     SELECT d.id, d.domain, d.from_email, d.from_name, d.daily_cap, d.is_active, d.paused_reason,
                            COUNT(o.id) FILTER (WHERE o.sent_at > NOW() - INTERVAL '24 hours') as sent_today,
                            COUNT(o.id) FILTER (WHERE o.sent_at > NOW() - INTERVAL '7 days') as sent_7d,
-                           COUNT(o.id) FILTER (WHERE o.sent_at > NOW() - INTERVAL '7 days' AND o.status IN ('bounced','complained')) as bad_7d
+                           COUNT(o.id) FILTER (WHERE o.sent_at > NOW() - INTERVAL '7 days' AND o.status IN ('bounced','complained')) as bad_7d,
+                           d.tenant_id::text, t.name
                     FROM sending_domains d LEFT JOIN outreach_log o ON o.sending_domain_id = d.id
-                    GROUP BY d.id ORDER BY d.id ASC
+                    LEFT JOIN tenants t ON t.id = d.tenant_id
+                    GROUP BY d.id, t.name ORDER BY d.id ASC
                 """)
                 rows = cur.fetchall(); cur.close(); conn.close()
                 domains = [dict(zip(['id','domain','from_email','from_name','daily_cap','is_active',
-                                     'paused_reason','sent_today','sent_7d','bad_7d'], r)) for r in rows]
+                                     'paused_reason','sent_today','sent_7d','bad_7d','tenant_id','company'], r))
+                           for r in rows]
                 self.send_json(200, {'domains': domains, 'automation_mode': CONFIG.get('outreach_automation_mode', 'off')})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
@@ -9520,9 +9938,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(500, {'error': str(e)})
             return
 
-        if p == '/webhook/calendly':
+        if p == '/webhook/calendly' or p.startswith('/webhook/calendly/'):
             try:
-                result = handle_calendly_webhook(raw_body)
+                tenant_id = None
+                if p.startswith('/webhook/calendly/'):
+                    tenant_id = tenant_for_calendly_token(p.rsplit('/', 1)[1])
+                    if not tenant_id:
+                        self.send_json(404, {'error': 'unknown webhook'}); return
+                result = handle_calendly_webhook(raw_body, tenant_id)
                 self.send_json(200 if result.get('ok') else 400, result)
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
@@ -9785,10 +10208,74 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
+        elif p == '/company/settings/save':
+            try:
+                is_admin = self.scope_tenant() is None
+                tid = self.target_company(body.get('tenant_id'))
+                if not tid:
+                    self.send_json(404, {'error': 'unknown company'}); return
+                incoming = body.get('settings') or {}
+                allowed = COMPANY_SETTING_KEYS + (COMPANY_ADMIN_KEYS if is_admin else ())
+                updates = {}
+                for k in allowed:
+                    if k not in incoming:
+                        continue
+                    v = incoming[k]
+                    if k == 'digest_enabled':
+                        v = bool(v)
+                    elif k == 'daily_send_limit':
+                        try:
+                            v = max(0, int(v or 0)) or ''
+                        except (TypeError, ValueError):
+                            self.send_json(400, {'error': 'daily_send_limit must be a number'}); return
+                    else:
+                        v = str(v or '').strip()[:500]
+                    if k in ('from_email', 'reply_to', 'digest_email') and v and not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', v):
+                        self.send_json(400, {'error': f'{k} is not a valid email address'}); return
+                    if k == 'calendly_url' and v and not v.startswith('https://'):
+                        self.send_json(400, {'error': 'calendly_url must start with https://'}); return
+                    if k == 'brand_color' and v and not re.match(r'^#[0-9a-fA-F]{6}$', v):
+                        self.send_json(400, {'error': 'brand_color must look like #1a2b3c'}); return
+                    updates[k] = v
+                if 'company_display_name' in body and str(body['company_display_name']).strip():
+                    conn = db_conn(); cur = conn.cursor()
+                    cur.execute("UPDATE tenants SET name = %s WHERE id = %s",
+                                (str(body['company_display_name']).strip()[:200], tid))
+                    conn.commit(); cur.close(); conn.close()
+                save_tenant_settings(tid, updates)
+                self.send_json(200, {'success': True, 'readiness': company_send_readiness(tid)})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p == '/company/test-email':
+            # Sends a real email as the company (its domain/from-address and
+            # footer) so a client can confirm its own setup end to end.
+            try:
+                tid = self.target_company(body.get('tenant_id'))
+                to_email = (body.get('to_email') or '').strip()
+                if not tid:
+                    self.send_json(404, {'error': 'unknown company'}); return
+                if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', to_email):
+                    self.send_json(400, {'error': 'a valid to_email is required'}); return
+                sender, err = resolve_sender(tid)
+                if not sender:
+                    self.send_json(400, {'success': False, 'error': err}); return
+                result = send_email_via_resend(
+                    to_email, subject='Test email — your outreach setup',
+                    body_text='This is a test confirming outreach emails send as your company.\n\n'
+                              'The footer below is what every prospect will see.',
+                    from_email=sender['from_email'], from_name=sender['from_name'],
+                    reply_to=sender['reply_to'], footer=sender['footer'])
+                result['sent_as'] = f"{sender['from_name']} <{sender['from_email']}>"
+                self.send_json(200 if result.get('success') else 502, result)
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
         elif p == '/crm/connections/save':
-            if not self.require_admin(): return
             try:
                 cid = body.get('id')
+                if cid and not self.crm_connection_in_scope(cid):
+                    self.send_json(404, {'error': 'Connection not found'}); return
                 ctype = body.get('type', '')
                 if ctype not in ('pipedrive', 'webhook'):
                     self.send_json(400, {'error': 'type must be pipedrive or webhook'}); return
@@ -9807,9 +10294,11 @@ class Handler(BaseHTTPRequestHandler):
                     cur.execute("UPDATE crm_connections SET type=%s, name=%s, config=%s, is_active=%s WHERE id=%s",
                                 (ctype, name, json.dumps(config), is_active, cid))
                 else:
-                    cur.execute("""INSERT INTO crm_connections (type, name, config, is_active)
-                                   VALUES (%s,%s,%s,%s) RETURNING id""",
-                                (ctype, name, json.dumps(config), is_active))
+                    # A company's own connection (admin may add one for a company)
+                    owner = self.target_company(body.get('tenant_id'))
+                    cur.execute("""INSERT INTO crm_connections (type, name, config, is_active, tenant_id)
+                                   VALUES (%s,%s,%s,%s,%s) RETURNING id""",
+                                (ctype, name, json.dumps(config), is_active, owner))
                     cid = cur.fetchone()[0]
                 conn.commit(); cur.close(); conn.close()
                 self.send_json(200, {'success': True, 'id': cid})
@@ -9817,9 +10306,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(500, {'error': str(e)})
 
         elif p.startswith('/crm/connections/') and p.endswith('/delete'):
-            if not self.require_admin(): return
             try:
                 cid = p.split('/')[3]
+                if not self.crm_connection_in_scope(cid):
+                    self.send_json(404, {'error': 'Connection not found'}); return
                 conn = db_conn(); cur = conn.cursor()
                 cur.execute("DELETE FROM crm_connections WHERE id=%s", (cid,))
                 conn.commit(); cur.close(); conn.close()
@@ -9872,16 +10362,21 @@ class Handler(BaseHTTPRequestHandler):
                 from_name = (body.get('from_name') or 'Controva').strip()
                 daily_cap = max(1, int(body.get('daily_cap', 20) or 20))
                 is_active = bool(body.get('is_active', True))
+                # Which client company sends from this domain (blank = the operator)
+                owner = body.get('tenant_id') or None
+                if owner and not self.target_company(owner):
+                    self.send_json(400, {'error': 'unknown company'}); return
                 conn = db_conn(); cur = conn.cursor()
                 if did:
                     cur.execute("""UPDATE sending_domains SET domain=%s, from_email=%s, from_name=%s,
-                                   daily_cap=%s, is_active=%s, paused_reason=CASE WHEN %s THEN NULL ELSE paused_reason END
+                                   daily_cap=%s, is_active=%s, paused_reason=CASE WHEN %s THEN NULL ELSE paused_reason END,
+                                   tenant_id=%s
                                    WHERE id=%s""",
-                                (domain, from_email, from_name, daily_cap, is_active, is_active, did))
+                                (domain, from_email, from_name, daily_cap, is_active, is_active, owner, did))
                 else:
-                    cur.execute("""INSERT INTO sending_domains (domain, from_email, from_name, daily_cap, is_active)
-                                   VALUES (%s,%s,%s,%s,%s) RETURNING id""",
-                                (domain, from_email, from_name, daily_cap, is_active))
+                    cur.execute("""INSERT INTO sending_domains (domain, from_email, from_name, daily_cap, is_active, tenant_id)
+                                   VALUES (%s,%s,%s,%s,%s,%s) RETURNING id""",
+                                (domain, from_email, from_name, daily_cap, is_active, owner))
                     did = cur.fetchone()[0]
                 conn.commit(); cur.close(); conn.close()
                 self.send_json(200, {'success': True, 'id': did})
@@ -9900,16 +10395,28 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(500, {'error': str(e)})
 
         elif p == '/crm/push':
-            if not self.require_admin(): return
             try:
                 connection_id = body.get('connection_id')
                 if not connection_id:
                     self.send_json(400, {'error': 'connection_id required'}); return
-                lead_ids = body.get('lead_ids')
-                if not lead_ids:
+                if not self.crm_connection_in_scope(connection_id):
+                    self.send_json(404, {'error': 'Connection not found'}); return
+                scope = self.scope_tenant()
+                requested = body.get('lead_ids')
+                lead_ids = [l for l in (requested or []) if lead_in_scope(l, scope)]
+                if not requested:
                     min_score = int(body.get('min_score', 0) or 0)
                     conn = db_conn(); cur = conn.cursor()
-                    sc, sp = scope_sql()
+                    # Only leads this connection may receive (its company's own;
+                    # the operator's for an unassigned connection).
+                    cur.execute("SELECT tenant_id FROM crm_connections WHERE id = %s", (connection_id,))
+                    ct = cur.fetchone()
+                    ct = str(ct[0]) if ct and ct[0] else None
+                    if ct:
+                        sc, sp = " AND l.tenant_id = %s", (ct,)
+                    else:
+                        sc, sp = (" AND (l.tenant_id IS NULL OR l.tenant_id IN (SELECT tenant_id FROM auth_users"
+                                  " WHERE role IN ('admin','service') AND tenant_id IS NOT NULL))"), ()
                     cur.execute(f"""SELECT id FROM leads l WHERE COALESCE(icp_score, ai_score*10, 0) >= %s{sc}
                                    ORDER BY COALESCE(icp_score, ai_score*10, 0) DESC LIMIT 500""", (min_score, *sp))
                     lead_ids = [str(r[0]) for r in cur.fetchall()]
@@ -10093,10 +10600,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(500, {'error': str(e)})
 
         elif p == '/check-replies':
-            if not self.require_admin(): return   # one shared inbox for all companies
             try:
                 job_id = f'job_{int(time.time() * 1000)}'
-                _bg_thread(run_check_replies_bg, job_id)
+                _bg_thread(run_check_replies_bg, job_id, self.scope_tenant())
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
@@ -10297,8 +10803,19 @@ class Handler(BaseHTTPRequestHandler):
                 if cur.fetchone():
                     cur.close(); conn.close()
                     self.send_json(409, {'error': 'that username already exists'}); return
-                cur.execute("INSERT INTO tenants (name) VALUES (%s) RETURNING id", (f"{username}'s workspace",))
-                new_tenant_id = cur.fetchone()[0]
+                # Join an existing company (several users share its leads,
+                # ICPs and settings) or start a new one.
+                if body.get('tenant_id'):
+                    cur.execute("SELECT id FROM tenants WHERE id = %s", (body['tenant_id'],))
+                    row = cur.fetchone()
+                    if not row:
+                        cur.close(); conn.close()
+                        self.send_json(404, {'error': 'unknown company'}); return
+                    new_tenant_id = row[0]
+                else:
+                    company = (body.get('company_name') or '').strip()[:200] or f"{username}'s workspace"
+                    cur.execute("INSERT INTO tenants (name) VALUES (%s) RETURNING id", (company,))
+                    new_tenant_id = cur.fetchone()[0]
                 salt = _h_secrets.token_hex(16)
                 pwhash = auth_hash(password, salt)
                 cur.execute("""INSERT INTO auth_users (username, salt, pwhash, role, tenant_id)
@@ -10670,6 +11187,7 @@ if __name__ == '__main__':
         ensure_sending_domains_table()
         ensure_workflow_tables()
         ensure_m14_tables()
+        ensure_m15_tables()
         print('Schema migration: OK')
     except Exception as e:
         print(f'Schema migration warning (non-fatal): {e}')
@@ -10695,6 +11213,8 @@ if __name__ == '__main__':
     # M11: outreach automation loop (no-op unless outreach_automation_mode == 'full_auto')
     t4 = threading.Thread(target=outreach_automation_loop, daemon=True)
     t4.start()
+    # M15: reply inboxes (server-wide + each company's) every 15 minutes
+    threading.Thread(target=reply_check_loop, daemon=True).start()
     server = ThreadingServer(('0.0.0.0', 8080), Handler)
     print('LeadGen v5 - Multi-Module Intelligence Platform')
     print('Modules: discover, enrich, score, assets, seo, competitor, ecommerce')
