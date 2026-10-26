@@ -18,7 +18,7 @@ Key Improvements:
   - Free alternatives for Apollo/Hunter
 """
 import json, csv, io, re, time, urllib.request, urllib.parse, psycopg2
-import threading, os, hashlib, hmac, smtplib, socket
+import threading, os, hashlib, hmac, smtplib, socket, uuid
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 
@@ -344,7 +344,16 @@ DB = dict(host=os.environ.get('DB_HOST', '127.0.0.1'), port=int(os.environ.get('
           user=os.environ.get('DB_USER', 'leadgen'),
           password=os.environ.get('DB_PASS', ''), connect_timeout=2)
 
-JOBS = {}  # background job tracker
+class _JobRegistry(dict):
+    """Background job tracker. Every job records which company started it
+    (the request's tenant scope, see set_current_scope) so /job/<id> and
+    /job/<id>/cancel only answer the company that owns the job."""
+    def __setitem__(self, key, value):
+        if isinstance(value, dict) and 'owner_scope' not in value:
+            value['owner_scope'] = get_current_scope()
+        super().__setitem__(key, value)
+
+JOBS = _JobRegistry()  # background job tracker
 
 # ──────────────────────────────────────────────────────────────
 #  OXYLABS SDK (lazy load)
@@ -493,10 +502,11 @@ def save_research_history(run_type, query_text, country, result):
     try:
         conn = db_conn(); cur = conn.cursor()
         cur.execute("""INSERT INTO research_history
-                       (run_type, query_text, country, result, credits_used, data_sources)
-                       VALUES (%s,%s,%s,%s,%s,%s) RETURNING id""",
+                       (run_type, query_text, country, result, credits_used, data_sources, tenant_id)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
                     (run_type, query_text[:300], country, json.dumps(result),
-                     result.get('credits_used', 0), result.get('data_sources', [])))
+                     result.get('credits_used', 0), result.get('data_sources', []),
+                     current_owner_tenant()))
         new_id = cur.fetchone()[0]
         conn.commit(); cur.close(); conn.close()
         return new_id
@@ -515,10 +525,10 @@ def list_research_history(run_type, limit=30):
                     ELSE NULL END AS product_count,
                CASE WHEN run_type='ecommerce'
                     THEN result->>'ai_verdict' ELSE NULL END AS verdict_preview
-        FROM research_history
-        WHERE run_type=%s
+        FROM research_history rh
+        WHERE run_type=%s{sc}
         ORDER BY created_at DESC LIMIT %s
-    """, (run_type, limit))
+    """.format(sc=scope_sql('rh')[0]), (run_type, *scope_sql('rh')[1], limit))
     rows = cur.fetchall()
     cur.close(); conn.close()
     return [{
@@ -530,14 +540,16 @@ def list_research_history(run_type, limit=30):
 
 def get_research_history_entry(entry_id):
     conn = db_conn(); cur = conn.cursor()
-    cur.execute('SELECT result FROM research_history WHERE id=%s', (entry_id,))
+    sc, sp = scope_sql('rh')
+    cur.execute(f'SELECT result FROM research_history rh WHERE id=%s{sc}', (entry_id, *sp))
     row = cur.fetchone()
     cur.close(); conn.close()
     return row[0] if row else None
 
 def delete_research_history_entry(entry_id):
     conn = db_conn(); cur = conn.cursor()
-    cur.execute('DELETE FROM research_history WHERE id=%s', (entry_id,))
+    sc, sp = scope_sql('research_history')
+    cur.execute(f'DELETE FROM research_history WHERE id=%s{sc}', (entry_id, *sp))
     deleted = cur.rowcount > 0
     conn.commit(); cur.close(); conn.close()
     return deleted
@@ -1734,12 +1746,15 @@ def discover_leads_smart(niche, city, country='', original_query='',
         pn = norm_phone(cand.get('phone'))
         dom = norm_domain(website)
         try:
+            # Dedup within the company only: another client company may
+            # prospect the same business independently.
             cur.execute("""SELECT id FROM leads
-                           WHERE place_id=%s
+                           WHERE (place_id=%s
                               OR (%s <> '' AND phone_norm=%s)
-                              OR (%s <> '' AND domain=%s)
+                              OR (%s <> '' AND domain=%s))
+                             AND tenant_id IS NOT DISTINCT FROM %s
                            LIMIT 1""",
-                        (pid, pn, pn, dom, dom))
+                        (pid, pn, pn, dom, dom, tenant_id))
             row = cur.fetchone()
             if row:
                 lead_id = row[0]
@@ -1748,7 +1763,7 @@ def discover_leads_smart(niche, city, country='', original_query='',
                 cur.execute("""INSERT INTO leads(place_id,business_name,niche,city,country,address,phone,
                               website,latitude,longitude,google_rating,review_count,status,source,phone_norm,domain,search_batch_id,tenant_id)
                     VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'discovered',%s,%s,%s,%s,%s)
-                    ON CONFLICT (place_id) DO NOTHING RETURNING id""",
+                    ON CONFLICT ((COALESCE(tenant_id, '00000000-0000-0000-0000-000000000000'::uuid)), place_id) DO NOTHING RETURNING id""",
                     (pid, (cand.get('name') or 'Unknown')[:480], niche.lower(), city, country,
                      cand.get('address', ''), cand.get('phone', ''), website,
                      cand.get('lat'), cand.get('lng'), cand.get('rating'),
@@ -2258,14 +2273,15 @@ def enrich_all_discovered(provider_strategy='serper_then_oxylabs', job_id=None):
     a later call just picks up whatever's left."""
     conn = db_conn(); cur = conn.cursor()
     # Target: status=discovered, regardless of has_website, with no useful contact info yet
-    cur.execute("""
+    sc, sp = scope_sql()
+    cur.execute(f"""
         SELECT l.id, l.business_name, l.city, l.phone, l.niche, COALESCE(l.website,'') as website
         FROM leads l
         LEFT JOIN contacts c ON c.lead_id = l.id
         WHERE l.status = 'discovered' AND l.lead_type IS NULL
-          AND (c.id IS NULL OR (COALESCE(c.email,'') = '' AND COALESCE(c.linkedin_url,'') = ''))
+          AND (c.id IS NULL OR (COALESCE(c.email,'') = '' AND COALESCE(c.linkedin_url,'') = '')){sc}
         ORDER BY l.created_at ASC
-    """)
+    """, sp)
     leads = cur.fetchall()
     cur.close(); conn.close()
 
@@ -2292,22 +2308,25 @@ def enrich_all_discovered(provider_strategy='serper_then_oxylabs', job_id=None):
     return results
 
 def enrich_single_company(company_name, city='', niche='', website='', strategy='free_first'):
-    """Enrich one company by name. Inserts a lead row if not already present, enriches it."""
+    """Enrich one company by name. Inserts a lead row (owned by the caller's
+    company) if that company doesn't already have it, then enriches it."""
+    tenant_id = current_owner_tenant()
     conn = db_conn(); cur = conn.cursor()
     try:
         # Check if already in DB
-        cur.execute("SELECT id FROM leads WHERE lower(business_name)=lower(%s) AND lead_type IS NULL LIMIT 1",
-                    (company_name,))
+        cur.execute("""SELECT id FROM leads WHERE lower(business_name)=lower(%s) AND lead_type IS NULL
+                       AND tenant_id IS NOT DISTINCT FROM %s LIMIT 1""",
+                    (company_name, tenant_id))
         row = cur.fetchone()
         if row:
             lead_id = str(row[0])
         else:
             place_id = 'manual_' + hashlib.md5(f'{company_name}{city}{time.time()}'.encode()).hexdigest()[:12]
             cur.execute("""
-                INSERT INTO leads(place_id, business_name, niche, city, country, website, status, source, lead_type)
-                VALUES(%s, %s, %s, %s, %s, %s, 'discovered', 'manual', NULL)
+                INSERT INTO leads(place_id, business_name, niche, city, country, website, status, source, lead_type, tenant_id)
+                VALUES(%s, %s, %s, %s, %s, %s, 'discovered', 'manual', NULL, %s)
                 RETURNING id
-            """, (place_id, company_name, niche or '', city or '', '', website or ''))
+            """, (place_id, company_name, niche or '', city or '', '', website or '', tenant_id))
             lead_id = str(cur.fetchone()[0])
             conn.commit()
     except Exception as e:
@@ -2369,14 +2388,15 @@ def run_csv_enrich_bg(job_id, rows, strategy):
 def reenrich_missing_emails(use_oxylabs=True):
     """Find emails for leads that have no email yet, using Oxylabs deep scrape."""
     conn = db_conn(); cur = conn.cursor()
-    cur.execute("""
+    sc, sp = scope_sql()
+    cur.execute(f"""
         SELECT l.id, l.business_name, l.city, l.phone, l.niche, COALESCE(l.website,'') as website
         FROM leads l
         LEFT JOIN contacts c ON c.lead_id = l.id
         WHERE l.status IN ('enriched', 'ready') AND l.lead_type IS NULL
-          AND (c.email IS NULL OR c.email = '')
+          AND (c.email IS NULL OR c.email = ''){sc}
         ORDER BY l.created_at DESC LIMIT 50
-    """)
+    """, sp)
     leads = cur.fetchall(); cur.close(); conn.close()
     results = []
     for ld in leads:
@@ -3407,10 +3427,13 @@ def get_search_batches(tenant_id=None):
     cur.close(); conn.close()
     return rows
 
-def delete_search_batch(batch_id):
-    """Delete all leads that were first found in a specific search batch."""
+def delete_search_batch(batch_id, tenant_id=None):
+    """Delete all leads that were first found in a specific search batch
+    (only that company's, when tenant_id is given)."""
     conn = db_conn(); cur = conn.cursor()
-    cur.execute("DELETE FROM leads WHERE search_batch_id=%s RETURNING id", (batch_id,))
+    cur.execute("DELETE FROM leads WHERE search_batch_id=%s {tc} RETURNING id".format(
+                    tc="AND tenant_id = %s" if tenant_id else ""),
+                (batch_id, tenant_id) if tenant_id else (batch_id,))
     deleted = cur.rowcount
     conn.commit(); cur.close(); conn.close()
     return deleted
@@ -3657,10 +3680,11 @@ def score_lead_ai(business_name, niche, city, phone, has_email, has_linkedin, ca
 
 def score_all_enriched():
     conn = db_conn(); cur = conn.cursor()
-    cur.execute("""SELECT l.id, l.business_name, l.niche, l.city, l.phone, c.email, c.linkedin_url
+    sc, sp = scope_sql()
+    cur.execute(f"""SELECT l.id, l.business_name, l.niche, l.city, l.phone, c.email, c.linkedin_url
         FROM leads l LEFT JOIN contacts c ON c.lead_id = l.id
-        WHERE l.status = 'enriched' AND l.ai_score IS NULL AND l.lead_type IS NULL
-        ORDER BY l.created_at DESC""")
+        WHERE l.status = 'enriched' AND l.ai_score IS NULL AND l.lead_type IS NULL{sc}
+        ORDER BY l.created_at DESC""", sp)
     leads = cur.fetchall()
     results = []
     for ld in leads:
@@ -3684,11 +3708,12 @@ def generate_assets_for_top_leads(min_score=5):
     if CONFIG['image_provider'] == 'none' and not CONFIG['auto_email_copy']:
         return []
     conn = db_conn(); cur = conn.cursor()
-    cur.execute("""SELECT l.id, l.business_name, l.niche, l.city, c.full_name
+    sc, sp = scope_sql()
+    cur.execute(f"""SELECT l.id, l.business_name, l.niche, l.city, c.full_name
         FROM leads l LEFT JOIN contacts c ON c.lead_id = l.id
         WHERE l.status = 'enriched' AND l.ai_score >= %s AND l.lead_type IS NULL
-        AND NOT EXISTS (SELECT 1 FROM assets WHERE lead_id = l.id AND asset_type = 'email_body')
-        ORDER BY l.ai_score DESC""", (min_score,))
+        AND NOT EXISTS (SELECT 1 FROM assets WHERE lead_id = l.id AND asset_type = 'email_body'){sc}
+        ORDER BY l.ai_score DESC""", (min_score, *sp))
     leads = cur.fetchall(); results = []
     for ld in leads:
         lead_id, bname, niche, city, owner = ld
@@ -4882,7 +4907,10 @@ def intent_search(query, direction='demand', location='', recency_days=30,
     direction = direction if direction in ('demand', 'supply') else 'demand'
 
     # Cache: same query within 12h returns saved hits, no API spend
-    cache_payload = {'q': query.lower(), 'dir': direction, 'loc': location.lower(), 'rec': recency_days}
+    # Per company: a cache hit replays saved leads, and those belong to
+    # whichever company ran the search.
+    cache_payload = {'q': query.lower(), 'dir': direction, 'loc': location.lower(), 'rec': recency_days,
+                     'tenant': current_owner_tenant()}
     if is_query_cached('intent', cache_payload, max_age_hours=12):
         return get_intent_leads(direction=direction, query_filter=query, limit=max_results), 'cache_hit'
 
@@ -4942,15 +4970,16 @@ def intent_search(query, direction='demand', location='', recency_days=30,
         contact  = (cls.get('contact_hint') or '')[:500]
 
         place_id = f'intent_{hashlib.sha256(c["url"].encode()).hexdigest()[:32]}'
+        intent_tenant = current_owner_tenant()
         try:
             cur.execute("""
                 INSERT INTO leads(place_id, business_name, niche, city, country,
-                                  website, status, source, lead_type)
-                VALUES(%s, %s, %s, %s, %s, %s, 'discovered', %s, %s)
-                ON CONFLICT (place_id) DO UPDATE SET updated_at = NOW()
+                                  website, status, source, lead_type, tenant_id)
+                VALUES(%s, %s, %s, %s, %s, %s, 'discovered', %s, %s, %s)
+                ON CONFLICT ((COALESCE(tenant_id, '00000000-0000-0000-0000-000000000000'::uuid)), place_id) DO UPDATE SET updated_at = NOW()
                 RETURNING id
             """, (place_id, lead_name[:500], role.lower()[:200], loc_hint, '',
-                  c['url'][:1000], f'intent_{c["source"]}', direction))
+                  c['url'][:1000], f'intent_{c["source"]}', direction, intent_tenant))
             lead_row = cur.fetchone()
             if not lead_row: continue
             lead_id = lead_row[0]
@@ -5010,6 +5039,8 @@ def get_intent_leads(direction=None, query_filter='', min_confidence=0, limit=10
     conn = db_conn(); cur = conn.cursor()
     where = ['l.lead_type IN (\'demand\', \'supply\')']
     params = []
+    if get_current_scope():
+        where.append('l.tenant_id = %s'); params.append(get_current_scope())
     if direction in ('demand', 'supply'):
         where.append('l.lead_type = %s'); params.append(direction)
     if query_filter:
@@ -5058,7 +5089,8 @@ def get_intent_leads(direction=None, query_filter='', min_confidence=0, limit=10
 
 def delete_intent_lead(lead_id):
     conn = db_conn(); cur = conn.cursor()
-    cur.execute("DELETE FROM leads WHERE id=%s AND lead_type IN ('demand','supply')", (lead_id,))
+    sc, sp = scope_sql('leads')
+    cur.execute(f"DELETE FROM leads WHERE id=%s AND lead_type IN ('demand','supply'){sc}", (lead_id, *sp))
     deleted = cur.rowcount > 0
     conn.commit(); cur.close(); conn.close()
     return deleted
@@ -5076,15 +5108,17 @@ def intent_leads_to_csv(rows):
 
 def get_intent_stats():
     conn = db_conn(); cur = conn.cursor()
-    cur.execute("""
+    sc, sp = scope_sql()
+    cur.execute(f"""
         SELECT COALESCE(lead_type, 'business') as direction, COUNT(*) as n
-        FROM leads GROUP BY 1 ORDER BY 1
-    """)
+        FROM leads l WHERE 1=1{sc} GROUP BY 1 ORDER BY 1
+    """, sp)
     by_dir = {r[0]: r[1] for r in cur.fetchall()}
-    cur.execute("""
-        SELECT source, COUNT(*) as n, ROUND(AVG(confidence))::int as avg_conf
-        FROM intent_signals GROUP BY 1 ORDER BY n DESC LIMIT 20
-    """)
+    cur.execute(f"""
+        SELECT i.source, COUNT(*) as n, ROUND(AVG(i.confidence))::int as avg_conf
+        FROM intent_signals i JOIN leads l ON l.id = i.lead_id WHERE 1=1{sc}
+        GROUP BY 1 ORDER BY n DESC LIMIT 20
+    """, sp)
     by_source = [{'source': r[0], 'label': INTENT_SOURCE_LABELS.get(r[0], r[0]),
                   'count': r[1], 'avg_confidence': r[2]} for r in cur.fetchall()]
     cur.close(); conn.close()
@@ -5220,21 +5254,26 @@ def run_discover_bg(job_id, niche, city, country, filter_mode, density, find_mor
                 wait = random.uniform(3.5, 7.5)
                 time.sleep(wait) # Legitimacy Wait
                 
+                copied = []
                 if tenant_id:
                     # Company saves credit, user pays credit
                     cur.execute("INSERT INTO credit_usage (tenant_id, event_type, credits, saved) VALUES (%s, 'places_search', 1, TRUE)", (tenant_id,))
                     cur.execute("INSERT INTO tenant_search_history (tenant_id, user_id, query_text, niche, city, lead_count, served_from) VALUES (%s, %s, %s, %s, %s, %s, 'cache')", (tenant_id, user_id, original_query, niche.lower(), city.lower(), row[0]))
-                    
-                    # Link existing global leads to this tenant
-                    cur.execute("""
-                        INSERT INTO tenant_leads(tenant_id, lead_id)
-                        SELECT %s, id FROM leads WHERE niche = %s AND city = %s
-                        ON CONFLICT DO NOTHING
-                    """, (tenant_id, niche.lower(), city.lower()))
+                    # Give this company its own copy of the businesses already
+                    # found (business facts only — contacts, research and
+                    # outreach stay with the company that paid for them).
+                    copied = copy_cached_leads_to_tenant(cur, tenant_id, niche, city, filter_mode, job_id)
                     conn.commit()
-                    
+
                 JOBS[job_id]['status'] = 'completed'
                 JOBS[job_id]['progress'] = 100
+                JOBS[job_id]['log'].append(f'Done — {len(copied)} businesses added to your leads.')
+                JOBS[job_id]['results'] = {
+                    'total': len(copied), 'total_new_leads': len(copied), 'leads': copied[:200],
+                    'discover_status': 'ok', 'niche': niche, 'city': city, 'country': country,
+                    'filter_mode': filter_mode, 'density': density, 'find_more': find_more,
+                    'message': JOBS[job_id]['log'][-1],
+                }
                 cur.close(); conn.close()
                 return
                 
@@ -5317,14 +5356,15 @@ def run_enrich_bg(job_id, provider_strategy='serper_then_oxylabs'):
     try:
         JOBS[job_id] = {'status': 'running', 'progress': 0, 'log': ['Checking which leads need enriching...'], 'step': 'Enrich'}
         conn = db_conn(); cur = conn.cursor()
-        cur.execute("""
+        sc, sp = scope_sql()
+        cur.execute(f"""
             SELECT l.id, l.business_name, l.city, l.phone, l.niche, COALESCE(l.website,'') as website
             FROM leads l
             LEFT JOIN contacts c ON c.lead_id = l.id
             WHERE l.status = 'discovered' AND l.lead_type IS NULL
-              AND (c.id IS NULL OR (COALESCE(c.email,'') = '' AND COALESCE(c.linkedin_url,'') = ''))
+              AND (c.id IS NULL OR (COALESCE(c.email,'') = '' AND COALESCE(c.linkedin_url,'') = '')){sc}
             ORDER BY l.created_at ASC
-        """)
+        """, sp)
         leads = cur.fetchall(); cur.close(); conn.close()
         total = len(leads)
 
@@ -5387,19 +5427,20 @@ def run_verify_emails_bg(job_id, only_stale=False):
         JOBS[job_id] = {'status': 'running', 'progress': 0,
                         'log': ['Finding contacts to verify…'], 'step': 'Verify Emails'}
         conn = db_conn(); cur = conn.cursor()
+        sc, sp = scope_sql()
         if only_stale:
-            cur.execute("""
-                SELECT c.lead_id::text, c.email FROM contacts c
+            cur.execute(f"""
+                SELECT c.lead_id::text, c.email FROM contacts c JOIN leads l ON l.id = c.lead_id
                 WHERE COALESCE(c.email,'') != ''
                   AND (c.email_status IS NULL OR c.email_status = 'unknown'
-                       OR c.email_checked_at < NOW() - INTERVAL '60 days')
-                ORDER BY c.created_at ASC LIMIT 300""")
+                       OR c.email_checked_at < NOW() - INTERVAL '60 days'){sc}
+                ORDER BY c.created_at ASC LIMIT 300""", sp)
         else:
-            cur.execute("""
-                SELECT c.lead_id::text, c.email FROM contacts c
+            cur.execute(f"""
+                SELECT c.lead_id::text, c.email FROM contacts c JOIN leads l ON l.id = c.lead_id
                 WHERE COALESCE(c.email,'') != ''
-                  AND (c.email_status IS NULL OR c.email_status = 'unknown')
-                ORDER BY c.created_at ASC LIMIT 300""")
+                  AND (c.email_status IS NULL OR c.email_status = 'unknown'){sc}
+                ORDER BY c.created_at ASC LIMIT 300""", sp)
         rows = cur.fetchall(); cur.close(); conn.close()
         total = len(rows)
         if total == 0:
@@ -5446,15 +5487,16 @@ def run_reenrich_bg(job_id, provider_strategy='oxylabs_only'):
         JOBS[job_id] = {'status': 'running', 'progress': 0,
                         'log': ['Finding leads with no contact info…'], 'step': 'Re-Enrich'}
         conn = db_conn(); cur = conn.cursor()
-        cur.execute("""
+        sc, sp = scope_sql()
+        cur.execute(f"""
             SELECT l.id, l.business_name, l.city, l.phone, l.niche, COALESCE(l.website,'') as website
             FROM leads l
             LEFT JOIN contacts c ON c.lead_id = l.id
             WHERE l.status NOT IN ('discovered', 'rejected') AND l.lead_type IS NULL
-              AND (c.id IS NULL OR (COALESCE(c.email,'') = '' AND COALESCE(c.linkedin_url,'') = ''))
+              AND (c.id IS NULL OR (COALESCE(c.email,'') = '' AND COALESCE(c.linkedin_url,'') = '')){sc}
             ORDER BY l.created_at DESC
             LIMIT 500
-        """)
+        """, sp)
         leads = cur.fetchall(); cur.close(); conn.close()
         total = len(leads)
 
@@ -5507,13 +5549,14 @@ def run_verify_websites_bg(job_id, lead_ids=None):
     Updates has_website + website columns in the DB."""
     try:
         conn = db_conn(); cur = conn.cursor()
+        sc, sp = scope_sql()
         if lead_ids:
-            cur.execute("SELECT id, business_name, city, niche, website FROM leads WHERE id = ANY(%s::uuid[])",
-                        (lead_ids,))
+            cur.execute(f"SELECT id, business_name, city, niche, website FROM leads l WHERE id = ANY(%s::uuid[]){sc}",
+                        (lead_ids, *sp))
         else:
-            cur.execute("""SELECT id, business_name, city, niche, website FROM leads
-                           WHERE website_verified IS NULL OR website_verified = FALSE
-                           ORDER BY created_at DESC LIMIT 500""")
+            cur.execute(f"""SELECT id, business_name, city, niche, website FROM leads l
+                           WHERE (website_verified IS NULL OR website_verified = FALSE){sc}
+                           ORDER BY created_at DESC LIMIT 500""", sp)
         rows = cur.fetchall(); cur.close(); conn.close()
         total = len(rows)
         JOBS[job_id]['log'].append(f'Checking {total} leads for website presence…')
@@ -5616,9 +5659,11 @@ def run_pipeline_bg(job_id, provider_strategy='serper_then_oxylabs', generate_im
             return
 
         JOBS[job_id]['status'] = 'generating'
+        # generate_images=None (client accounts) leaves the server-wide,
+        # admin-owned image setting as it is.
         if generate_images:
             CONFIG['image_provider'] = 'replicate' if not IMAGINE_ART_KEY else 'imagine_art'
-        else:
+        elif generate_images is not None:
             CONFIG['image_provider'] = 'none'
         JOBS[job_id]['log'].append('Step 3/3: Generating email copy...')
         assets = generate_assets_for_top_leads()
@@ -5780,9 +5825,10 @@ def get_user_role(username):
         conn = db_conn(); cur = conn.cursor()
         cur.execute("SELECT role FROM auth_users WHERE username = %s", (username,))
         row = cur.fetchone(); cur.close(); conn.close()
-        return row[0] if row else 'admin'
+        # Unknown user or DB trouble = least privilege, never admin.
+        return row[0] if row else 'client'
     except Exception:
-        return 'admin'
+        return 'client'
 
 def auth_hash(password, salt):
     return _h_hashlib.sha256((password + salt).encode()).hexdigest()
@@ -6823,15 +6869,71 @@ def set_current_user(username):
 def get_current_user():
     return getattr(_user_ctx, 'username', None)
 
+# Company scope of the current request: the client's tenant id, or None for
+# admin/service/scheduler (unscoped, every company). Bulk jobs filter their
+# lead queries with scope_sql() so a client's "Enrich all" only touches its
+# own company's leads.
+def set_current_scope(tenant_id):
+    _user_ctx.scope = tenant_id
+
+def get_current_scope():
+    return getattr(_user_ctx, 'scope', None)
+
+def scope_sql(alias='l'):
+    """(' AND <alias>.tenant_id = %s', (tenant,)) for a scoped caller, ('', ())
+    otherwise — append to a WHERE clause and its params."""
+    t = get_current_scope()
+    return (f" AND {alias}.tenant_id = %s", (t,)) if t else ('', ())
+
+def current_owner_tenant():
+    """Company that new rows created by this request belong to: the client's
+    scope, or the admin's own workspace (admin still sees every company)."""
+    scope = get_current_scope()
+    if scope:
+        return scope
+    user = get_current_user()
+    return get_user_tenant_id(user) if user and user != 'service' else None
+
+def copy_cached_leads_to_tenant(cur, tenant_id, niche, city, filter_mode, job_id=None):
+    """Cached search hit: copy businesses another company already discovered
+    for this niche+city into tenant_id's own leads, skipping any it already
+    has (same place, phone or domain). Returns the copied rows."""
+    web = {'no_website': "AND COALESCE(src.website,'') = ''",
+           'with_website': "AND COALESCE(src.website,'') <> ''"}.get(filter_mode, '')
+    cur.execute(f"""
+        INSERT INTO leads(place_id, business_name, niche, city, country, address, phone, website,
+                          latitude, longitude, google_rating, review_count, status, source,
+                          phone_norm, domain, website_verified, search_batch_id, tenant_id)
+        SELECT DISTINCT ON (src.place_id)
+               src.place_id, src.business_name, src.niche, src.city, src.country, src.address, src.phone,
+               src.website, src.latitude, src.longitude, src.google_rating, src.review_count, 'discovered',
+               src.source, src.phone_norm, src.domain, src.website_verified, %s, %s
+        FROM leads src
+        WHERE src.niche = %s AND LOWER(src.city) = %s AND src.lead_type IS NULL
+          AND src.tenant_id IS DISTINCT FROM %s {web}
+          AND NOT EXISTS (SELECT 1 FROM leads mine WHERE mine.tenant_id = %s
+                            AND (mine.place_id = src.place_id
+                                 OR (COALESCE(src.phone_norm,'') <> '' AND mine.phone_norm = src.phone_norm)
+                                 OR (COALESCE(src.domain,'') <> '' AND mine.domain = src.domain)))
+        ORDER BY src.place_id, src.created_at
+        ON CONFLICT DO NOTHING
+        RETURNING business_name, niche, city, phone, has_website, website, address, source""",
+        (job_id, tenant_id, niche.lower(), city.lower(), tenant_id, tenant_id))
+    cols = ['business_name', 'niche', 'city', 'phone', 'has_website', 'website', 'address', 'source']
+    return [dict(zip(cols, r)) for r in cur.fetchall()]
+
 def _bg_thread(target, *args, **kwargs):
     """Spawn a daemon background thread that carries the CURRENT request's
-    username into its own thread-local context (thread-locals don't inherit
-    across threads otherwise), so api_usage rows logged from inside a
-    background job (ICP run, research, discovery, ...) attribute to the user
-    who clicked the button instead of showing blank/system."""
+    username and company scope into its own thread-local context
+    (thread-locals don't inherit across threads otherwise), so api_usage rows
+    logged from inside a background job (ICP run, research, discovery, ...)
+    attribute to the user who clicked the button instead of showing
+    blank/system, and bulk queries stay inside that user's company."""
     username = get_current_user()
+    scope = get_current_scope()
     def runner():
         set_current_user(username)
+        set_current_scope(scope)
         target(*args, **kwargs)
     t = threading.Thread(target=runner, daemon=True)
     t.start()
@@ -7682,19 +7784,23 @@ def wf_search(config, input_ids, log_fn):
     if not niche or not city:
         log_fn('  Search node needs both a niche and a city — skipped')
         return []
-    conn = db_conn(); cur = conn.cursor()
-    cur.execute("SELECT COALESCE(MAX(id),0) FROM leads")
-    before_max = cur.fetchone()[0]
-    cur.close(); conn.close()
+    # Leads ids are UUIDs, so "newly discovered" is tracked by tagging this
+    # call's inserts with a one-off batch id rather than comparing ids.
+    batch = f'wf_{uuid.uuid4().hex[:16]}'
     discover_leads_smart(niche=niche, city=city, country=(config.get('country') or '').strip(),
                          original_query=niche, filter_mode=config.get('filter_mode', 'all'),
-                         density=config.get('density', 'standard'), find_more=False, job_id=None)
-    conn = db_conn(); cur = conn.cursor()
-    cur.execute("SELECT id FROM leads WHERE id > %s ORDER BY id ASC", (before_max,))
-    new_ids = [r[0] for r in cur.fetchall()]
-    cur.close(); conn.close()
+                         density=config.get('density', 'standard'), find_more=False, job_id=batch,
+                         tenant_id=current_owner_tenant())
+    new_ids = _leads_in_batch(batch)
     log_fn(f'  found {len(new_ids)} new lead(s)')
     return new_ids
+
+def _leads_in_batch(batch):
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("SELECT id FROM leads WHERE search_batch_id = %s ORDER BY created_at", (batch,))
+    ids = [str(r[0]) for r in cur.fetchall()]
+    cur.close(); conn.close()
+    return ids
 
 def wf_enrich(config, input_ids, log_fn):
     if not input_ids: return []
@@ -7702,7 +7808,7 @@ def wf_enrich(config, input_ids, log_fn):
     providers = _STRATEGY_PROVIDERS.get(strategy, ['serper'])
     conn = db_conn(); cur = conn.cursor()
     cur.execute("""SELECT id, business_name, city, phone, niche, COALESCE(website,'')
-                   FROM leads WHERE id = ANY(%s)""", (input_ids,))
+                   FROM leads WHERE id = ANY(%s::uuid[])""", (input_ids,))
     leads = cur.fetchall(); cur.close(); conn.close()
     for lead_id, bname, city, phone, niche, website in leads:
         try:
@@ -7717,7 +7823,7 @@ def wf_score(config, input_ids, log_fn):
     conn = db_conn(); cur = conn.cursor()
     cur.execute("""SELECT l.id, l.business_name, l.niche, l.city, l.phone, c.email, c.linkedin_url
                    FROM leads l LEFT JOIN contacts c ON c.lead_id = l.id
-                   WHERE l.id = ANY(%s) AND l.ai_score IS NULL""", (input_ids,))
+                   WHERE l.id = ANY(%s::uuid[]) AND l.ai_score IS NULL""", (input_ids,))
     leads = cur.fetchall()
     for lead_id, bname, niche, city, phone, email, linkedin in leads:
         try:
@@ -7738,7 +7844,7 @@ def wf_filter_score(config, input_ids, log_fn):
     if not input_ids: return []
     min_score = int(config.get('min_score', 6))
     conn = db_conn(); cur = conn.cursor()
-    cur.execute("SELECT id FROM leads WHERE id = ANY(%s) AND COALESCE(ai_score, 0) >= %s",
+    cur.execute("SELECT id FROM leads WHERE id = ANY(%s::uuid[]) AND COALESCE(ai_score, 0) >= %s",
                 (input_ids, min_score))
     kept = [r[0] for r in cur.fetchall()]
     cur.close(); conn.close()
@@ -7750,7 +7856,7 @@ def wf_generate_assets(config, input_ids, log_fn):
     conn = db_conn(); cur = conn.cursor()
     cur.execute("""SELECT l.id, l.business_name, l.niche, l.city, c.full_name FROM leads l
                    LEFT JOIN contacts c ON c.lead_id = l.id
-                   WHERE l.id = ANY(%s)
+                   WHERE l.id = ANY(%s::uuid[])
                      AND NOT EXISTS (SELECT 1 FROM assets WHERE lead_id=l.id AND asset_type='email_body')""",
                 (input_ids,))
     leads = cur.fetchall(); made = 0
@@ -7794,16 +7900,17 @@ def wf_icp_search(config, input_ids, log_fn):
         log_fn('  ICP Search node needs a profile selected — skipped')
         return []
     conn = db_conn(); cur = conn.cursor()
-    cur.execute("SELECT name, industries, geos, keywords, exclusions FROM icp_profiles WHERE id=%s", (icp_id,))
+    cur.execute("SELECT name, industries, geos, keywords, exclusions, tenant_id FROM icp_profiles WHERE id=%s",
+                (icp_id,))
     row = cur.fetchone()
-    if not row:
+    if not row or not icp_in_scope(icp_id, get_current_scope()):
         cur.close(); conn.close()
         log_fn('  selected ICP profile no longer exists — skipped')
         return []
-    name, industries, geos, keywords, exclusions = row
-    cur.execute("SELECT COALESCE(MAX(id),0) FROM leads")
-    before_max = cur.fetchone()[0]
+    name, industries, geos, keywords, exclusions, icp_tenant = row
     cur.close(); conn.close()
+    icp_tenant = str(icp_tenant) if icp_tenant else None
+    batch = f'wf_{uuid.uuid4().hex[:16]}'
     combos = [(ind, g) for ind in _split_list(industries) for g in _split_list(geos)][:int(CONFIG.get('icp_daily_cap', 40))]
     for industry, geo in combos:
         city, country = _parse_geo(geo)
@@ -7811,14 +7918,12 @@ def wf_icp_search(config, input_ids, log_fn):
         try:
             discover_leads_smart(niche=industry, city=city, country=country,
                                  original_query=q, filter_mode='all',
-                                 density='standard', find_more=False, job_id=None)
-            tag_leads_for_icp(industry, city, icp_id)
+                                 density='standard', find_more=False, job_id=batch,
+                                 tenant_id=icp_tenant)
+            tag_leads_for_icp(industry, city, icp_id, icp_tenant)
         except Exception as e:
             log_fn(f'  {industry} · {city}: ERROR {str(e)[:80]}')
-    conn = db_conn(); cur = conn.cursor()
-    cur.execute("SELECT id FROM leads WHERE id > %s ORDER BY id ASC", (before_max,))
-    new_ids = [r[0] for r in cur.fetchall()]
-    cur.close(); conn.close()
+    new_ids = _leads_in_batch(batch)
     log_fn(f'  ICP "{name}": {len(combos)} combo(s), {len(new_ids)} new lead(s)')
     return new_ids
 
@@ -7840,7 +7945,7 @@ def wf_intent_search(config, input_ids, log_fn):
     except Exception as e:
         log_fn(f'  intent search failed: {str(e)[:100]}')
         return []
-    ids = [int(s['lead_id']) for s in saved if str(s.get('lead_id', '')).isdigit()]
+    ids = [str(s['lead_id']) for s in saved if s.get('lead_id')]
     log_fn(f'  found {len(ids)} {direction} lead(s) ({status})')
     return ids
 
@@ -7850,7 +7955,7 @@ def wf_verify_websites(config, input_ids, log_fn):
     input id passes through unchanged, this node never filters the chain."""
     if not input_ids: return []
     conn = db_conn(); cur = conn.cursor()
-    cur.execute("SELECT id, business_name, city, COALESCE(website,'') FROM leads WHERE id = ANY(%s)", (input_ids,))
+    cur.execute("SELECT id, business_name, city, COALESCE(website,'') FROM leads WHERE id = ANY(%s::uuid[])", (input_ids,))
     rows = cur.fetchall(); cur.close(); conn.close()
     skip_domains = ('facebook.com', 'instagram.com', 'yelp.com', 'tripadvisor', 'yellowpages',
                      'foursquare', 'linkedin.com', 'google.com', 'maps.google', 'apple.com',
@@ -7893,7 +7998,7 @@ def wf_verify_emails(config, input_ids, log_fn):
     """Verifies deliverability of stored contact emails for the input leads."""
     if not input_ids: return []
     conn = db_conn(); cur = conn.cursor()
-    cur.execute("SELECT lead_id::text, email FROM contacts WHERE lead_id = ANY(%s) AND COALESCE(email,'') != ''",
+    cur.execute("SELECT lead_id::text, email FROM contacts WHERE lead_id = ANY(%s::uuid[]) AND COALESCE(email,'') != ''",
                 (input_ids,))
     rows = cur.fetchall(); cur.close(); conn.close()
     stats = {}
@@ -8188,6 +8293,12 @@ def ensure_m14_tables():
     cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS outcome_notes TEXT")
     cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS outcome_updated_at TIMESTAMPTZ")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_leads_deal_stage ON leads(deal_stage) WHERE deal_stage IS NOT NULL")
+    # A business is unique per company, not globally, so two client companies
+    # can both prospect it. NULL tenant (legacy/unowned rows) counts as one group.
+    cur.execute("""CREATE UNIQUE INDEX IF NOT EXISTS uq_leads_tenant_place ON leads
+                   ((COALESCE(tenant_id, '00000000-0000-0000-0000-000000000000'::uuid)), place_id)""")
+    cur.execute("ALTER TABLE leads DROP CONSTRAINT IF EXISTS leads_place_id_key")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_leads_place_id ON leads(place_id)")
     # Figures for the client's other lead channels, entered by hand per period
     cur.execute("""
         CREATE TABLE IF NOT EXISTS channel_benchmarks (
@@ -8209,6 +8320,9 @@ def ensure_m14_tables():
             created_at        TIMESTAMPTZ DEFAULT NOW()
         )""")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_channel_benchmarks_tenant ON channel_benchmarks(tenant_id, period_start)")
+    # Company ownership for workflows and saved research
+    cur.execute("ALTER TABLE workflows ADD COLUMN IF NOT EXISTS tenant_id UUID")
+    cur.execute("ALTER TABLE research_history ADD COLUMN IF NOT EXISTS tenant_id UUID")
     conn.commit(); cur.close(); conn.close()
 
 # ── Lead outcomes ────────────────────────────────────────────────
@@ -8449,6 +8563,18 @@ def save_channel_benchmark(body, tenant_id, username):
     conn.commit(); cur.close(); conn.close()
     return {'success': True, 'id': row[0]} if row else {'success': False, 'error': 'Entry not found'}
 
+def workflow_in_scope(workflow_id, tenant_id):
+    if not tenant_id:
+        return True
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("SELECT 1 FROM workflows WHERE id = %s AND tenant_id = %s", (workflow_id, tenant_id))
+        ok = cur.fetchone() is not None
+        cur.close(); conn.close()
+        return ok
+    except Exception:
+        return False
+
 def icp_in_scope(icp_id, tenant_id):
     """Like lead_in_scope() for ICP profiles: True for unscoped (admin) callers
     or when the profile belongs to that tenant."""
@@ -8681,6 +8807,8 @@ def get_chart_stats(tenant_id=None):
 # ──────────────────────────────────────────────────────────────
 #  HTTP HANDLERS
 # ──────────────────────────────────────────────────────────────
+NO_TENANT = '00000000-0000-0000-0000-000000000000'
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 
@@ -8717,13 +8845,16 @@ class Handler(BaseHTTPRequestHandler):
         every tenant's data, by design ('the admin can see what the client
         have fetched'). Call after require_auth()."""
         username = self.current_username() or ''
-        if get_user_role(username) == 'client':
-            return get_user_tenant_id(username)
-        return None
+        if get_user_role(username) in ('admin', 'service'):
+            return None
+        # A client (or unknown role) whose company can't be resolved gets a
+        # tenant id that matches nothing, never unscoped access.
+        return get_user_tenant_id(username) or NO_TENANT
 
     def require_auth(self):
         """Enforce auth for non-public paths. Returns False after sending a 401."""
         p = self.path.split('?')[0]
+        set_current_scope(None)
         if self.command == 'GET':
             if p in self.PUBLIC_GET_PATHS or p.startswith(self.PUBLIC_GET_PREFIXES):
                 set_current_user(None)
@@ -8734,6 +8865,7 @@ class Handler(BaseHTTPRequestHandler):
         tenant_id, _ = self.check_auth()
         if tenant_id:
             set_current_user(self.current_username())
+            set_current_scope(self.scope_tenant())
             return True
         set_current_user(None)
         self.send_json(401, {'error': 'Unauthorized — log in first'})
@@ -8752,6 +8884,11 @@ class Handler(BaseHTTPRequestHandler):
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             token = (qs.get('token') or [''])[0]
         return auth_check(token)
+
+    def job_visible(self, job):
+        """Admin sees every job; a client only its own company's."""
+        scope = self.scope_tenant()
+        return scope is None or job.get('owner_scope') == scope
 
     def require_admin(self):
         """Blocks the 'client' role from Settings-only surfaces (API keys, CRM
@@ -8933,7 +9070,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(500, {'error': str(e)})
 
         elif p.startswith('/job/'):
-            self.send_json(200, JOBS.get(p[5:], {'status': 'not_found'}))
+            job = JOBS.get(p[5:])
+            if job is None or not self.job_visible(job):
+                self.send_json(200, {'status': 'not_found'})
+            else:
+                self.send_json(200, {k: v for k, v in job.items() if k != 'owner_scope'})
         elif p == '/sequences':
             try:
                 conn = db_conn(); cur = conn.cursor()
@@ -8943,12 +9084,13 @@ class Handler(BaseHTTPRequestHandler):
                                FROM sequences q ORDER BY q.id""")
                 seqs = [{'id': r[0], 'name': r[1], 'is_active': r[2],
                          'steps': r[3], 'active_enrollments': r[4]} for r in cur.fetchall()]
-                cur.execute("""SELECT e.id, e.lead_id::text, l.business_name, e.current_step,
+                sc, sp = scope_sql()
+                cur.execute(f"""SELECT e.id, e.lead_id::text, l.business_name, e.current_step,
                                       e.status, e.steps_sent, to_char(e.next_send_at,'YYYY-MM-DD HH24:MI'),
                                       e.stop_reason
                                FROM enrollments e JOIN leads l ON l.id=e.lead_id
-                               WHERE e.status IN ('active','completed') OR e.updated_at > NOW() - INTERVAL '7 days'
-                               ORDER BY e.status='active' DESC, e.updated_at DESC LIMIT 50""")
+                               WHERE (e.status IN ('active','completed') OR e.updated_at > NOW() - INTERVAL '7 days'){sc}
+                               ORDER BY e.status='active' DESC, e.updated_at DESC LIMIT 50""", sp)
                 enrls = [{'id': r[0], 'lead_id': r[1], 'business': r[2], 'step': r[3],
                           'status': r[4], 'steps_sent': r[5], 'next_send': r[6], 'stop_reason': r[7]}
                          for r in cur.fetchall()]
@@ -9088,7 +9230,9 @@ class Handler(BaseHTTPRequestHandler):
                                       to_char(w.updated_at,'YYYY-MM-DD HH24:MI'),
                                       (SELECT status FROM wf_canvas_runs WHERE workflow_id=w.id ORDER BY id DESC LIMIT 1),
                                       to_char((SELECT started_at FROM wf_canvas_runs WHERE workflow_id=w.id ORDER BY id DESC LIMIT 1),'YYYY-MM-DD HH24:MI')
-                               FROM workflows w ORDER BY w.id DESC""")
+                               FROM workflows w {where} ORDER BY w.id DESC""".format(
+                                   where="WHERE w.tenant_id = %s" if self.scope_tenant() else ""),
+                            (self.scope_tenant(),) if self.scope_tenant() else ())
                 rows = cur.fetchall(); cur.close(); conn.close()
                 self.send_json(200, {'workflows': [dict(zip(
                     ['id','name','graph','is_active','created_by','updated_at','last_run_status','last_run_at'], r
@@ -9554,7 +9698,7 @@ class Handler(BaseHTTPRequestHandler):
 
         elif p.startswith('/job/') and p.endswith('/cancel'):
             job_id = p[5:-7]
-            if job_id in JOBS:
+            if job_id in JOBS and self.job_visible(JOBS[job_id]):
                 JOBS[job_id]['cancelled'] = True
                 JOBS[job_id]['status'] = 'cancelled'
                 self.send_json(200, {'ok': True})
@@ -9578,7 +9722,8 @@ class Handler(BaseHTTPRequestHandler):
                 JOBS[job_id] = {'status': 'running', 'progress': 0,
                                 'log': [f'Discovering "{niche}" in {city}…'], 'step': 'Discover'}
                 _bg_thread(run_discover_bg,
-                    job_id, niche, city, country, filter_mode, density, find_more, '', state_cities)
+                    job_id, niche, city, country, filter_mode, density, find_more, '', state_cities,
+                    current_owner_tenant(), None, self.scope_tenant() is not None)
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
@@ -9764,8 +9909,9 @@ class Handler(BaseHTTPRequestHandler):
                 if not lead_ids:
                     min_score = int(body.get('min_score', 0) or 0)
                     conn = db_conn(); cur = conn.cursor()
-                    cur.execute("""SELECT id FROM leads WHERE COALESCE(icp_score, ai_score*10, 0) >= %s
-                                   ORDER BY COALESCE(icp_score, ai_score*10, 0) DESC LIMIT 500""", (min_score,))
+                    sc, sp = scope_sql()
+                    cur.execute(f"""SELECT id FROM leads l WHERE COALESCE(icp_score, ai_score*10, 0) >= %s{sc}
+                                   ORDER BY COALESCE(icp_score, ai_score*10, 0) DESC LIMIT 500""", (min_score, *sp))
                     lead_ids = [str(r[0]) for r in cur.fetchall()]
                     cur.close(); conn.close()
                 if not lead_ids:
@@ -9867,13 +10013,15 @@ class Handler(BaseHTTPRequestHandler):
                 wid = body.get('id')
                 name = (body.get('name') or '').strip() or 'Untitled workflow'
                 graph = body.get('graph') or {'nodes': [], 'edges': []}
+                if wid and not workflow_in_scope(wid, self.scope_tenant()):
+                    self.send_json(404, {'error': 'Workflow not found'}); return
                 conn = db_conn(); cur = conn.cursor()
                 if wid:
                     cur.execute("UPDATE workflows SET name=%s, graph=%s, updated_at=NOW() WHERE id=%s",
                                 (name, json.dumps(graph), wid))
                 else:
-                    cur.execute("INSERT INTO workflows (name, graph, created_by) VALUES (%s,%s,%s) RETURNING id",
-                                (name, json.dumps(graph), get_current_user()))
+                    cur.execute("INSERT INTO workflows (name, graph, created_by, tenant_id) VALUES (%s,%s,%s,%s) RETURNING id",
+                                (name, json.dumps(graph), get_current_user(), current_owner_tenant()))
                     wid = cur.fetchone()[0]
                 conn.commit(); cur.close(); conn.close()
                 self.send_json(200, {'success': True, 'id': wid})
@@ -9883,6 +10031,8 @@ class Handler(BaseHTTPRequestHandler):
         elif p.startswith('/workflows/') and p.endswith('/delete'):
             try:
                 wid = p.split('/')[2]
+                if not workflow_in_scope(wid, self.scope_tenant()):
+                    self.send_json(404, {'error': 'Workflow not found'}); return
                 conn = db_conn(); cur = conn.cursor()
                 cur.execute("DELETE FROM workflows WHERE id=%s", (wid,))
                 conn.commit(); cur.close(); conn.close()
@@ -9895,6 +10045,8 @@ class Handler(BaseHTTPRequestHandler):
                 wid = body.get('id')
                 if not wid:
                     self.send_json(400, {'error': 'id required'}); return
+                if not workflow_in_scope(wid, self.scope_tenant()):
+                    self.send_json(404, {'error': 'Workflow not found'}); return
                 job_id = f'job_{int(time.time() * 1000)}'
                 JOBS[job_id] = {'status': 'running', 'progress': 0, 'log': ['Starting workflow…'], 'step': 'Workflow'}
                 _bg_thread(run_workflow_bg, job_id, wid)
@@ -9906,7 +10058,11 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 lead_ids = body.get('lead_ids') or ([body['lead_id']] if body.get('lead_id') else [])
                 results = []
+                scope = self.scope_tenant()
                 for lid in lead_ids[:50]:
+                    if not lead_in_scope(lid, scope):
+                        results.append({'lead_id': lid, 'success': False, 'error': 'Lead not found'})
+                        continue
                     r = enroll_lead_in_default(lid)
                     r['lead_id'] = lid
                     results.append(r)
@@ -9921,12 +10077,15 @@ class Handler(BaseHTTPRequestHandler):
         elif p == '/sequence/stop':
             try:
                 lead_id = body.get('lead_id', '')
+                if not lead_in_scope(lead_id, self.scope_tenant()):
+                    self.send_json(404, {'error': 'Lead not found'}); return
                 stop_enrollment(lead_id, 'stopped', 'stopped manually')
                 self.send_json(200, {'success': True})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
         elif p == '/sequence/run':
+            if not self.require_admin(): return   # sends for every company
             try:
                 process_due_enrollments()
                 self.send_json(200, {'success': True, 'message': 'scheduler pass complete'})
@@ -9934,6 +10093,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(500, {'error': str(e)})
 
         elif p == '/check-replies':
+            if not self.require_admin(): return   # one shared inbox for all companies
             try:
                 job_id = f'job_{int(time.time() * 1000)}'
                 _bg_thread(run_check_replies_bg, job_id)
@@ -9970,8 +10130,9 @@ class Handler(BaseHTTPRequestHandler):
 
         elif p == '/generate-assets':
             try:
-                img_prov = body.get('image_provider', 'none')
-                CONFIG['image_provider'] = img_prov
+                if self.scope_tenant() is None:
+                    # Server-wide setting: only admin may change it.
+                    CONFIG['image_provider'] = body.get('image_provider', 'none')
                 min_score = body.get('min_score', 5)
                 job_id = f'job_{int(time.time())}'
                 _bg_thread(run_generate_assets_bg, job_id, min_score)
@@ -10203,7 +10364,7 @@ class Handler(BaseHTTPRequestHandler):
         elif p == '/run-pipeline':
             try:
                 strategy = body.get('provider', 'serper_then_oxylabs')
-                gen_images = body.get('generate_images', False)
+                gen_images = body.get('generate_images', False) if self.scope_tenant() is None else None
                 job_id = f'job_{int(time.time())}'
                 _bg_thread(run_pipeline_bg, job_id, strategy, gen_images)
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
@@ -10348,6 +10509,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(500, {'error': str(e)})
 
         elif p == '/send-email':
+            if not self.require_admin(): return   # free-form send as the operator
             try:
                 result = send_email_via_resend(
                     body.get('to', ''),
@@ -10434,21 +10596,22 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 min_score = int(body.get('min_score', 0) or 0)
                 conn = db_conn(); cur = conn.cursor()
-                cur.execute("""
+                sc, sp = scope_sql()
+                cur.execute(f"""
                     SELECT l.id FROM leads l
                     LEFT JOIN lead_research rs ON rs.lead_id = l.id
                     WHERE (rs.lead_id IS NULL OR rs.status != 'completed')
-                      AND l.ai_score >= %s
+                      AND l.ai_score >= %s{sc}
                     ORDER BY l.ai_score DESC NULLS LAST
                     LIMIT 500
-                """, (min_score,))
+                """, (min_score, *sp))
                 lead_ids = [str(r[0]) for r in cur.fetchall()]
                 if not lead_ids:
                     # l.ai_score >= %s excludes NULL either way, so an unscored
                     # lead never shows up here regardless of min_score — that's
                     # the far more common reason this comes back empty than
                     # "no leads meet the score bar", so say so specifically.
-                    cur.execute("SELECT COUNT(*) FROM leads WHERE lead_type IS NULL AND ai_score IS NULL")
+                    cur.execute(f"SELECT COUNT(*) FROM leads l WHERE lead_type IS NULL AND ai_score IS NULL{sc}", sp)
                     unscored = cur.fetchone()[0]
                     cur.close(); conn.close()
                     msg = (f'{unscored} lead(s) haven\'t been AI-scored yet — score them first '
@@ -10468,7 +10631,7 @@ class Handler(BaseHTTPRequestHandler):
         elif p.startswith('/batch/') and p.endswith('/delete'):
             try:
                 batch_id = p.split('/')[2]
-                deleted = delete_search_batch(batch_id)
+                deleted = delete_search_batch(batch_id, self.scope_tenant())
                 self.send_json(200, {'success': True, 'deleted': deleted, 'batch_id': batch_id})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
