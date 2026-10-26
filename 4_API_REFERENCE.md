@@ -702,8 +702,29 @@ Record sales outcomes; only the keys you send change.
 ```
 `deal_stage`: `open` | `won` | `lost` | `null`. Won/lost stamps the close date (kept if re-saved with the same stage). `GET /lead/{id}` now also returns these fields plus `campaign` (offer + industry playbook in effect).
 
+### POST /lead/{id}/erase
+Right to erasure: suppresses every email held for the lead, deletes the lead and its contacts/research/outreach, records an audit row (hash only). Returns `{"success": true, "emails_suppressed": n}`. `GET /lead/{id}` also returns `qualification: {qualified, unmet[]}`.
+
+### GET /company/settings[?tenant_id=…]  ·  POST /company/settings/save  ·  POST /company/test-email
+A company's own settings (clients: always their own; admin: any company via `tenant_id`).
+```json
+{"settings": {"from_name": "Dana at Acme", "from_email": "dana@acme.com", "reply_to": "sales@acme.com",
+              "company_name": "Acme Inc", "company_address": "100 Main St, Austin TX",
+              "footer_text": "", "brand_name": "Acme", "brand_color": "#0f766e",
+              "calendly_url": "https://calendly.com/acme/intro",
+              "digest_enabled": true, "digest_email": "you@acme.com",
+              "imap_host": "imap.gmail.com", "imap_user": "sales@acme.com", "imap_pass": "…",
+              "daily_send_limit": 50},
+ "company_display_name": "Acme Inc"}
+```
+`daily_send_limit` is admin-only. GET returns `readiness` (`can_send`, `reason`, `from`), the company's sending domains, and `calendly_webhook_url` (`/webhook/calendly/<token>`, public, marks only that company's leads as booked). `test-email` `{"to_email": …}` sends as the company.
+
+### GET /companies (admin)
+Every company with its users, lead/ICP counts and send readiness. `POST /users/create` accepts `tenant_id` (join an existing company) or `company_name` (new company).
+
 ### GET /icp/templates
 The industry playbooks (`construction_real_estate`, `banking_insurance`, `healthcare_clinics`) with industries, decision-maker titles, typical challenges and compliance notes. `POST /icp/save` accepts `offer` and `industry_template`.
+It also accepts qualification criteria: `require_email`, `require_decision_maker`, `min_rating` (0–5), `min_reviews`, `decision_maker_titles`, `qualification_notes`, `score_weights` (`{icp_fit, pain_severity, intent_signals, quality}`, or null for the default 30/30/20/20).
 
 ---
 

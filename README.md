@@ -10,7 +10,8 @@
 decision-maker identification · SMTP-verified email enrichment · AI research with
 pain-point detection · composite lead scoring · personalised multi-touch sequences ·
 unsubscribe/bounce/throttle compliance · open & reply tracking · CRM push (Pipedrive /
-HubSpot / webhook) · live API cost dashboard.
+webhook — HubSpot etc. via Zapier/n8n) · live API cost dashboard · multiple client companies,
+each sending as itself.
 
 **Program:** M1–M10 shipped — security hardening, verification pipeline, compliance &
 tracking, follow-up sequences, cost telemetry, autonomous ICP discovery, AI research &
@@ -39,14 +40,15 @@ real Pipedrive/Calendly accounts.
 13. [Activity Log (M12)](#activity-log-m12)
 14. [Workflow Builder & N8N (M13)](#workflow-builder--n8n-m13)
 15. [Industry Playbooks, Outcomes & Channel Performance (M14)](#industry-playbooks-outcomes--channel-performance-m14)
-16. [Deployment & CI/CD](#deployment--cicd)
-17. [Configuration & API Keys](#configuration--api-keys)
-18. [Architecture](#architecture)
-19. [Database Schema](#database-schema)
-20. [Troubleshooting](#troubleshooting)
-21. [User Roles](#user-roles)
-22. [Security Checklist](#security-checklist)
-23. [Changelog](#changelog)
+16. [Multiple Client Companies (M15)](#multiple-client-companies-m15)
+17. [Deployment & CI/CD](#deployment--cicd)
+18. [Configuration & API Keys](#configuration--api-keys)
+19. [Architecture](#architecture)
+20. [Database Schema](#database-schema)
+21. [Troubleshooting](#troubleshooting)
+22. [User Roles](#user-roles)
+23. [Security Checklist](#security-checklist)
+24. [Changelog](#changelog)
 
 ---
 
@@ -500,6 +502,41 @@ no owner, so client accounts never saw them).
 
 ---
 
+## Multiple Client Companies (M15)
+
+The platform can be sold to several client companies at once. Each company is a private
+workspace: its users only ever see and act on that company's data, and it prospects, sends,
+books meetings and pushes to its CRM as itself. The admin (you) sees every company.
+
+**What each company has of its own**
+
+| | Where | Notes |
+|---|---|---|
+| Users | Settings → Client accounts → *Join <company>* | Several logins can share one company |
+| Leads, ICPs, workflows, intent leads, saved research, jobs | Everywhere | A business can be in two companies' lists independently; a search another company already ran gives this company its own copy (business facts only) |
+| Sending identity | **Company** page | From name/address, reply-to. Assign verified sending domains to a company in Settings → Sending Domains |
+| Legal footer | **Company** page | Company name + postal address (CAN-SPAM). A client company **cannot send** until its from-address, name and address are set — it never falls back to yours |
+| Daily send cap | **Company** page (admin only) | On top of the server-wide caps |
+| Calendly | **Company** page | Its booking link goes into follow-ups; its own webhook URL marks only its leads as booked |
+| Reply inbox | **Company** page | IMAP; all inboxes are checked every 15 minutes, a reply only matches that company's outreach |
+| CRM | **Company** page | Pipedrive / webhook connections; a connection only ever receives its own company's leads |
+| Branding, daily digest | **Company** page | Dashboard name/colour for its users; a morning summary of its own numbers |
+| Qualification criteria | ICP → *Qualification criteria* | Score weights, must-have email / decision-maker, minimum rating / reviews, decision-maker titles, and its ideal customer in its own words (used by AI scoring and research) |
+
+**Shared by design**: API keys and their cost (tracked per company on the Performance page),
+the do-not-contact list (an opt-out or erasure blocks the address for every company), and
+the server-wide send caps. Your own workspace (the admin's) keeps using the server-wide sender,
+footer and settings for anything left blank.
+
+**Data protection**: *Erase personal data* on a lead adds its emails to the do-not-contact list
+and permanently deletes the lead, contacts, research and email history (an audit row keeps only a
+hash). Leads under the Healthcare playbook never store raw review text, which can describe patients.
+
+`controva_api.py` (port 8081) is an operator-only integration API (keys are minted with the
+master secret) and sees every company; don't hand its keys to clients.
+
+---
+
 ## Deployment & CI/CD
 
 ### Auto-deploy (GitHub Actions)
@@ -729,13 +766,15 @@ hardcoded to `admin` for anyone).
 
 | Role | Access |
 |---|---|
-| `admin` | Everything, including Settings (API keys, CRM connection tokens, automation config) |
-| `client` | Every operational page — Search, ICP, Leads, Pipeline, Research, Outreach, CRM push, Analytics — with Settings entirely inaccessible, gated server-side (not just hidden in the UI) |
+| `admin` | Everything across every company, including Settings (API keys, sending domains, automation config, user accounts) |
+| `client` | Every operational page plus **Company** settings, for **its own company only** — Settings is inaccessible, gated server-side (not just hidden in the UI). Free-form sending, the server-wide sequence pass and server-wide settings are admin-only |
+
+Add client logins in Settings → Client accounts: start a new company or join an existing one.
+An unknown role or a client whose company can't be resolved gets no access, never admin.
 
 A `client` account is auto-seeded on first boot (username `client`) for handing to a
 client/prospect for testing — ask whoever ran the deploy for the password, it's generated
-once and never committed to this repo. Change it via `POST /auth/change-password`, or add
-more accounts directly in `auth_users` (no admin UI for user management yet).
+once and never committed to this repo. Change it via `POST /auth/change-password`.
 
 ---
 
@@ -754,6 +793,22 @@ Before going to production:
 ---
 
 ## Changelog
+
+### v9.0 — October 2026 (M15: multiple client companies)
+
+**New features**
+- **Company isolation** across every route, bulk job (enrich, score, verify, pipeline, research queue, CRM push), workflow, intent search, saved research and job status.
+- **Per-company leads**: the same business can be in several companies' lists; cached searches copy into the requesting company.
+- **Company page**: sending identity, legal footer, Calendly + webhook, IMAP reply inbox (checked every 15 min), CRM connections, branding, daily digest, admin daily cap, test email.
+- **Several users per company**; admin company list (`GET /companies`).
+- **Per-client qualification criteria** on each ICP, one shared "qualified" definition everywhere.
+- **Erase personal data** (suppress + delete + audit) and healthcare data minimisation.
+
+**Bug fixes**
+- Workflow builder: Search / ICP Search nodes crashed (`max(uuid)`), every node after the first failed (`uuid = text[]`), Intent Search passed on no leads.
+- Cached searches only linked leads through a table the leads list never read, so the second company saw nothing.
+- "Add Client Account" button crashed (undefined `genPassword`).
+- Clients could change the server-wide image-generation setting; an unknown role was treated as admin.
 
 ### v8.5 — October 2026 (M14)
 
