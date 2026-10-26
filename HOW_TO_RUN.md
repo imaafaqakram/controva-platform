@@ -6,6 +6,17 @@ on a fresh VPS, with the exact commands that were verified by the test pass in
 
 ---
 
+## Run it on your own computer (one command)
+
+Needs Docker Desktop (running) and Python 3.10+. From the repo folder:
+
+- **Windows (PowerShell):** `powershell -ExecutionPolicy Bypass -File run_local.ps1`
+- **Mac / Linux:** `bash run_local.sh`
+
+The script creates `.env` if missing, starts Postgres in Docker, installs the two Python
+packages and starts the app. Open http://localhost:8080 and log in as `admin` / `admin12345`
+(first run; set `ADMIN_PASSWORD` before the first run to choose your own). Keep the window open.
+
 ## TL;DR — fastest path
 
 ```bash
