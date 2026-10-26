@@ -344,6 +344,11 @@ DB = dict(host=os.environ.get('DB_HOST', '127.0.0.1'), port=int(os.environ.get('
           user=os.environ.get('DB_USER', 'leadgen'),
           password=os.environ.get('DB_PASS', ''), connect_timeout=2)
 
+def new_job_id():
+    """Random, so two companies starting a job in the same second never share
+    (and see each other's log lines in) one JOBS entry."""
+    return f'job_{uuid.uuid4().hex}'
+
 class _JobRegistry(dict):
     """Background job tracker. Every job records which company started it
     (the request's tenant scope, see set_current_scope) so /job/<id> and
@@ -1731,6 +1736,12 @@ def discover_leads_smart(niche, city, country='', original_query='',
     filtered_by_website = 0
     already_in_db = 0
     conn = db_conn(); cur = conn.cursor()
+    # Businesses this company erased on request are never re-imported.
+    try:
+        cur.execute("SELECT business_hash FROM data_erasures WHERE tenant_id IS NOT DISTINCT FROM %s", (tenant_id,))
+        erased = {r[0] for r in cur.fetchall()}
+    except Exception:
+        conn.rollback(); erased = set()
     for cand in raw.values():
         website = cand.get('website')
         has_website = bool(website)
@@ -1742,6 +1753,8 @@ def discover_leads_smart(niche, city, country='', original_query='',
             continue
         pid = cand.get('source_id')
         if not pid:
+            continue
+        if erased and hashlib.sha256((cand.get('name') or 'Unknown')[:480].encode()).hexdigest() in erased:
             continue
         pn = norm_phone(cand.get('phone'))
         dom = norm_domain(website)
@@ -6395,11 +6408,37 @@ def pipedrive_push(detail, config):
     except Exception as e:
         return False, None, {'error': str(e)}
 
-def webhook_push(detail, config):
+def public_https_url_error(url):
+    """Why a client-supplied webhook URL is unsafe to call from this server
+    (None when fine): must be https and resolve only to public addresses, so
+    a client can't make the server probe its own network or cloud metadata."""
+    import ipaddress
+    try:
+        u = urllib.parse.urlparse(url or '')
+    except Exception:
+        return 'not a valid URL'
+    if u.scheme != 'https' or not u.hostname:
+        return 'webhook URL must start with https://'
+    try:
+        addrs = {ai[4][0] for ai in socket.getaddrinfo(u.hostname, u.port or 443)}
+    except Exception:
+        return f'cannot resolve {u.hostname}'
+    for a in addrs:
+        ip = ipaddress.ip_address(a.split('%')[0])
+        if not ip.is_global:
+            return f'{u.hostname} points to a private or reserved address'
+    return None
+
+def webhook_push(detail, config, client_owned=False):
     """Generic signed JSON payload — works with Zapier/n8n/GoHighLevel/any custom endpoint."""
     url = config.get('webhook_url', '')
     if not url:
         return False, None, {'error': 'no webhook_url configured'}
+    if client_owned:
+        # Re-checked at send time too: DNS can change after the URL was saved.
+        bad = public_https_url_error(url)
+        if bad:
+            return False, None, {'error': f'webhook blocked: {bad}'}
     try:
         payload = {
             'lead_id': detail['id'], 'business_name': detail['business_name'],
@@ -6437,7 +6476,8 @@ def crm_push_lead(lead_id, connection_id):
     if ctype == 'pipedrive':
         ok, ext_id, resp = pipedrive_push(detail, config)
     elif ctype == 'webhook':
-        ok, ext_id, resp = webhook_push(detail, config)
+        ok, ext_id, resp = webhook_push(detail, config,
+                                        client_owned=bool(conn_tenant) and not tenant_is_operator(str(conn_tenant)))
     else:
         ok, ext_id, resp = False, None, {'error': f'unsupported CRM type: {ctype}'}
 
@@ -6595,8 +6635,7 @@ def handle_calendly_webhook(raw_body, tenant_id=None):
         if tenant_id:
             owner = "l.tenant_id = %s"; owner_p = (tenant_id,)
         else:
-            owner = ("(l.tenant_id IS NULL OR l.tenant_id IN (SELECT tenant_id FROM auth_users "
-                     "WHERE role IN ('admin','service') AND tenant_id IS NOT NULL))"); owner_p = ()
+            owner = OPERATOR_LEADS_SQL; owner_p = ()
         cur.execute(f"""SELECT DISTINCT x.lead_id FROM (
                            SELECT lead_id FROM outreach_log WHERE LOWER(email_to) = %s
                            UNION
@@ -6924,12 +6963,46 @@ def scope_sql(alias='l'):
 
 def current_owner_tenant():
     """Company that new rows created by this request belong to: the client's
-    scope, or the admin's own workspace (admin still sees every company)."""
+    scope, or the admin's own workspace (admin still sees every company).
+    The internal service account and schedulers act for the operator."""
     scope = get_current_scope()
     if scope:
         return scope
     user = get_current_user()
-    return get_user_tenant_id(user) if user and user != 'service' else None
+    if user and user != 'service':
+        return get_user_tenant_id(user)
+    return operator_tenant_id()
+
+def operator_tenant_id():
+    """The platform operator's workspace: the first admin's tenant."""
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("""SELECT tenant_id FROM auth_users WHERE role = 'admin' AND tenant_id IS NOT NULL
+                       ORDER BY created_at NULLS LAST, username LIMIT 1""")
+        row = cur.fetchone(); cur.close(); conn.close()
+        return str(row[0]) if row else None
+    except Exception:
+        return None
+
+def adopt_unowned_rows():
+    """Rows from before companies existed (tenant_id NULL) belong to the
+    operator. Moving them into the operator's workspace keeps per-company
+    dedup working (otherwise every re-found business gets a second row) and
+    lets the operator's CRM connections receive them. A NULL lead that the
+    operator already has a copy of stays as it is rather than collide."""
+    op = operator_tenant_id()
+    if not op:
+        return
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("""UPDATE leads n SET tenant_id = %s WHERE n.tenant_id IS NULL
+                   AND NOT EXISTS (SELECT 1 FROM leads o WHERE o.tenant_id = %s AND o.place_id = n.place_id)""",
+                (op, op))
+    moved = cur.rowcount
+    for table in ('icp_profiles', 'workflows', 'research_history'):
+        cur.execute(f"UPDATE {table} SET tenant_id = %s WHERE tenant_id IS NULL", (op,))
+    conn.commit(); cur.close(); conn.close()
+    if moved:
+        print(f'[tenants] moved {moved} unowned lead(s) into the operator workspace')
 
 def copy_cached_leads_to_tenant(cur, tenant_id, niche, city, filter_mode, job_id=None):
     """Cached search hit: copy businesses another company already discovered
@@ -6948,6 +7021,8 @@ def copy_cached_leads_to_tenant(cur, tenant_id, niche, city, filter_mode, job_id
         FROM leads src
         WHERE src.niche = %s AND LOWER(src.city) = %s AND src.lead_type IS NULL
           AND src.tenant_id IS DISTINCT FROM %s {web}
+          AND NOT EXISTS (SELECT 1 FROM data_erasures de WHERE de.tenant_id = %s
+                            AND de.business_hash = encode(sha256(convert_to(COALESCE(src.business_name, ''), 'UTF8')), 'hex'))
           AND NOT EXISTS (SELECT 1 FROM leads mine WHERE mine.tenant_id = %s
                             AND (mine.place_id = src.place_id
                                  OR (COALESCE(src.phone_norm,'') <> '' AND mine.phone_norm = src.phone_norm)
@@ -6955,7 +7030,7 @@ def copy_cached_leads_to_tenant(cur, tenant_id, niche, city, filter_mode, job_id
         ORDER BY src.place_id, src.created_at
         ON CONFLICT DO NOTHING
         RETURNING business_name, niche, city, phone, has_website, website, address, source""",
-        (job_id, tenant_id, niche.lower(), city.lower(), tenant_id, tenant_id))
+        (job_id, tenant_id, niche.lower(), city.lower(), tenant_id, tenant_id, tenant_id))
     cols = ['business_name', 'niche', 'city', 'phone', 'has_website', 'website', 'address', 'source']
     return [dict(zip(cols, r)) for r in cur.fetchall()]
 
@@ -7130,6 +7205,15 @@ def process_due_enrollments():
         if not sender:
             print(f'[sequence] lead {lead_id} skipped this tick: {err}')
             skipped += 1
+            # Move it out of the due window, or 25 blocked enrollments from
+            # one unconfigured company would hold every tick.
+            try:
+                conn = db_conn(); cur = conn.cursor()
+                cur.execute("UPDATE enrollments SET next_send_at = NOW() + INTERVAL '1 hour', stop_reason=%s, "
+                            "updated_at=NOW() WHERE id=%s", (str(err)[:200], en_id))
+                conn.commit(); cur.close(); conn.close()
+            except Exception:
+                pass
             continue
         sd = {'id': sender['domain_id']}
         result = send_email_via_resend(email, subject, body, body_html,
@@ -7418,8 +7502,9 @@ def _check_reply_mailbox(job_id, box_tenant, host, user, password):
     if box_tenant:
         owner = "l.tenant_id = %s"; owner_p = (box_tenant,)
     else:
-        owner = ("(l.tenant_id IS NULL OR l.tenant_id NOT IN (SELECT tenant_id FROM tenant_settings "
-                 "WHERE COALESCE(settings->>'imap_host','') <> ''))"); owner_p = ()
+        # Client companies send from their own addresses, so replies to them
+        # never land here — only match the operator's own outreach.
+        owner = OPERATOR_LEADS_SQL; owner_p = ()
     JOBS[job_id]['log'].append(f'Connecting to {host} as {user}…')
     imap = imaplib.IMAP4_SSL(host)
     imap.login(user, password)
@@ -7691,17 +7776,29 @@ def outreach_automation_loop():
             check_sending_domain_health()
             conn = db_conn(); cur = conn.cursor()
             cur.execute("""
-                SELECT l.id FROM leads l
+                SELECT l.id, l.tenant_id FROM leads l
                 WHERE l.status = 'ready'
                   AND EXISTS (SELECT 1 FROM assets WHERE lead_id=l.id AND asset_type='email_subject')
                   AND EXISTS (SELECT 1 FROM assets WHERE lead_id=l.id AND asset_type='email_body')
-                ORDER BY l.id ASC LIMIT 50
+                ORDER BY l.created_at ASC LIMIT 500
             """)
-            lead_ids = [r[0] for r in cur.fetchall()]
+            rows = cur.fetchall()
             cur.close(); conn.close()
-            for lead_id in lead_ids:
+            # Skip companies that can't send right now (no identity, cap,
+            # domains paused) so they don't use up the batch for everyone.
+            blocked, attempted = set(), 0
+            for lead_id, lead_tenant_id in rows:
                 if CONFIG.get('outreach_automation_mode') != 'full_auto':
                     break   # mode was switched off mid-batch — stop immediately
+                if lead_tenant_id in blocked:
+                    continue
+                if attempted >= 50:
+                    break
+                tid = str(lead_tenant_id) if lead_tenant_id else None
+                if not company_throttle_status(tid)[0] or not resolve_sender(tid)[0]:
+                    blocked.add(lead_tenant_id)
+                    continue
+                attempted += 1
                 ok, _ = send_throttle_status()
                 if not ok:
                     break
@@ -8815,6 +8912,10 @@ def lead_tenant(lead_id):
     except Exception:
         return None
 
+# Leads that belong to the operator (unowned legacy rows or an admin's workspace).
+OPERATOR_LEADS_SQL = ("(l.tenant_id IS NULL OR l.tenant_id IN (SELECT tenant_id FROM auth_users "
+                      "WHERE role IN ('admin','service') AND tenant_id IS NOT NULL))")
+
 def _domain_owner_sql(alias='d'):
     """WHERE fragment for "sending domains this company may use": its own,
     plus unassigned ones for the operator."""
@@ -8849,9 +8950,17 @@ def resolve_sender(tenant_id, forced_domain_id=None):
         'address': st.get('company_address') or (COMPANY_ADDRESS if op else ''),
         'text': st.get('footer_text') or (CONFIG.get('client_footer_text', '') if op else ''),
     }
+    if not sd and not op:
+        # Every domain lives in one shared email-provider account, so a client
+        # may only send through domains the admin assigned to it — never a
+        # from-address it typed (it could be another company's domain).
+        return None, ("Blocked: no sending domain is assigned to this company yet — the platform admin "
+                      "adds one in Settings → Sending Domains")
     if sd:
-        # A client company's own From name wins over the domain's default.
-        from_email = sd['from_email']
+        # A client company's own From name wins over the domain's default, and
+        # its own from-address is used when it's on that same domain.
+        own = (st.get('from_email') or '').lower()
+        from_email = own if (not op and own.endswith('@' + sd['domain'].lower())) else sd['from_email']
         from_name = (st.get('from_name') if not op else '') or sd['from_name']
     else:
         from_email = st.get('from_email') or (FROM_EMAIL if op else '')
@@ -8954,7 +9063,10 @@ def crm_connection_allowed(connection_tenant, lead_tenant_id):
     """A CRM connection only receives its own company's leads; unassigned
     (legacy) connections serve the operator's leads."""
     if connection_tenant:
-        return str(connection_tenant) == (lead_tenant_id or '')
+        if str(connection_tenant) == (lead_tenant_id or ''):
+            return True
+        # Any admin's workspace is the operator's: they share connections.
+        return tenant_is_operator(str(connection_tenant)) and tenant_is_operator(lead_tenant_id)
     return tenant_is_operator(lead_tenant_id)
 
 def first_crm_connection_for(tenant_id):
@@ -9483,6 +9595,7 @@ class Handler(BaseHTTPRequestHandler):
                 # strategy, automation settings, or cost/budget config.
                 safe_keys = ('client_brand_name', 'client_brand_color', 'calendly_url', 'client_footer_text')
                 out = {k: CONFIG.get(k, '') for k in safe_keys}
+                out['calendly_url'] = ''   # a client books into its own Calendly, never the operator's
                 # M15: the company's own branding wins over the server-wide one
                 st = get_tenant_settings(self.scope_tenant())
                 for src, dst in (('brand_name', 'client_brand_name'), ('brand_color', 'client_brand_color'),
@@ -9568,10 +9681,12 @@ class Handler(BaseHTTPRequestHandler):
         elif p == '/sequences':
             try:
                 conn = db_conn(); cur = conn.cursor()
-                cur.execute("""SELECT q.id, q.name, q.is_active,
+                sc, sp = scope_sql()
+                cur.execute(f"""SELECT q.id, q.name, q.is_active,
                                (SELECT COUNT(*) FROM sequence_steps WHERE sequence_id=q.id),
-                               (SELECT COUNT(*) FROM enrollments WHERE sequence_id=q.id AND status='active')
-                               FROM sequences q ORDER BY q.id""")
+                               (SELECT COUNT(*) FROM enrollments e JOIN leads l ON l.id = e.lead_id
+                                WHERE e.sequence_id=q.id AND e.status='active'{sc})
+                               FROM sequences q ORDER BY q.id""", sp)
                 seqs = [{'id': r[0], 'name': r[1], 'is_active': r[2],
                          'steps': r[3], 'active_enrollments': r[4]} for r in cur.fetchall()]
                 sc, sp = scope_sql()
@@ -10207,7 +10322,7 @@ class Handler(BaseHTTPRequestHandler):
                 where = parsed.get('city')
                 if state_cities and len(state_cities) > 1:
                     where = f'{len(state_cities)} cities across {parsed.get("_state_search") or parsed.get("city")}'
-                job_id = f'job_{int(time.time() * 1000)}'
+                job_id = new_job_id()
                 JOBS[job_id] = {'status': 'running', 'progress': 0,
                                 'log': [f'Parsing "{query}" → {parsed.get("niche")} in {where}'],
                                 'step': 'Discover'}
@@ -10215,7 +10330,7 @@ class Handler(BaseHTTPRequestHandler):
                 # internal service token resolves to the literal string
                 # 'service' (not a row in tenants) — never pass that into a
                 # uuid column, tag as untagged/admin-visible-only instead.
-                tag_tenant_id = tenant_id if tenant_id != 'service' else None
+                tag_tenant_id = tenant_id if tenant_id != 'service' else operator_tenant_id()
                 hide_sources = self.scope_tenant() is not None
                 _bg_thread(run_discover_bg,
                     job_id, parsed['niche'], parsed['city'], parsed.get('country', ''),
@@ -10285,7 +10400,7 @@ class Handler(BaseHTTPRequestHandler):
                 city = fixed.get('city', city)
                 country = fixed.get('country', country)
                 state_cities = fixed.get('_state_cities')
-                job_id = f'job_{int(time.time() * 1000)}'
+                job_id = new_job_id()
                 JOBS[job_id] = {'status': 'running', 'progress': 0,
                                 'log': [f'Discovering "{niche}" in {city}…'], 'step': 'Discover'}
                 _bg_thread(run_discover_bg,
@@ -10298,7 +10413,7 @@ class Handler(BaseHTTPRequestHandler):
         elif p == '/enrich':
             try:
                 strategy = body.get('provider', 'serper_then_oxylabs')
-                job_id = f'job_{int(time.time())}'
+                job_id = new_job_id()
                 JOBS[job_id] = {'status': 'running', 'progress': 0, 'log': ['Checking which leads need enriching...'], 'step': 'Enrich'}
                 _bg_thread(run_enrich_bg, job_id, strategy)
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
@@ -10333,7 +10448,7 @@ class Handler(BaseHTTPRequestHandler):
                     rows = list(reader)
                 if not rows:
                     self.send_json(400, {'error': 'no rows in CSV'}); return
-                job_id = f'job_{int(time.time() * 1000)}'
+                job_id = new_job_id()
                 JOBS[job_id] = {'status': 'running', 'progress': 0,
                                 'log': [], 'step': 'CSV Enrich'}
                 _bg_thread(run_csv_enrich_bg, job_id, rows, strategy)
@@ -10344,7 +10459,7 @@ class Handler(BaseHTTPRequestHandler):
         elif p == '/verify-websites':
             try:
                 lead_ids = body.get('lead_ids') or []  # empty = all unverified
-                job_id = f'job_{int(time.time())}'
+                job_id = new_job_id()
                 JOBS[job_id] = {'status': 'running', 'progress': 0,
                                 'log': ['Starting website verification…'], 'step': 'Verify Websites'}
                 _bg_thread(run_verify_websites_bg, job_id, lead_ids)
@@ -10376,6 +10491,16 @@ class Handler(BaseHTTPRequestHandler):
                         v = str(v or '').strip()[:500]
                     if k in ('from_email', 'reply_to', 'digest_email') and v and not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', v):
                         self.send_json(400, {'error': f'{k} is not a valid email address'}); return
+                    if (k == 'from_email' and v and not is_admin
+                            and v.lower() != (get_tenant_settings(tid).get('from_email') or '').lower()):
+                        dom = v.rsplit('@', 1)[1].lower()
+                        conn = db_conn(); cur = conn.cursor()
+                        cur.execute("SELECT 1 FROM sending_domains WHERE tenant_id = %s AND LOWER(domain) = %s", (tid, dom))
+                        ok = cur.fetchone() is not None
+                        cur.close(); conn.close()
+                        if not ok:
+                            self.send_json(400, {'error': f'{dom} is not one of this company\'s sending domains — '
+                                                          'the platform admin assigns them in Settings → Sending Domains'}); return
                     if k == 'calendly_url' and v and not v.startswith('https://'):
                         self.send_json(400, {'error': 'calendly_url must start with https://'}); return
                     if k == 'brand_color' and v and not re.match(r'^#[0-9a-fA-F]{6}$', v):
@@ -10426,6 +10551,10 @@ class Handler(BaseHTTPRequestHandler):
                 name = body.get('name', '') or ctype
                 config = dict(body.get('config') or {})
                 is_active = bool(body.get('is_active', True))
+                if ctype == 'webhook' and self.scope_tenant() is not None:
+                    bad = public_https_url_error(config.get('webhook_url', ''))
+                    if bad:
+                        self.send_json(400, {'error': bad}); return
                 conn = db_conn(); cur = conn.cursor()
                 if cid:
                     # A masked value round-tripped from GET must not clobber the real secret
@@ -10559,8 +10688,7 @@ class Handler(BaseHTTPRequestHandler):
                     if ct:
                         sc, sp = " AND l.tenant_id = %s", (ct,)
                     else:
-                        sc, sp = (" AND (l.tenant_id IS NULL OR l.tenant_id IN (SELECT tenant_id FROM auth_users"
-                                  " WHERE role IN ('admin','service') AND tenant_id IS NOT NULL))"), ()
+                        sc, sp = " AND " + OPERATOR_LEADS_SQL, ()
                     cur.execute(f"""SELECT id FROM leads l WHERE COALESCE(icp_score, ai_score*10, 0) >= %s{sc}
                                    ORDER BY COALESCE(icp_score, ai_score*10, 0) DESC LIMIT 500""", (min_score, *sp))
                     lead_ids = [str(r[0]) for r in cur.fetchall()]
@@ -10569,7 +10697,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json(200, {'job_id': None, 'status': 'nothing_to_do',
                                          'message': 'No leads matched.'})
                     return
-                job_id = f'job_{int(time.time() * 1000)}'
+                job_id = new_job_id()
                 JOBS[job_id] = {'status': 'running', 'progress': 0,
                                 'log': [f'Pushing {len(lead_ids)} lead(s)…'], 'step': 'CRM Push'}
                 _bg_thread(run_crm_push_bg, job_id, lead_ids, connection_id)
@@ -10656,7 +10784,7 @@ class Handler(BaseHTTPRequestHandler):
                 pid = body.get('id')
                 if not icp_in_scope(pid, self.scope_tenant()):
                     self.send_json(404, {'error': 'ICP not found'}); return
-                job_id = f'job_{int(time.time() * 1000)}'
+                job_id = new_job_id()
                 JOBS[job_id] = {'status': 'running', 'progress': 0, 'log': ['Starting ICP run…'], 'step': 'ICP Discovery'}
                 _bg_thread(run_icp_bg, job_id, pid)
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
@@ -10702,7 +10830,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json(400, {'error': 'id required'}); return
                 if not workflow_in_scope(wid, self.scope_tenant()):
                     self.send_json(404, {'error': 'Workflow not found'}); return
-                job_id = f'job_{int(time.time() * 1000)}'
+                job_id = new_job_id()
                 JOBS[job_id] = {'status': 'running', 'progress': 0, 'log': ['Starting workflow…'], 'step': 'Workflow'}
                 _bg_thread(run_workflow_bg, job_id, wid)
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
@@ -10749,7 +10877,7 @@ class Handler(BaseHTTPRequestHandler):
 
         elif p == '/check-replies':
             try:
-                job_id = f'job_{int(time.time() * 1000)}'
+                job_id = new_job_id()
                 _bg_thread(run_check_replies_bg, job_id, self.scope_tenant())
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
             except Exception as e:
@@ -10758,7 +10886,7 @@ class Handler(BaseHTTPRequestHandler):
         elif p == '/verify-emails':
             try:
                 only_stale = bool(body.get('only_stale', False))
-                job_id = f'job_{int(time.time() * 1000)}'
+                job_id = new_job_id()
                 _bg_thread(run_verify_emails_bg, job_id, only_stale)
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
             except Exception as e:
@@ -10767,7 +10895,7 @@ class Handler(BaseHTTPRequestHandler):
         elif p == '/reenrich-missing-emails':
             try:
                 strategy = body.get('provider_strategy', 'oxylabs_only')
-                job_id = f'job_{int(time.time() * 1000)}'
+                job_id = new_job_id()
                 _bg_thread(run_reenrich_bg, job_id, strategy)
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
             except Exception as e:
@@ -10775,7 +10903,7 @@ class Handler(BaseHTTPRequestHandler):
 
         elif p == '/score':
             try:
-                job_id = f'job_{int(time.time())}'
+                job_id = new_job_id()
                 JOBS[job_id] = {'status': 'running', 'progress': 0, 'log': ['Starting: AI score leads...'], 'step': 'AI Score'}
                 _bg_thread(run_step_bg, job_id, score_all_enriched, 'AI score leads')
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
@@ -10788,7 +10916,7 @@ class Handler(BaseHTTPRequestHandler):
                     # Server-wide setting: only admin may change it.
                     CONFIG['image_provider'] = body.get('image_provider', 'none')
                 min_score = body.get('min_score', 5)
-                job_id = f'job_{int(time.time())}'
+                job_id = new_job_id()
                 _bg_thread(run_generate_assets_bg, job_id, min_score)
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
             except Exception as e:
@@ -11030,7 +11158,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 strategy = body.get('provider', 'serper_then_oxylabs')
                 gen_images = body.get('generate_images', False) if self.scope_tenant() is None else None
-                job_id = f'job_{int(time.time())}'
+                job_id = new_job_id()
                 _bg_thread(run_pipeline_bg, job_id, strategy, gen_images)
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
             except Exception as e:
@@ -11259,7 +11387,7 @@ class Handler(BaseHTTPRequestHandler):
                 lead_id = p.split('/')[2]
                 if not lead_in_scope(lead_id, self.scope_tenant()):
                     self.send_json(404, {'error': 'Lead not found'}); return
-                job_id = f'job_{int(time.time() * 1000)}'
+                job_id = new_job_id()
                 JOBS[job_id] = {'status': 'running', 'progress': 0,
                                 'log': ['Starting research…'], 'step': 'AI Research'}
                 _bg_thread(run_research_bg, job_id, [lead_id])
@@ -11295,7 +11423,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json(200, {'job_id': None, 'status': 'nothing_to_do', 'message': msg})
                     return
                 cur.close(); conn.close()
-                job_id = f'job_{int(time.time() * 1000)}'
+                job_id = new_job_id()
                 JOBS[job_id] = {'status': 'running', 'progress': 0,
                                 'log': [f'Queued {len(lead_ids)} lead(s) for research…'], 'step': 'AI Research'}
                 _bg_thread(run_research_bg, job_id, lead_ids)
@@ -11353,6 +11481,7 @@ if __name__ == '__main__':
     try:
         ensure_auth_tables()
         ensure_service_token()
+        adopt_unowned_rows()
         print('Auth: OK (users + sessions in DB)')
     except Exception as e:
         print(f'WARNING: auth tables unavailable — login will fail until Postgres is up: {e}')

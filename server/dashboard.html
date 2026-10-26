@@ -6307,7 +6307,7 @@ const PerformancePage = () => {
 const COMPANY_FIELD_GROUPS = [
   { title: 'Sending identity', icon: 'Send', note: 'Who prospects see the email from. Replies go to the reply-to address when set.', fields: [
     ['from_name', 'From name', 'Dana at Acme'],
-    ['from_email', 'From email', 'dana@acme.com'],
+    ['from_email', 'From email (on one of your sending domains)', 'dana@acme.com'],
     ['reply_to', 'Reply-to (optional)', 'sales@acme.com'],
   ] },
   { title: 'Legal footer', icon: 'Shield', note: 'Required in every commercial email (CAN-SPAM): your company name and a postal address. Outreach is blocked until both are set.', fields: [
@@ -6451,7 +6451,7 @@ const CompanyPage = () => {
 
       <Card>
         <h3 className="font-semibold text-sm mb-1">Sending domains</h3>
-        <p className="text-xs text-slate-500 mb-3">Domains verified for sending, rotated by daily headroom. {data.admin_keys_editable ? 'Assign domains to this company in Settings → Sending Domains.' : 'Ask your account manager to add one.'} Without any, email goes out from the from-address above.</p>
+        <p className="text-xs text-slate-500 mb-3">Domains verified for sending, rotated by daily headroom. {data.admin_keys_editable ? 'Assign domains to this company in Settings → Sending Domains.' : 'Ask your account manager to add one.'} {data.is_operator ? 'Without any, your email goes out from the server-wide from-address.' : 'A client company sends only through its own assigned domains, so outreach is blocked until one is added.'}</p>
         {data.domains.length === 0 ? <p className="text-sm text-slate-500">None assigned.</p> : (
           <div className="space-y-1.5">
             {data.domains.map(d => (
