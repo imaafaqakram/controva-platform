@@ -514,12 +514,12 @@ books meetings and pushes to its CRM as itself. The admin (you) sees every compa
 |---|---|---|
 | Users | Settings → Client accounts → *Join <company>* | Several logins can share one company |
 | Leads, ICPs, workflows, intent leads, saved research, jobs | Everywhere | A business can be in two companies' lists independently; a search another company already ran gives this company its own copy (business facts only) |
-| Sending identity | **Company** page | From name/address, reply-to. Assign verified sending domains to a company in Settings → Sending Domains |
+| Sending identity | **Company** page | From name, from-address on one of its domains, reply-to. A client company sends **only through sending domains you assign it** in Settings → Sending Domains (verify each in Resend first) — it can't type in someone else's domain |
 | Legal footer | **Company** page | Company name + postal address (CAN-SPAM). A client company **cannot send** until its from-address, name and address are set — it never falls back to yours |
 | Daily send cap | **Company** page (admin only) | On top of the server-wide caps |
 | Calendly | **Company** page | Its booking link goes into follow-ups; its own webhook URL marks only its leads as booked |
 | Reply inbox | **Company** page | IMAP; all inboxes are checked every 15 minutes, a reply only matches that company's outreach |
-| CRM | **Company** page | Pipedrive / webhook connections; a connection only ever receives its own company's leads |
+| CRM | **Company** page | Pipedrive / webhook connections; a connection only ever receives its own company's leads. A client's webhook must be a public `https://` URL |
 | Branding, daily digest | **Company** page | Dashboard name/colour for its users; a morning summary of its own numbers |
 | Qualification criteria | ICP → *Qualification criteria* | Score weights, must-have email / decision-maker, minimum rating / reviews, decision-maker titles, and its ideal customer in its own words (used by AI scoring and research) |
 
