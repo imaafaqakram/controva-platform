@@ -4846,6 +4846,11 @@ const LeadDetailModal = ({ leadId, onClose, onUpdate }) => {
                       </p>
                     </>
                   ) : <p className="text-sm text-slate-400">Run research to compute</p>}
+                  {lead.qualification && (
+                    <p className={'text-xs mt-1 ' + (lead.qualification.qualified ? 'text-green-600' : 'text-amber-600')}>
+                      {lead.qualification.qualified ? '✓ Qualified for its ICP' : 'Not qualified: ' + lead.qualification.unmet.join(', ')}
+                    </p>
+                  )}
                 </div>
               </div>
               {lead.address && (
@@ -5015,7 +5020,20 @@ const LeadDetailModal = ({ leadId, onClose, onUpdate }) => {
 // ─────────────────────────────────────────────────
 //  ICP Page - Autonomous ideal-customer prospecting (M6)
 // ─────────────────────────────────────────────────
-const ICP_BLANK = { name: '', industries: '', geos: '', keywords: '', exclusions: '', source_mix: 'all', min_lead_score: 60, push_to_crm: false, is_active: true, offer: '', industry_template: '' };
+const ICP_BLANK = { name: '', industries: '', geos: '', keywords: '', exclusions: '', source_mix: 'all', min_lead_score: 60, push_to_crm: false, is_active: true, offer: '', industry_template: '',
+                    require_email: false, require_decision_maker: false, min_rating: 0, min_reviews: 0, decision_maker_titles: '', qualification_notes: '', score_weights: null };
+const SCORE_WEIGHT_FIELDS = [['icp_fit', 'ICP fit', 30], ['pain_severity', 'Pain / need', 30], ['intent_signals', 'Intent signals', 20], ['quality', 'Business quality', 20]];
+
+const icpCriteriaSummary = (pr) => {
+  const parts = [];
+  if (pr.require_email) parts.push('email required');
+  if (pr.require_decision_maker) parts.push('decision-maker required');
+  if (Number(pr.min_rating) > 0) parts.push('rating ' + Number(pr.min_rating).toFixed(1) + '+');
+  if (Number(pr.min_reviews) > 0) parts.push(pr.min_reviews + '+ reviews');
+  if (pr.score_weights) parts.push('custom weights');
+  if (pr.qualification_notes) parts.push('custom criteria');
+  return parts;
+};
 
 const ICPPage = ({ setPage }) => {
   const [data, setData] = useState(null);
@@ -5130,6 +5148,7 @@ const ICPPage = ({ setPage }) => {
                     {pr.industries} · {pr.geos}
                   </p>
                   {pr.industry_template && <p className="mt-1"><Badge variant="info">{templateLabel(pr.industry_template) || pr.industry_template}</Badge></p>}
+                  {icpCriteriaSummary(pr).length > 0 && <p className="text-[11px] text-slate-500 mt-1">Qualifies on: {icpCriteriaSummary(pr).join(' · ')}</p>}
                   {pr.offer
                     ? <p className="text-[11px] text-slate-500 mt-1 line-clamp-2" title={pr.offer}>Selling: {pr.offer}</p>
                     : <p className="text-[11px] text-amber-600 mt-1">No offer set — emails use the default website-mockup pitch</p>}
@@ -5236,9 +5255,52 @@ const ICPPage = ({ setPage }) => {
                   onChange={e => setF('min_lead_score', parseInt(e.target.value, 10))}
                   className="w-full" />
                 <p className="text-[11px] text-slate-400 mt-1">
-                  Leads scoring at or above this are counted as "qualified" on this card, and — if CRM push is on below — are the ones auto-pushed.
+                  Leads scoring at or above this, and meeting the requirements below, count as "qualified" — on this card, in Performance, and for CRM auto-push.
                 </p>
               </div>
+              <details className="rounded-lg border border-slate-200 dark:border-slate-700 p-3" open={icpCriteriaSummary(p).length > 0}>
+                <summary className="text-xs font-semibold text-slate-600 dark:text-slate-300 cursor-pointer">Qualification criteria</summary>
+                <div className="space-y-3 mt-3">
+                  <div className="flex flex-wrap gap-4">
+                    <label className="flex items-center gap-2 text-sm">
+                      <input type="checkbox" checked={!!p.require_email} onChange={e => setF('require_email', e.target.checked)} /> Must have a usable email
+                    </label>
+                    <label className="flex items-center gap-2 text-sm">
+                      <input type="checkbox" checked={!!p.require_decision_maker} onChange={e => setF('require_decision_maker', e.target.checked)} /> Must have a named decision-maker
+                    </label>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div><label className="text-xs font-medium text-slate-500 block mb-1">Minimum Google rating</label>
+                      <Input type="number" value={p.min_rating ?? 0} onChange={v => setF('min_rating', v)} placeholder="0" /></div>
+                    <div><label className="text-xs font-medium text-slate-500 block mb-1">Minimum reviews</label>
+                      <Input type="number" value={p.min_reviews ?? 0} onChange={v => setF('min_reviews', v)} placeholder="0" /></div>
+                  </div>
+                  <div><label className="text-xs font-medium text-slate-500 block mb-1">Decision-maker titles to look for (optional)</label>
+                    <Input value={p.decision_maker_titles || ''} onChange={v => setF('decision_maker_titles', v)}
+                      placeholder={(templates.find(t => t.key === p.industry_template) || {}).decision_maker_titles?.join(', ') || 'Owner, Managing Director, Head of Sales'} /></div>
+                  <div><label className="text-xs font-medium text-slate-500 block mb-1">Your ideal customer, in your words (optional)</label>
+                    <textarea value={p.qualification_notes || ''} onChange={e => setF('qualification_notes', e.target.value)} rows={2}
+                      placeholder="e.g. 3+ locations, actively hiring, offers implants or cosmetic work"
+                      className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg text-sm px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-500" />
+                    <p className="text-[11px] text-slate-400 mt-1">AI scoring and research judge each prospect against this.</p></div>
+                  <div>
+                    <label className="flex items-center gap-2 text-xs font-medium text-slate-500 mb-1">
+                      <input type="checkbox" checked={!!p.score_weights}
+                        onChange={e => setF('score_weights', e.target.checked ? Object.fromEntries(SCORE_WEIGHT_FIELDS.map(([k, , d]) => [k, d])) : null)} />
+                      Custom score weights
+                    </label>
+                    {p.score_weights && (
+                      <div className="grid grid-cols-2 gap-2">
+                        {SCORE_WEIGHT_FIELDS.map(([k, label]) => (
+                          <div key={k}><label className="text-[11px] text-slate-500 block mb-0.5">{label}</label>
+                            <Input type="number" value={p.score_weights[k] ?? 0} onChange={v => setF('score_weights', { ...p.score_weights, [k]: v })} /></div>
+                        ))}
+                        <p className="text-[11px] text-slate-400 col-span-2">Relative importance; scaled so the score stays out of 100. Applies when a lead is researched.</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </details>
               <div className="flex items-center gap-4">
                 <label className="flex items-center gap-2 text-sm">
                   <input type="checkbox" checked={p.is_active} onChange={e => setF('is_active', e.target.checked)} /> Active (scheduler runs daily)

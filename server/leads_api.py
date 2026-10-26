@@ -18,7 +18,7 @@ Key Improvements:
   - Free alternatives for Apollo/Hunter
 """
 import json, csv, io, re, time, urllib.request, urllib.parse, psycopg2
-import threading, os, hashlib, hmac, smtplib, socket, uuid
+import threading, os, hashlib, hmac, smtplib, socket, uuid, decimal
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 
@@ -3629,6 +3629,8 @@ def generate_email_copy(business_name, niche, city, owner_name=None, research=No
 # ──────────────────────────────────────────────────────────────
 def _lead_score_prompt(business_name, niche, city, phone, has_email, has_linkedin, campaign=None):
     note = _campaign_block(campaign) if campaign and campaign.get('offer') else "Note: This business has NO WEBSITE."
+    if campaign and campaign.get('criteria'):
+        note += f"\nThe client's ideal-customer criteria (score mainly on how well this business fits them): {campaign['criteria']}"
     return f"""Score this B2B lead 1-10 for cold outreach.
 
 Business: {business_name}
@@ -6262,14 +6264,15 @@ def compute_icp_score(lead_id):
     each component degrades to a smaller baseline rather than erroring."""
     conn = db_conn(); cur = conn.cursor()
     cur.execute("""SELECT l.icp_id, COALESCE(l.google_rating,0), COALESCE(l.review_count,0), l.lead_type,
-                          rs.pain_points, rs.hiring_signals
+                          rs.pain_points, rs.hiring_signals, p.score_weights
                    FROM leads l LEFT JOIN lead_research rs ON rs.lead_id = l.id
+                   LEFT JOIN icp_profiles p ON p.id = l.icp_id
                    WHERE l.id = %s""", (lead_id,))
     row = cur.fetchone()
     if not row:
         cur.close(); conn.close()
         return None
-    icp_id, rating, review_count, lead_type, pain_points, hiring_signals = row
+    icp_id, rating, review_count, lead_type, pain_points, hiring_signals, weights = row
     cur.close(); conn.close()
     pain_points = pain_points or []
     hiring_signals = hiring_signals or []
@@ -6288,9 +6291,17 @@ def compute_icp_score(lead_id):
     # Business quality (0-20): Google rating + review volume as a size/quality proxy
     quality = min(20, round((float(rating) / 5) * 10) + min(int(review_count), 50) // 5)
 
-    total = min(100, icp_fit + pain_severity + intent + quality)
     breakdown = {'icp_fit': icp_fit, 'pain_severity': pain_severity,
-                 'intent_signals': intent, 'quality': quality, 'total': total}
+                 'intent_signals': intent, 'quality': quality}
+    if weights:
+        # Client-defined weights (ICP → qualification criteria): each
+        # component's share of 100 is rescaled from its default maximum.
+        wsum = sum(float(weights.get(k, 0) or 0) for k, _ in SCORE_COMPONENTS) or 1
+        breakdown = {k: round(breakdown[k] / mx * float(weights.get(k, 0) or 0) / wsum * 100)
+                     for k, mx in SCORE_COMPONENTS}
+        breakdown['weighted'] = True
+    total = min(100, sum(breakdown[k] for k, _ in SCORE_COMPONENTS))
+    breakdown['total'] = total
 
     conn = db_conn(); cur = conn.cursor()
     cur.execute("UPDATE leads SET icp_score=%s, score_breakdown=%s WHERE id=%s",
@@ -6503,7 +6514,7 @@ def crm_auto_push_for_icp(icp_id):
             JOIN icp_profiles p ON p.id = l.icp_id
             LEFT JOIN crm_push_log pl ON pl.lead_id = l.id AND pl.connection_id = %s AND pl.status = 'ok'
             WHERE l.icp_id = %s AND pl.id IS NULL
-              AND {QUALIFIED_SQL}
+              AND {qualified_sql()}
             LIMIT 200
         """, (connection_id, icp_id))
         lead_ids = [r[0] for r in cur.fetchall()]
@@ -6651,9 +6662,8 @@ def run_daily_digest():
         cur.execute("""SELECT COUNT(*) FROM leads
                        WHERE created_at > NOW() - INTERVAL '24 hours' AND lead_type IS NULL""")
         new_leads = cur.fetchone()[0]
-        cur.execute("""SELECT COUNT(*) FROM leads
-                       WHERE created_at > NOW() - INTERVAL '24 hours'
-                         AND COALESCE(icp_score, ai_score*10, 0) >= 60""")
+        cur.execute(f"""SELECT COUNT(*) FROM leads l LEFT JOIN icp_profiles p ON p.id = l.icp_id
+                       WHERE l.created_at > NOW() - INTERVAL '24 hours' AND {qualified_sql()}""")
         qualified = cur.fetchone()[0]
         cur.execute("""SELECT business_name, pain_points FROM leads l JOIN lead_research r ON r.lead_id=l.id
                        WHERE r.researched_at > NOW() - INTERVAL '24 hours'
@@ -6668,7 +6678,7 @@ def run_daily_digest():
             ready_to_send = cur.fetchone()[0]
         cur.close(); conn.close()
 
-        lines = [f"New leads (24h): {new_leads}", f"Qualified (score >= 60): {qualified}",
+        lines = [f"New leads (24h): {new_leads}", f"Qualified: {qualified}",
                  f"API spend (24h): ${cost_today:.2f}", '']
         if ready_to_send:
             lines.insert(0, f"{ready_to_send} leads ready to send — review and click Send in Outreach.")
@@ -8266,7 +8276,8 @@ def get_lead_campaign(lead_id):
     matching industry, so callers keep the original no-website pitch untouched."""
     try:
         conn = db_conn(); cur = conn.cursor()
-        cur.execute("""SELECT l.niche, p.offer, p.industry_template
+        cur.execute("""SELECT l.niche, p.offer, p.industry_template, p.decision_maker_titles,
+                              p.qualification_notes
                        FROM leads l LEFT JOIN icp_profiles p ON p.id = l.icp_id
                        WHERE l.id = %s""", (lead_id,))
         row = cur.fetchone(); cur.close(); conn.close()
@@ -8275,16 +8286,19 @@ def get_lead_campaign(lead_id):
         return None
     if not row:
         return None
-    niche, offer, template_key = row
+    niche, offer, template_key, custom_titles, criteria = row
     key, tpl = industry_template_for(template_key, niche)
     offer = (offer or '').strip()
-    if not offer and not tpl:
+    criteria = (criteria or '').strip()
+    custom_titles = _split_list(custom_titles or '')
+    if not offer and not tpl and not criteria and not custom_titles:
         return None
     return {
         'offer': offer,
+        'criteria': criteria,
         'template': key,
         'industry': tpl['label'] if tpl else '',
-        'titles': tpl['decision_maker_titles'] if tpl else [],
+        'titles': custom_titles or (tpl['decision_maker_titles'] if tpl else []),
         'pain_hints': tpl['pain_hints'] if tpl else [],
         'research_focus': tpl['research_focus'] if tpl else '',
         'compliance': tpl['compliance_note'] if tpl else '',
@@ -8321,6 +8335,8 @@ def _research_campaign_block(campaign):
         lines.append(f"For this industry, pay particular attention to: {campaign['research_focus']}.")
     if campaign.get('offer'):
         lines.append(f"We sell: {campaign['offer']} — prefer pains this could plausibly address.")
+    if campaign.get('criteria'):
+        lines.append(f"The client qualifies prospects on: {campaign['criteria']} — note evidence for or against these.")
     if campaign.get('compliance'):
         lines.append(f"Compliance rule: {campaign['compliance']}")
     return '\n'.join(lines) + '\n' if lines else ''
@@ -8333,6 +8349,14 @@ def ensure_m14_tables():
     cur.execute("ALTER TABLE icp_profiles ADD COLUMN IF NOT EXISTS offer TEXT NOT NULL DEFAULT ''")
     cur.execute("ALTER TABLE icp_profiles ADD COLUMN IF NOT EXISTS industry_template VARCHAR(40)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_icp_profiles_tenant ON icp_profiles(tenant_id)")
+    # Per-client qualification criteria
+    cur.execute("ALTER TABLE icp_profiles ADD COLUMN IF NOT EXISTS score_weights JSONB")
+    cur.execute("ALTER TABLE icp_profiles ADD COLUMN IF NOT EXISTS require_email BOOLEAN NOT NULL DEFAULT FALSE")
+    cur.execute("ALTER TABLE icp_profiles ADD COLUMN IF NOT EXISTS require_decision_maker BOOLEAN NOT NULL DEFAULT FALSE")
+    cur.execute("ALTER TABLE icp_profiles ADD COLUMN IF NOT EXISTS min_rating NUMERIC(2,1) NOT NULL DEFAULT 0")
+    cur.execute("ALTER TABLE icp_profiles ADD COLUMN IF NOT EXISTS min_reviews INT NOT NULL DEFAULT 0")
+    cur.execute("ALTER TABLE icp_profiles ADD COLUMN IF NOT EXISTS decision_maker_titles TEXT NOT NULL DEFAULT ''")
+    cur.execute("ALTER TABLE icp_profiles ADD COLUMN IF NOT EXISTS qualification_notes TEXT NOT NULL DEFAULT ''")
     # Sales outcomes per lead
     cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS meeting_attended BOOLEAN")
     cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS deal_stage VARCHAR(20)")
@@ -8431,10 +8455,47 @@ BENCHMARK_CHANNELS = {
 _BENCHMARK_NUMERIC = ('spend', 'leads', 'qualified_leads', 'meetings_booked', 'meetings_attended',
                       'customers', 'revenue')
 
-# One definition of a qualified lead, used by the ICP cards, CRM auto-push,
-# digests and the Performance page. Needs aliases l (leads) and p (the lead's
-# icp_profiles row, LEFT JOINed).
-QUALIFIED_SQL = "COALESCE(l.icp_score, l.ai_score * 10, 0) >= COALESCE(p.min_lead_score, 60)"
+def qualified_sql():
+    """One definition of a qualified lead, used by the ICP cards, CRM
+    auto-push, digests and the Performance page: the score clears its ICP's
+    threshold AND the lead meets that ICP's hard requirements. Needs aliases
+    l (leads) and p (the lead's icp_profiles row, LEFT JOINed)."""
+    default = int(CONFIG.get('qualified_score_threshold', 60))
+    return f"""(COALESCE(l.icp_score, l.ai_score * 10, 0) >= COALESCE(p.min_lead_score, {default})
+        AND (NOT COALESCE(p.require_email, FALSE) OR EXISTS (
+              SELECT 1 FROM contacts qc WHERE qc.lead_id = l.id AND COALESCE(qc.email, '') <> ''
+                AND COALESCE(qc.email_status, '') <> 'undeliverable'))
+        AND (NOT COALESCE(p.require_decision_maker, FALSE) OR EXISTS (
+              SELECT 1 FROM contacts qd WHERE qd.lead_id = l.id AND COALESCE(qd.job_title, '') <> ''))
+        AND COALESCE(l.google_rating, 0) >= COALESCE(p.min_rating, 0)
+        AND COALESCE(l.review_count, 0) >= COALESCE(p.min_reviews, 0))"""
+
+def lead_qualification(lead_id):
+    """{'qualified': bool, 'unmet': [reasons]} for one lead against its ICP."""
+    default = int(CONFIG.get('qualified_score_threshold', 60))
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute(f"""
+        SELECT {qualified_sql()},
+               COALESCE(l.icp_score, l.ai_score * 10, 0), COALESCE(p.min_lead_score, {default}),
+               COALESCE(p.require_email, FALSE),
+               EXISTS (SELECT 1 FROM contacts c WHERE c.lead_id = l.id AND COALESCE(c.email, '') <> ''
+                         AND COALESCE(c.email_status, '') <> 'undeliverable'),
+               COALESCE(p.require_decision_maker, FALSE),
+               EXISTS (SELECT 1 FROM contacts c WHERE c.lead_id = l.id AND COALESCE(c.job_title, '') <> ''),
+               COALESCE(l.google_rating, 0), COALESCE(p.min_rating, 0),
+               COALESCE(l.review_count, 0), COALESCE(p.min_reviews, 0)
+        FROM leads l LEFT JOIN icp_profiles p ON p.id = l.icp_id WHERE l.id = %s""", (lead_id,))
+    r = cur.fetchone(); cur.close(); conn.close()
+    if not r:
+        return None
+    ok, score, threshold, need_email, has_email, need_dm, has_dm, rating, min_rating, reviews, min_reviews = r
+    unmet = []
+    if score < threshold: unmet.append(f'score {score} is below {threshold}')
+    if need_email and not has_email: unmet.append('no usable email')
+    if need_dm and not has_dm: unmet.append('no named decision-maker')
+    if rating < min_rating: unmet.append(f'rating {float(rating):.1f} is below {float(min_rating):.1f}')
+    if reviews < min_reviews: unmet.append(f'{reviews} reviews, needs {min_reviews}')
+    return {'qualified': bool(ok), 'unmet': unmet}
 
 def _ratio(num, den, scale=1.0):
     return round(float(num) / float(den) * scale, 2) if den else None
@@ -8474,12 +8535,10 @@ def performance_report(tenant_id, date_from, date_to):
     default_threshold = int(CONFIG.get('qualified_score_threshold', 60))
 
     cur.execute(f"""
-        SELECT COUNT(*),
-               COUNT(*) FILTER (WHERE COALESCE(l.icp_score, l.ai_score * 10, 0)
-                                      >= COALESCE(p.min_lead_score, %s))
+        SELECT COUNT(*), COUNT(*) FILTER (WHERE {qualified_sql()})
         FROM leads l LEFT JOIN icp_profiles p ON p.id = l.icp_id
         WHERE l.lead_type IS NULL AND l.created_at >= %s AND l.created_at < %s::date + 1 {lt}""",
-        (default_threshold, *rng, *tp))
+        (*rng, *tp))
     leads_total, qualified = cur.fetchone()
 
     cur.execute(f"""
@@ -8627,6 +8686,37 @@ def workflow_in_scope(workflow_id, tenant_id):
         return ok
     except Exception:
         return False
+
+SCORE_COMPONENTS = (('icp_fit', 30), ('pain_severity', 30), ('intent_signals', 20), ('quality', 20))
+
+def icp_criteria_fields(body):
+    """Validated per-ICP qualification criteria from a save request.
+    Raises ValueError with a user-facing message."""
+    out = {'require_email': bool(body.get('require_email')),
+           'require_decision_maker': bool(body.get('require_decision_maker')),
+           'decision_maker_titles': ', '.join(_split_list(body.get('decision_maker_titles') or ''))[:500],
+           'qualification_notes': (body.get('qualification_notes') or '').strip()[:2000]}
+    try:
+        out['min_rating'] = round(float(body.get('min_rating') or 0), 1)
+        out['min_reviews'] = int(body.get('min_reviews') or 0)
+    except (TypeError, ValueError):
+        raise ValueError('min_rating and min_reviews must be numbers')
+    if not 0 <= out['min_rating'] <= 5:
+        raise ValueError('min_rating must be between 0 and 5')
+    if out['min_reviews'] < 0:
+        raise ValueError('min_reviews cannot be negative')
+    weights = body.get('score_weights')
+    if weights:
+        try:
+            w = {k: float(weights.get(k, 0) or 0) for k, _ in SCORE_COMPONENTS}
+        except (TypeError, ValueError, AttributeError):
+            raise ValueError('score_weights must be numbers')
+        if any(v < 0 for v in w.values()) or sum(w.values()) <= 0:
+            raise ValueError('score_weights must be positive and not all zero')
+        out['score_weights'] = json.dumps(w)
+    else:
+        out['score_weights'] = None
+    return out
 
 def icp_in_scope(icp_id, tenant_id):
     """Like lead_in_scope() for ICP profiles: True for unscoped (admin) callers
@@ -8874,7 +8964,7 @@ def run_company_digest(tenant_id, recipient):
     tc = (tenant_id,)
     conn = db_conn(); cur = conn.cursor()
     cur.execute(f"""SELECT COUNT(*),
-                           COUNT(*) FILTER (WHERE {QUALIFIED_SQL})
+                           COUNT(*) FILTER (WHERE {qualified_sql()})
                     FROM leads l LEFT JOIN icp_profiles p ON p.id = l.icp_id
                     WHERE l.tenant_id = %s AND l.lead_type IS NULL
                       AND l.created_at > NOW() - INTERVAL '24 hours'""", tc)
@@ -8996,6 +9086,7 @@ def get_lead_detail(lead_id, tenant_id=None):
         "outcome_notes": r[36] or "",
         "meeting_booked_at": r[37],
         "campaign": get_lead_campaign(lead_id),
+        "qualification": lead_qualification(lead_id),
     }
 
 def regenerate_email_for_lead(lead_id, extra_instructions=""):
@@ -9617,10 +9708,12 @@ class Handler(BaseHTTPRequestHandler):
                                       to_char(p.last_run_at,'YYYY-MM-DD HH24:MI'),
                                       (SELECT COUNT(*) FROM leads l WHERE l.icp_id=p.id),
                                       (SELECT COUNT(*) FROM leads l WHERE l.icp_id=p.id
-                                        AND COALESCE(l.icp_score, l.ai_score * 10, 0) >= p.min_lead_score),
-                                      p.offer, p.industry_template
+                                        AND {q}),
+                                      p.offer, p.industry_template, p.score_weights, p.require_email,
+                                      p.require_decision_maker, p.min_rating, p.min_reviews,
+                                      p.decision_maker_titles, p.qualification_notes
                                FROM icp_profiles p {where} ORDER BY p.id DESC""".format(
-                                   where="WHERE p.tenant_id = %s" if scope else ""),
+                                   q=qualified_sql(), where="WHERE p.tenant_id = %s" if scope else ""),
                             (scope,) if scope else ())
                 rows = cur.fetchall()
                 cur.execute("""SELECT r.icp_id, r.leads_found, r.leads_new, r.status,
@@ -9634,7 +9727,11 @@ class Handler(BaseHTTPRequestHandler):
                     'profiles': [dict(zip(['id','name','industries','geos','keywords','exclusions',
                                            'source_mix','min_lead_score','push_to_crm','is_active',
                                            'last_run','lead_count','qualified_count',
-                                           'offer','industry_template'], r)) for r in rows],
+                                           'offer','industry_template','score_weights','require_email',
+                                           'require_decision_maker','min_rating','min_reviews',
+                                           'decision_maker_titles','qualification_notes'],
+                                          [float(v) if isinstance(v, decimal.Decimal) else v for v in r]))
+                                 for r in rows],
                     'recent_runs': [dict(zip(['icp_id','found','new','status','started'], r)) for r in runs],
                     'scheduler_enabled': bool(CONFIG.get('icp_scheduler_enabled', True)),
                 })
@@ -10469,6 +10566,10 @@ class Handler(BaseHTTPRequestHandler):
                 if tpl and tpl not in INDUSTRY_TEMPLATES:
                     self.send_json(400, {'error': 'unknown industry_template'}); return
                 fields['industry_template'] = tpl
+                try:
+                    fields.update(icp_criteria_fields(body))
+                except ValueError as ve:
+                    self.send_json(400, {'error': str(ve)}); return
                 if pid and not icp_in_scope(pid, self.scope_tenant()):
                     self.send_json(404, {'error': 'ICP not found'}); return
                 conn = db_conn(); cur = conn.cursor()
