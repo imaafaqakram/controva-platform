@@ -11453,9 +11453,10 @@ class Handler(BaseHTTPRequestHandler):
 class ThreadingServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
-if __name__ == '__main__':
-    # Run schema migrations at startup so columns added in new releases
-    # exist before any endpoint is called (avoids "column does not exist" crashes).
+def migrate_all():
+    """Schema migrations + auth bootstrap, run at startup so columns added in
+    new releases exist before any endpoint is called (avoids "column does not
+    exist" crashes). Also used by demo_seed.py."""
     try:
         ensure_discovery_tables()
         ensure_research_cache_table()
@@ -11485,6 +11486,9 @@ if __name__ == '__main__':
         print('Auth: OK (users + sessions in DB)')
     except Exception as e:
         print(f'WARNING: auth tables unavailable — login will fail until Postgres is up: {e}')
+
+if __name__ == '__main__':
+    migrate_all()
     # M4: follow-up sequence scheduler (every N minutes)
     if CONFIG.get('sequences_enabled', True):
         t = threading.Thread(target=sequence_scheduler_loop, daemon=True)

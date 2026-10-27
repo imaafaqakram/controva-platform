@@ -1,0 +1,12 @@
+.git
+**/__pycache__
+**/node_modules
+server/config.json
+server/api_keys.json
+server/mockups
+*.env
+.env
+testing
+presentation
+marketing
+docs

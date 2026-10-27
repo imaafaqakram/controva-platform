@@ -6,16 +6,27 @@ on a fresh VPS, with the exact commands that were verified by the test pass in
 
 ---
 
-## Run it on your own computer (one command)
+## Run it on your own computer (one command, Docker only)
 
-Needs Docker Desktop (running) and Python 3.10+. From the repo folder:
+Needs only **Docker Desktop**, running. From the repo folder:
 
 - **Windows (PowerShell):** `powershell -ExecutionPolicy Bypass -File run_local.ps1`
 - **Mac / Linux:** `bash run_local.sh`
+- or directly: `docker compose up -d --build`
 
-The script creates `.env` if missing, starts Postgres in Docker, installs the two Python
-packages and starts the app. Open http://localhost:8080 and log in as `admin` / `admin12345`
-(first run; set `ADMIN_PASSWORD` before the first run to choose your own). Keep the window open.
+It builds the app, starts Postgres and the app together, and opens http://localhost:8080.
+The first run downloads about 200 MB and takes a few minutes.
+
+| Login | Who |
+|---|---|
+| `admin` / `admin12345` | You, the platform owner — sees every company, Settings, API keys |
+| `demo` / `demo12345!` | "Demo Company (sample data)" — a sample client with 38 fictional prospects, emails, replies, meetings, deals and ad-channel figures, for showing the product |
+
+- Stop: `docker compose down` (data is kept). Start over: `docker compose down -v`.
+- Without demo data: `DEMO_DATA=0 docker compose up -d --build` (on a fresh database).
+- Port 8080 busy: `APP_PORT=8090 docker compose up -d --build`.
+- Real searches, enrichment and AI need your API keys: log in as admin → Settings → API Keys.
+  Demo addresses use the reserved `.example` domain, so nothing in the demo can be emailed.
 
 ## TL;DR — fastest path
 

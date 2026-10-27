@@ -1,0 +1,50 @@
+# Run the whole platform locally with one command (Docker Desktop only):
+#
+#   docker compose up -d --build
+#
+# then open http://localhost:8080
+#   admin / admin12345          — the platform owner, sees every company
+#   demo  / demo12345!          — a sample client company (when DEMO_DATA=1)
+#
+# Stop:        docker compose down        (data is kept)
+# Start over:  docker compose down -v     (deletes the database)
+# Add API keys in the dashboard: Settings → API Keys (kept in the app_data volume).
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: leadgen
+      POSTGRES_PASSWORD: ${LEADGEN_DB_PASS:-controva-local}
+      POSTGRES_DB: leadgen_db
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./server/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U leadgen -d leadgen_db"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_PASS: ${LEADGEN_DB_PASS:-controva-local}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin12345}
+      DEMO_DATA: ${DEMO_DATA:-1}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8080}
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    volumes:
+      - app_data:/data
+
+volumes:
+  db_data:
+  app_data:
