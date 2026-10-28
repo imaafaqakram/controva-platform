@@ -41,14 +41,15 @@ real Pipedrive/Calendly accounts.
 14. [Workflow Builder & N8N (M13)](#workflow-builder--n8n-m13)
 15. [Industry Playbooks, Outcomes & Channel Performance (M14)](#industry-playbooks-outcomes--channel-performance-m14)
 16. [Multiple Client Companies (M15)](#multiple-client-companies-m15)
-17. [Deployment & CI/CD](#deployment--cicd)
-18. [Configuration & API Keys](#configuration--api-keys)
-19. [Architecture](#architecture)
-20. [Database Schema](#database-schema)
-21. [Troubleshooting](#troubleshooting)
-22. [User Roles](#user-roles)
-23. [Security Checklist](#security-checklist)
-24. [Changelog](#changelog)
+17. [Lead Hunter Integration (M16)](#lead-hunter-integration-m16)
+18. [Deployment & CI/CD](#deployment--cicd)
+19. [Configuration & API Keys](#configuration--api-keys)
+20. [Architecture](#architecture)
+21. [Database Schema](#database-schema)
+22. [Troubleshooting](#troubleshooting)
+23. [User Roles](#user-roles)
+24. [Security Checklist](#security-checklist)
+25. [Changelog](#changelog)
 
 ---
 
@@ -537,6 +538,40 @@ master secret) and sees every company; don't hand its keys to clients.
 
 ---
 
+## Lead Hunter Integration (M16)
+
+Controva finds and emails B2B prospects; [Lead Hunter](https://github.com/LeadHunterCRM) is the call
+center. A **Lead Hunter** CRM connection (Company page → CRM) joins them both ways:
+
+| Direction | What happens |
+|---|---|
+| **Controva → Lead Hunter** | When a prospect replies *interested* (and optionally when they book a meeting), Controva posts them to a Lead Hunter trigger (`POST …/hooks/t/<key>`, action `lead.enlist`) with the trigger's secret header. "Push Qualified" sends every qualified lead on demand. Each lead is sent once per reason (`Idempotency-Key`). |
+| **Lead Hunter → Controva** | Lead Hunter's webhooks post `disposition.set` and `compliance.blocked` to the connection's results URL (`/webhook/leadhunter/<token>`). Controva verifies `X-ACL-Signature` (HMAC-SHA256 of `<t>.<body>`, 5-minute window), skips redeliveries by `X-ACL-Event-Id`, and records meeting booked / no-show / won / lost or do-not-contact on the lead (Performance page and lead detail). Only that company's own leads are touched. |
+
+**Setup**
+1. In Lead Hunter (admin): make a B2B campaign; Settings → Triggers → new trigger, action
+   `lead.enlist`, that campaign, secret kind **header**. Map `phone` → `phone`, `source_ref` → `source_ref`
+   (set a lead source, e.g. `controva`), `first_name`, `last_name`, `state`, and any attributes from the
+   payload below. Copy the trigger URL and secret (shown once).
+2. In Controva: Company → CRM → Add CRM Connection → **Lead Hunter**; paste URL and secret; choose when to send.
+   Save — the connection shows its **results webhook URL**.
+3. In Lead Hunter: Settings → Webhooks → new endpoint with that URL, events `disposition.set` and
+   `compliance.blocked`; paste its signing secret into the Controva connection.
+4. Check the disposition mapping (defaults match Lead Hunter's catalog: `appointment_set`/`crschd` → meeting,
+   `crnshw` → no-show, `signed`/`signed_pending` → won, `nq_*` → lost, `dnc`/`nr_optout` → do not contact).
+
+**Payload fields** (flat — Lead Hunter keeps only scalars): `source_ref` (the Controva lead id), `reason`,
+`phone` (E.164), `first_name`, `last_name`, `full_name`, `job_title`, `email`, `company`, `industry`, `city`,
+`state`, `country`, `address`, `score`, `qualified`, `interest_at`, `interest_source`, `reply_summary`,
+`meeting_booked`, `offer`, `needs_summary`, `recommended_angle`, `pain_1`–`pain_3`.
+
+**Consent stays in Lead Hunter.** Its dialer never auto-dials a lead without consent. Controva sends
+`interest_at` (when the prospect replied interested or booked); whether that is mapped to `consent_at` —
+or the trigger runs with `require_consent=false`, so leads are visible but never auto-dialed — is decided in
+the Lead Hunter trigger, with legal advice for your calling rules (TCPA in the US).
+
+---
+
 ## Deployment & CI/CD
 
 ### Auto-deploy (GitHub Actions)
@@ -793,6 +828,12 @@ Before going to production:
 ---
 
 ## Changelog
+
+### v9.1 — October 2026 (M16: Lead Hunter)
+
+- **Lead Hunter connection**: interested prospects go to the Lead Hunter call center automatically; its call results (meeting, no-show, won, lost, do-not-contact) come back signed and update the lead and the Performance page.
+- **"Push Qualified" pushes qualified leads only** — it used to send every scored lead.
+- **Docker-only local run** (`docker compose up -d --build`) with an optional demo company.
 
 ### v9.0 — October 2026 (M15: multiple client companies)
 

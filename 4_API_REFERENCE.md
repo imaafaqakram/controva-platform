@@ -719,6 +719,11 @@ A company's own settings (clients: always their own; admin: any company via `ten
 ```
 `daily_send_limit` is admin-only. GET returns `readiness` (`can_send`, `reason`, `from`), the company's sending domains, and `calendly_webhook_url` (`/webhook/calendly/<token>`, public, marks only that company's leads as booked). `test-email` `{"to_email": …}` sends as the company.
 
+### POST /webhook/leadhunter/{token}  (public — Lead Hunter's webhooks)
+Lead Hunter events for one `leadhunter` CRM connection. Requires `X-ACL-Signature: t=<unix>,v1=<hex HMAC-SHA256(secret, "<t>.<body>")>` within 5 minutes; dedupes on `X-ACL-Event-Id`; `X-ACL-Test: true` answers 200 without applying. `disposition.set` is mapped through the connection's `disposition_map` (meeting / no_show / won / lost / dnc); `compliance.blocked` with reason `dnc` or `litigator` suppresses the lead's emails. The lead is found by `context.lead.source_ref` and must belong to the connection's company. Returns `{"ok": true, "applied": "meeting_booked" | "no_show" | "won" | "lost" | "do_not_contact" | "recorded" | "ignored" | "unknown_lead" | "duplicate"}`; 401 bad signature, 404 unknown token.
+
+A `leadhunter` connection (`POST /crm/connections/save`, `type: "leadhunter"`) takes `config`: `trigger_url` (…/hooks/t/<key>), `trigger_secret`, `secret_header` (default `X-ACL-Trigger-Secret`), `auth` (`header` | `basic`), `push_on` (`["interested", "meeting"]`), `inbound_secret`, `disposition_map`.
+
 ### GET /companies (admin)
 Every company with its users, lead/ICP counts and send readiness. `POST /users/create` accepts `tenant_id` (join an existing company) or `company_name` (new company).
 

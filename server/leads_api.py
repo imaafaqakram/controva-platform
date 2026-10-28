@@ -6460,7 +6460,7 @@ def webhook_push(detail, config, client_owned=False):
     except Exception as e:
         return False, None, {'error': str(e)}
 
-def crm_push_lead(lead_id, connection_id):
+def crm_push_lead(lead_id, connection_id, reason='manual'):
     detail = get_lead_detail(lead_id)
     if not detail:
         return False, None, {'error': 'lead not found'}
@@ -6478,6 +6478,9 @@ def crm_push_lead(lead_id, connection_id):
     elif ctype == 'webhook':
         ok, ext_id, resp = webhook_push(detail, config,
                                         client_owned=bool(conn_tenant) and not tenant_is_operator(str(conn_tenant)))
+    elif ctype == 'leadhunter':
+        ok, ext_id, resp = leadhunter_push(detail, config, reason=reason,
+                                           client_owned=bool(conn_tenant) and not tenant_is_operator(str(conn_tenant)))
     else:
         ok, ext_id, resp = False, None, {'error': f'unsupported CRM type: {ctype}'}
 
@@ -6645,6 +6648,8 @@ def handle_calendly_webhook(raw_body, tenant_id=None):
         for (lead_id,) in rows:
             cur.execute("UPDATE leads SET meeting_booked=TRUE, meeting_booked_at=NOW() WHERE id=%s", (lead_id,))
         conn.commit(); cur.close(); conn.close()
+        for (lead_id,) in rows:
+            leadhunter_auto_push(str(lead_id), 'meeting')
         return {'ok': True, 'matched': len(rows)}
     except Exception as e:
         return {'ok': False, 'error': str(e)}
@@ -7549,6 +7554,8 @@ def _check_reply_mailbox(job_id, box_tenant, host, user, password):
                     try: add_suppression(sender, 'unsubscribe', row[1], 'reply asked to stop')
                     except Exception as e: print(f'[replies] suppression failed: {e}')
                 conn.commit(); matched += 1
+                if reply_class == 'interested':
+                    leadhunter_auto_push(str(row[1]), 'interested')   # hand to the call center
                 JOBS[job_id]['log'].append(f'Reply matched: {sender} [{reply_class}]')
             cur.close(); conn.close()
         except Exception as e:
@@ -9112,6 +9119,313 @@ def run_company_digest(tenant_id, recipient):
     return send_email_via_resend(recipient, f'{brand} daily prospecting digest', '\n'.join(lines),
                                  skip_footer=True)
 
+# ──────────────────────────────────────────────────────────────
+#  M16: LEAD HUNTER — hand interested prospects to the call center,
+#  take its call results back.
+#
+#  Out: a "leadhunter" CRM connection posts a lead to a Lead Hunter
+#  trigger (POST <base>/hooks/t/<key>, action lead.enlist) with the
+#  trigger's static secret header. Lead Hunter maps fields by dotted path
+#  and keeps only scalars, so the payload is flat.
+#  Back: Lead Hunter's webhooks service posts events here, signed
+#  X-ACL-Signature: t=<unix>,v1=hex HMAC-SHA256(secret, "<t>.<body>").
+# ──────────────────────────────────────────────────────────────
+LEADHUNTER_DEFAULT_MAP = {
+    # Lead Hunter disposition slugs (its default catalog) → what Controva records
+    'meeting': ['appointment_set', 'crschd'],
+    'no_show': ['crnshw'],
+    'won': ['signed', 'signed_pending'],
+    'lost': ['nq_sol', 'nq_at_fault', 'nq_other'],
+    'dnc': ['dnc', 'nr_optout'],
+}
+LEADHUNTER_PUSH_REASONS = ('interested', 'meeting')
+LEADHUNTER_SECRET_KEYS = ('trigger_secret', 'inbound_secret')
+
+def ensure_leadhunter_tables():
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS leadhunter_events (
+            id             SERIAL PRIMARY KEY,
+            connection_id  INT REFERENCES crm_connections(id) ON DELETE CASCADE,
+            event_id       VARCHAR(80) NOT NULL UNIQUE,
+            event_type     VARCHAR(60),
+            disposition    VARCHAR(80),
+            lead_id        UUID REFERENCES leads(id) ON DELETE SET NULL,
+            applied        VARCHAR(40),
+            received_at    TIMESTAMPTZ DEFAULT NOW()
+        )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_leadhunter_events_lead ON leadhunter_events(lead_id, received_at DESC)")
+    conn.commit(); cur.close(); conn.close()
+
+def normalize_e164(phone, country=''):
+    """Lead Hunter takes E.164 only. US/Canada 10- or 11-digit numbers get +1;
+    anything already starting with + is kept. None when it can't tell."""
+    raw = (phone or '').strip()
+    digits = re.sub(r'\D', '', raw)
+    if raw.startswith('+') and 8 <= len(digits) <= 15:
+        return '+' + digits
+    if (country or 'US').upper() in ('US', 'USA', 'CA', 'CAN', ''):
+        if len(digits) == 10:
+            return '+1' + digits
+        if len(digits) == 11 and digits.startswith('1'):
+            return '+' + digits
+    return None
+
+def _us_state_from_address(address):
+    m = re.search(r',\s*([A-Z]{2})\s+\d{5}(?:-\d{4})?\b', address or '')
+    return m.group(1) if m else ''
+
+def leadhunter_payload(detail, reason):
+    """Flat JSON for a Lead Hunter trigger mapping (Lead Hunter drops arrays,
+    so pain points come as pain_1..pain_3). interest_at is when the prospect
+    replied interested or booked; whether that counts as consent is decided
+    in Lead Hunter's trigger (map consent_at to it, or not)."""
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("""SELECT c.phone, c.full_name, c.first_name, c.last_name FROM contacts c
+                   WHERE c.lead_id = %s ORDER BY (COALESCE(c.email,'') <> '') DESC, c.confidence DESC NULLS LAST
+                   LIMIT 1""", (detail['id'],))
+    contact = cur.fetchone() or (None, None, None, None)
+    cur.execute("""SELECT MAX(replied_at) FILTER (WHERE reply_classification = 'interested'),
+                          MAX(reply_digest) FILTER (WHERE reply_classification = 'interested')
+                   FROM outreach_log WHERE lead_id = %s""", (detail['id'],))
+    replied_at, reply_digest = cur.fetchone() or (None, None)
+    cur.execute("SELECT meeting_booked_at FROM leads WHERE id = %s", (detail['id'],))
+    booked_at = (cur.fetchone() or (None,))[0]
+    cur.close(); conn.close()
+    c_phone, c_full, c_first, c_last = contact
+    full = (c_full or detail.get('owner_name') or '').strip()
+    first = c_first or (full.split(' ', 1)[0] if full else '')
+    last = c_last or (full.split(' ', 1)[1] if ' ' in full else '')
+    interest = replied_at or booked_at
+    from datetime import timezone
+    research = detail.get('research') or {}
+    pains = research.get('pain_points') or []
+    campaign = detail.get('campaign') or {}
+    qual = detail.get('qualification') or {}
+    out = {
+        'source_ref': detail['id'],
+        'reason': reason,
+        'phone': normalize_e164(c_phone, detail.get('country')) or normalize_e164(detail.get('phone'), detail.get('country')),
+        'first_name': first, 'last_name': last, 'full_name': full,
+        'job_title': detail.get('job_title') or '', 'email': detail.get('owner_email') or '',
+        'company': detail.get('business_name') or '', 'industry': detail.get('niche') or '',
+        'city': detail.get('city') or '', 'country': detail.get('country') or '',
+        'state': _us_state_from_address(detail.get('address')) if (detail.get('country') or 'US').upper() in ('US', 'USA') else '',
+        'address': detail.get('address') or '',
+        'score': detail.get('icp_score') if detail.get('icp_score') is not None else
+                 ((detail.get('ai_score') or 0) * 10 or None),
+        'qualified': bool(qual.get('qualified')),
+        'interest_at': interest.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ') if interest else None,
+        'interest_source': 'email_reply' if replied_at else ('meeting_booked' if booked_at else None),
+        'reply_summary': reply_digest or '',
+        'meeting_booked': bool(detail.get('meeting_booked')),
+        'offer': campaign.get('offer') or '',
+        'needs_summary': research.get('needs_summary') or '',
+        'recommended_angle': research.get('recommended_angle') or '',
+    }
+    for i in range(3):
+        out[f'pain_{i + 1}'] = (pains[i].get('pain') or '') if i < len(pains) else ''
+    return out
+
+def leadhunter_push(detail, config, client_owned=False, reason='manual'):
+    url = (config.get('trigger_url') or '').strip()
+    secret = config.get('trigger_secret') or ''
+    if not url or not secret:
+        return False, None, {'error': 'Lead Hunter trigger URL and secret are required'}
+    if client_owned:
+        bad = public_https_url_error(url)
+        if bad:
+            return False, None, {'error': f'Lead Hunter URL blocked: {bad}'}
+    payload = leadhunter_payload(detail, reason)
+    if not payload['phone']:
+        return False, None, {'error': 'no phone number Lead Hunter can call (needs a US number or +country format)'}
+    body = json.dumps(payload).encode()
+    headers = {'Content-Type': 'application/json',
+               # Lead Hunter dedupes on this first: the same lead for the same reason is one lead.
+               'Idempotency-Key': f"controva-{detail['id']}-{reason}"}
+    if config.get('auth') == 'basic':
+        import base64
+        headers['Authorization'] = 'Basic ' + base64.b64encode(f":{secret}".encode()).decode()
+    else:
+        headers[(config.get('secret_header') or 'X-ACL-Trigger-Secret').strip()] = secret
+    try:
+        req = urllib.request.Request(url, data=body, method='POST', headers=headers)
+        resp = urllib.request.urlopen(req, timeout=15)
+        return True, None, {'status_code': resp.status, 'reason': reason}
+    except urllib.error.HTTPError as e:
+        hint = {401: ' (wrong trigger secret)', 404: ' (unknown or disabled trigger)',
+                413: ' (payload too large)'}.get(e.code, '')
+        return False, None, {'error': f'{e.code} {e.reason}{hint}'}
+    except Exception as e:
+        return False, None, {'error': str(e)}
+
+def leadhunter_auto_push(lead_id, reason):
+    """Hand a lead to every active Lead Hunter connection of its company that
+    is set to push on this reason (default: interested replies). Runs in the
+    background and never raises into the caller."""
+    def run():
+        try:
+            tenant = lead_tenant(lead_id)
+            op = tenant_is_operator(tenant)
+            conn = db_conn(); cur = conn.cursor()
+            cur.execute("""SELECT id, config, tenant_id FROM crm_connections c
+                           WHERE type = 'leadhunter' AND is_active = TRUE
+                             AND (c.tenant_id = %s OR (%s AND c.tenant_id IS NULL))""", (tenant or NO_TENANT, op))
+            rows = cur.fetchall(); cur.close(); conn.close()
+            for cid, config, ct in rows:
+                push_on = (config or {}).get('push_on', ['interested'])
+                if reason in push_on and crm_connection_allowed(ct, tenant):
+                    ok, _, resp = crm_push_lead(lead_id, cid, reason)
+                    print(f'[leadhunter] {reason} lead {lead_id} -> connection {cid}: {"ok" if ok else resp}')
+        except Exception as e:
+            print(f'[leadhunter] auto-push failed for {lead_id}: {e}')
+    threading.Thread(target=run, daemon=True).start()
+
+def leadhunter_signature_ok(secret, header, body, tolerance=300):
+    """Lead Hunter's X-ACL-Signature (its services/webhooks/src/signing.py):
+    t=<unix>,v1=<hex HMAC-SHA256(secret, '<t>.<body>')>, any v1 may match
+    (secret rotation), and t within five minutes."""
+    if not secret or not header:
+        return False
+    ts, candidates = None, []
+    for part in header.split(','):
+        k, _, v = part.strip().partition('=')
+        if k == 't' and v.isdigit():
+            ts = int(v)
+        elif k == 'v1' and v:
+            candidates.append(v)
+    if ts is None or not candidates or abs(int(time.time()) - ts) > tolerance:
+        return False
+    expected = hmac.new(secret.encode(), str(ts).encode() + b'.' + body, hashlib.sha256).hexdigest()
+    return any(hmac.compare_digest(expected, c) for c in candidates)
+
+def leadhunter_config_problem(config, client=False):
+    """Why a Lead Hunter connection's settings can't work (None when fine)."""
+    url = (config.get('trigger_url') or '').strip()
+    if not re.match(r'^https?://\S+/hooks/t/\S+$', url):
+        return 'trigger_url must be the Lead Hunter trigger URL, ending /hooks/t/<key>'
+    if client:
+        bad = public_https_url_error(url)
+        if bad:
+            return bad
+    if not config.get('trigger_secret'):
+        return 'trigger_secret is required (shown once when the trigger was created in Lead Hunter)'
+    if config.get('auth', 'header') not in ('header', 'basic'):
+        return 'auth must be header or basic'
+    header = (config.get('secret_header') or 'X-ACL-Trigger-Secret').strip()
+    if not re.fullmatch(r'[A-Za-z0-9-]{1,64}', header):
+        return 'secret_header must be a plain HTTP header name'
+    push_on = config.get('push_on', ['interested'])
+    if not isinstance(push_on, list) or any(r not in LEADHUNTER_PUSH_REASONS for r in push_on):
+        return 'push_on may contain only: ' + ', '.join(LEADHUNTER_PUSH_REASONS)
+    dmap = config.get('disposition_map')
+    if dmap is not None and (not isinstance(dmap, dict) or set(dmap) - set(LEADHUNTER_DEFAULT_MAP)
+                             or not all(isinstance(v, list) for v in dmap.values())):
+        return 'disposition_map must map meeting/no_show/won/lost/dnc to lists of disposition slugs'
+    return None
+
+def leadhunter_connection_for_token(token):
+    if not token:
+        return None
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("""SELECT id, config, tenant_id FROM crm_connections
+                   WHERE type = 'leadhunter' AND is_active = TRUE AND config->>'inbound_token' = %s""", (token,))
+    row = cur.fetchone(); cur.close(); conn.close()
+    return row
+
+def handle_leadhunter_webhook(token, headers, raw_body):
+    """One Lead Hunter event → (http status, response dict). Unknown leads and
+    event types answer 200 so Lead Hunter doesn't retry them for 15 hours."""
+    row = leadhunter_connection_for_token(token)
+    if not row:
+        return 404, {'error': 'unknown webhook'}
+    cid, config, conn_tenant = row
+    config = config or {}
+    if not config.get('inbound_secret'):
+        return 400, {'error': 'set the Lead Hunter signing secret on this connection first'}
+    if not leadhunter_signature_ok(config['inbound_secret'], headers.get('X-ACL-Signature'), raw_body):
+        return 401, {'error': 'bad signature'}
+    if (headers.get('X-ACL-Test') or '').lower() == 'true':
+        return 200, {'ok': True, 'test': True}
+    try:
+        event = json.loads(raw_body.decode())
+    except Exception:
+        return 400, {'error': 'body is not JSON'}
+    event_id = str(headers.get('X-ACL-Event-Id') or event.get('event_id') or '')[:80]
+    etype = headers.get('X-ACL-Event-Type') or event.get('type') or ''
+    payload = event.get('payload') or {}
+    disposition = payload.get('disposition') if etype == 'disposition.set' else None
+    if not event_id:
+        return 400, {'error': 'no event id'}
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("SELECT 1 FROM leadhunter_events WHERE event_id = %s", (event_id,))
+    seen = cur.fetchone() is not None
+    cur.close(); conn.close()
+    if seen:   # a redelivery: Lead Hunter retries until it gets a 2xx
+        return 200, {'ok': True, 'applied': 'duplicate'}
+
+    # Our own id rides as the Lead Hunter lead's source_ref (set when we pushed it).
+    ref = str(((event.get('context') or {}).get('lead') or {}).get('source_ref') or '')
+    lead_id = None
+    if re.fullmatch(r'[0-9a-fA-F-]{36}', ref):
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("SELECT id, tenant_id FROM leads WHERE id = %s", (ref,))
+        lr = cur.fetchone(); cur.close(); conn.close()
+        if lr and crm_connection_allowed(conn_tenant, str(lr[1]) if lr[1] else None):
+            lead_id = str(lr[0])
+
+    applied = 'ignored'
+    if lead_id is None:
+        applied = 'unknown_lead'
+    elif etype == 'disposition.set' and disposition:
+        mapping = {k: [s.strip() for s in v] for k, v in (config.get('disposition_map') or LEADHUNTER_DEFAULT_MAP).items()}
+        group = next((g for g, slugs in mapping.items() if disposition in slugs), None)
+        if group == 'meeting':
+            update_lead_outcome(lead_id, {'meeting_booked': True}); applied = 'meeting_booked'
+        elif group == 'no_show':
+            update_lead_outcome(lead_id, {'meeting_booked': True, 'meeting_attended': False}); applied = 'no_show'
+        elif group == 'won':
+            update_lead_outcome(lead_id, {'deal_stage': 'won'}); applied = 'won'
+        elif group == 'lost':
+            update_lead_outcome(lead_id, {'deal_stage': 'lost'}); applied = 'lost'
+        elif group == 'dnc':
+            applied = _leadhunter_suppress(lead_id, f'Lead Hunter disposition {disposition}')
+        else:
+            applied = 'recorded'
+    elif etype == 'compliance.blocked' and payload.get('reason') in ('dnc', 'litigator'):
+        # quiet_hours / no_consent blocks are about calling, not about email.
+        applied = _leadhunter_suppress(lead_id, f"Lead Hunter {payload.get('reason')}")
+
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("""INSERT INTO leadhunter_events (connection_id, event_id, event_type, disposition, lead_id, applied)
+                   VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (event_id) DO NOTHING RETURNING id""",
+                (cid, event_id, etype[:60], (disposition or '')[:80] or None, lead_id, applied))
+    fresh = cur.fetchone() is not None
+    conn.commit(); cur.close(); conn.close()
+    return 200, {'ok': True, 'applied': applied if fresh else 'duplicate'}
+
+def _leadhunter_suppress(lead_id, reason):
+    """The person asked not to be contacted: no more email from any company."""
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("SELECT DISTINCT LOWER(email) FROM contacts WHERE lead_id = %s AND COALESCE(email,'') <> ''", (lead_id,))
+    emails = [r[0] for r in cur.fetchall()]
+    cur.execute("UPDATE leads SET status='unsubscribed' WHERE id=%s AND status NOT IN ('closed')", (lead_id,))
+    conn.commit(); cur.close(); conn.close()
+    for e in emails:
+        add_suppression(e, 'unsubscribe', lead_id, reason)
+    stop_enrollment(lead_id, 'unsubscribed', reason)
+    return 'do_not_contact'
+
+def leadhunter_last_event(lead_id):
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("""SELECT event_type, disposition, applied, to_char(received_at, 'YYYY-MM-DD HH24:MI')
+                       FROM leadhunter_events WHERE lead_id = %s ORDER BY received_at DESC LIMIT 1""", (lead_id,))
+        r = cur.fetchone(); cur.close(); conn.close()
+        return dict(zip(['event_type', 'disposition', 'applied', 'at'], r)) if r else None
+    except Exception:
+        return None
+
 def ensure_data_erasure_table():
     conn = db_conn(); cur = conn.cursor()
     cur.execute("""
@@ -9246,6 +9560,7 @@ def get_lead_detail(lead_id, tenant_id=None):
         "meeting_booked_at": r[37],
         "campaign": get_lead_campaign(lead_id),
         "qualification": lead_qualification(lead_id),
+        "leadhunter": leadhunter_last_event(lead_id),
     }
 
 def regenerate_email_for_lead(lead_id, extra_instructions=""):
@@ -9780,9 +10095,12 @@ class Handler(BaseHTTPRequestHandler):
                 for cid, ctype, name, config, active, created, ok_n, fail_n, c_tenant, c_company in rows:
                     config = dict(config or {})
                     # Mask secrets — never echo tokens/webhook secrets back to the client
-                    for k in ('api_token', 'webhook_secret'):
+                    for k in ('api_token', 'webhook_secret') + LEADHUNTER_SECRET_KEYS:
                         if config.get(k):
                             config[k] = '••••' + config[k][-4:] if len(config[k]) > 4 else '••••'
+                    if ctype == 'leadhunter' and config.get('inbound_token'):
+                        base = PUBLIC_BASE_URL.rstrip('/') if PUBLIC_BASE_URL else ''
+                        config['inbound_url'] = f"{base}/webhook/leadhunter/{config['inbound_token']}"
                     conns.append({'id': cid, 'type': ctype, 'name': name, 'config': config,
                                   'is_active': active, 'created_at': created.isoformat() if created else None,
                                   'pushed_ok': ok_n, 'pushed_failed': fail_n,
@@ -10197,6 +10515,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(500, {'error': str(e)})
             return
 
+        if p.startswith('/webhook/leadhunter/'):
+            try:
+                status, result = handle_leadhunter_webhook(p.rsplit('/', 1)[1], self.headers, raw_body)
+                self.send_json(status, result)
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+            return
+
         if p == '/webhook/calendly' or p.startswith('/webhook/calendly/'):
             try:
                 tenant_id = None
@@ -10546,8 +10872,8 @@ class Handler(BaseHTTPRequestHandler):
                 if cid and not self.crm_connection_in_scope(cid):
                     self.send_json(404, {'error': 'Connection not found'}); return
                 ctype = body.get('type', '')
-                if ctype not in ('pipedrive', 'webhook'):
-                    self.send_json(400, {'error': 'type must be pipedrive or webhook'}); return
+                if ctype not in ('pipedrive', 'webhook', 'leadhunter'):
+                    self.send_json(400, {'error': 'type must be pipedrive, webhook or leadhunter'}); return
                 name = body.get('name', '') or ctype
                 config = dict(body.get('config') or {})
                 is_active = bool(body.get('is_active', True))
@@ -10561,14 +10887,29 @@ class Handler(BaseHTTPRequestHandler):
                     cur.execute("SELECT config FROM crm_connections WHERE id=%s", (cid,))
                     existing_row = cur.fetchone()
                     existing_config = (existing_row[0] if existing_row else {}) or {}
-                    for k in ('api_token', 'webhook_secret'):
+                    for k in ('api_token', 'webhook_secret') + LEADHUNTER_SECRET_KEYS:
                         if isinstance(config.get(k), str) and config[k].startswith('••••'):
                             config[k] = existing_config.get(k, '')
+                    if ctype == 'leadhunter':
+                        config['inbound_token'] = existing_config.get('inbound_token') or _h_secrets.token_urlsafe(18)
+                    if ctype == 'leadhunter':
+                        config.pop('inbound_url', None)
+                        err = leadhunter_config_problem(config, client=self.scope_tenant() is not None)
+                        if err:
+                            cur.close(); conn.close()
+                            self.send_json(400, {'error': err}); return
                     cur.execute("UPDATE crm_connections SET type=%s, name=%s, config=%s, is_active=%s WHERE id=%s",
                                 (ctype, name, json.dumps(config), is_active, cid))
                 else:
                     # A company's own connection (admin may add one for a company)
                     owner = self.target_company(body.get('tenant_id'))
+                    if ctype == 'leadhunter':
+                        config.pop('inbound_url', None)
+                        err = leadhunter_config_problem(config, client=self.scope_tenant() is not None)
+                        if err:
+                            cur.close(); conn.close()
+                            self.send_json(400, {'error': err}); return
+                        config['inbound_token'] = _h_secrets.token_urlsafe(18)
                     cur.execute("""INSERT INTO crm_connections (type, name, config, is_active, tenant_id)
                                    VALUES (%s,%s,%s,%s,%s) RETURNING id""",
                                 (ctype, name, json.dumps(config), is_active, owner))
@@ -10689,8 +11030,12 @@ class Handler(BaseHTTPRequestHandler):
                         sc, sp = " AND l.tenant_id = %s", (ct,)
                     else:
                         sc, sp = " AND " + OPERATOR_LEADS_SQL, ()
-                    cur.execute(f"""SELECT id FROM leads l WHERE COALESCE(icp_score, ai_score*10, 0) >= %s{sc}
-                                   ORDER BY COALESCE(icp_score, ai_score*10, 0) DESC LIMIT 500""", (min_score, *sp))
+                    # "Push Qualified": leads that meet their ICP's qualification
+                    # (score threshold + requirements), not every scored lead.
+                    cur.execute(f"""SELECT l.id FROM leads l LEFT JOIN icp_profiles p ON p.id = l.icp_id
+                                   WHERE l.lead_type IS NULL AND {qualified_sql()}
+                                     AND COALESCE(l.icp_score, l.ai_score*10, 0) >= %s{sc}
+                                   ORDER BY COALESCE(l.icp_score, l.ai_score*10, 0) DESC LIMIT 500""", (min_score, *sp))
                     lead_ids = [str(r[0]) for r in cur.fetchall()]
                     cur.close(); conn.close()
                 if not lead_ids:
@@ -11339,7 +11684,10 @@ class Handler(BaseHTTPRequestHandler):
                 lead_id = p.split('/')[2]
                 if not lead_in_scope(lead_id, self.scope_tenant()):
                     self.send_json(404, {'error': 'Lead not found'}); return
+                was_booked = (get_lead_detail(lead_id) or {}).get('meeting_booked')
                 result = update_lead_outcome(lead_id, body)
+                if result.get('success') and body.get('meeting_booked') is True and not was_booked:
+                    leadhunter_auto_push(lead_id, 'meeting')
                 self.send_json(200 if result.get('success') else 400, result)
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
@@ -11476,6 +11824,7 @@ def migrate_all():
         ensure_m14_tables()
         ensure_m15_tables()
         ensure_data_erasure_table()
+        ensure_leadhunter_tables()
         print('Schema migration: OK')
     except Exception as e:
         print(f'Schema migration warning (non-fatal): {e}')
