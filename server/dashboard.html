@@ -476,6 +476,7 @@ const Badge = ({ children, variant = 'default', ...rest }) => {
     danger: 'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400',
     info: 'bg-accent-100 dark:bg-accent-900/30 text-accent-700 dark:text-accent-400',
     purple: 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400',
+    grey: 'bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400',
   };
   return <span {...rest} className={'inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium ' + v[variant]}>{children}</span>;
 };
@@ -3629,6 +3630,8 @@ const ApiKeyEditor = () => {
     n8n_webhook_url:      'N8N Webhook URL (fires after every search — Sheets/Drive logging)',
     n8n_url:              'N8N Instance URL (e.g. https://n8n.yourdomain.com)',
     n8n_api_key:          'N8N API Key (n8n Settings → API → create a key)',
+    stripe_secret_key:    'Stripe Secret Key (sk_live_… or sk_test_… — billing)',
+    stripe_webhook_secret:'Stripe Webhook Signing Secret (whsec_… — Developers → Webhooks)',
   };
 
   return (
@@ -6652,6 +6655,190 @@ const CompanyPage = () => {
 };
 
 // ─────────────────────────────────────────────────
+//  Billing (M17) — plans and Stripe subscriptions per client company.
+//  Clients subscribe / manage their card; admin also defines plans (synced
+//  to Stripe), turns enforcement on, and can comp or override a company.
+// ─────────────────────────────────────────────────
+const fmtMoney = (cents, cur) => (cur || 'usd').toUpperCase() === 'USD'
+  ? '$' + (cents / 100).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 })
+  : (cents / 100).toFixed(2) + ' ' + (cur || '').toUpperCase();
+const BILLING_BADGE = { active: 'success', trialing: 'success', comped: 'info', past_due: 'warning', canceled: 'danger', unpaid: 'danger', none: 'grey' };
+const PLAN_BLANK = { name: '', description: '', price: '', currency: 'usd', monthly_spend_limit: '', max_users: '', sort_order: 0, is_active: true, create_in_stripe: true, stripe_price_id: '' };
+
+const BillingPage = ({ role }) => {
+  const isAdmin = role === 'admin';
+  const [tenantId, setTenantId] = useState('');
+  const [companies, setCompanies] = useState([]);
+  const [data, setData] = useState(null);
+  const [editing, setEditing] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const { showToast } = useToast();
+
+  const load = () => api.get('/billing' + (tenantId ? '?tenant_id=' + tenantId : '')).then(d => {
+    setData(d); if (!tenantId && isAdmin) setTenantId(d.tenant_id);
+  }).catch(e => showToast('Failed to load: ' + e.message, 'error'));
+  useEffect(load, [tenantId]);
+  useEffect(() => { if (isAdmin) api.get('/companies').then(d => setCompanies(d.companies || [])).catch(() => {}); }, []);
+
+  const go = async (path, body) => {
+    setBusy(true);
+    try {
+      const r = await api.post(path, { ...body, tenant_id: tenantId || undefined });
+      if (r.url) window.location.href = r.url; else showToast(r.error || 'Failed', 'error');
+    } catch (e) { showToast(e.message, 'error'); }
+    setBusy(false);
+  };
+  const savePlan = async () => {
+    try {
+      const r = await api.post('/billing/plans/save', editing);
+      if (r.success) { showToast('Plan saved'); setEditing(null); load(); } else showToast(r.error || 'Failed', 'error');
+    } catch (e) { showToast(e.message, 'error'); }
+  };
+  const setRequired = async (v) => {
+    try { await api.post('/config', { billing_required: v }); showToast(v ? 'Subscriptions now required for client companies' : 'Subscriptions no longer required'); load(); }
+    catch (e) { showToast(e.message, 'error'); }
+  };
+  const override = async (status, plan_id) => {
+    try {
+      const r = await api.post('/billing/company', { tenant_id: tenantId, status, plan_id });
+      if (r.success) { showToast('Company billing updated'); load(); } else showToast(r.error || 'Failed', 'error');
+    } catch (e) { showToast(e.message, 'error'); }
+  };
+
+  if (!data) return <div className="py-16 text-center"><Spinner size="w-6 h-6" /></div>;
+  const b = data.billing || {};
+  const current = (data.plans || []).find(p => p.id === b.plan_id);
+  const e = editing || {};
+  const setE = (k, v) => setEditing({ ...e, [k]: v });
+  const company = companies.find(c => c.id === tenantId);
+
+  return (
+    <div className="space-y-6 fade-in">
+      <div className="flex items-start justify-between flex-wrap gap-3">
+        <div>
+          <h1 className="text-2xl font-bold">Billing</h1>
+          <p className="text-sm text-slate-500 mt-1">{isAdmin ? 'Plans, subscriptions and who is paying' : 'Your plan, invoices and payment method'}</p>
+        </div>
+        {isAdmin && companies.length > 0 && (
+          <div><label className="text-xs font-medium text-slate-500 block mb-1">Company</label>
+            <select value={tenantId} onChange={ev => setTenantId(ev.target.value)}
+              className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm max-w-[18rem]">
+              {companies.map(c => <option key={c.id} value={c.id}>{c.name}{c.is_operator ? ' (you)' : ''}</option>)}
+            </select></div>
+        )}
+      </div>
+
+      {b.block && (
+        <Card className="border-2 border-amber-300"><p className="text-sm text-amber-700 dark:text-amber-400">{b.block}</p></Card>
+      )}
+
+      {b.is_operator ? (
+        <Card><p className="text-sm text-slate-500">This is the platform's own workspace — it is never billed.</p></Card>
+      ) : (
+        <Card>
+          <div className="flex items-start justify-between flex-wrap gap-3">
+            <div>
+              <p className="text-xs text-slate-500 uppercase font-medium">Current plan</p>
+              <p className="text-xl font-bold mt-1">{b.plan_name || 'No plan'}{' '}
+                <Badge variant={BILLING_BADGE[b.status] || 'grey'}>{(b.status || 'none').replace('_', ' ')}</Badge></p>
+              {b.current_period_end && <p className="text-xs text-slate-500 mt-1">{b.cancel_at_period_end ? 'Ends' : 'Renews'} on {b.current_period_end}</p>}
+              <p className="text-xs text-slate-500 mt-1">API spend this month: ${Number(data.spend_this_month || 0).toFixed(2)}{data.spend_limit > 0 ? ' of $' + Number(data.spend_limit).toFixed(2) : ''}</p>
+            </div>
+            {b.has_customer && <Button variant="secondary" icon="ExternalLink" onClick={() => go('/billing/portal', {})} disabled={busy}>Manage billing</Button>}
+          </div>
+          {!b.stripe_configured && <p className="text-xs text-amber-600 mt-3">Online payments aren't set up yet{isAdmin ? ' — add the Stripe keys in Settings → API Keys.' : '.'}</p>}
+        </Card>
+      )}
+
+      {!b.is_operator && (data.plans || []).length > 0 && (
+        <div className="grid gap-4 md:grid-cols-3">
+          {data.plans.map(pl => (
+            <Card key={pl.id} className={pl.id === b.plan_id ? 'border-2 border-accent-500' : ''}>
+              <h3 className="font-semibold">{pl.name}</h3>
+              <p className="text-2xl font-bold mt-1">{fmtMoney(pl.price_cents, pl.currency)}<span className="text-sm font-normal text-slate-500">/month</span></p>
+              {pl.description && <p className="text-sm text-slate-500 mt-2">{pl.description}</p>}
+              <ul className="text-xs text-slate-600 dark:text-slate-400 mt-3 space-y-1">
+                <li>API budget: {pl.monthly_spend_limit != null ? '$' + pl.monthly_spend_limit + '/month' : 'standard'}</li>
+                <li>Users: {pl.max_users || 'unlimited'}</li>
+              </ul>
+              <Button className="mt-4 w-full justify-center" variant={pl.id === b.plan_id ? 'secondary' : 'primary'}
+                disabled={busy || pl.id === b.plan_id || !b.stripe_configured || !pl.stripe_price_id}
+                onClick={() => (b.has_customer && ['active', 'trialing', 'past_due'].includes(b.status)) ? go('/billing/portal', {}) : go('/billing/checkout', { plan_id: pl.id })}>
+                {pl.id === b.plan_id ? 'Current plan' : (b.has_customer && ['active', 'trialing', 'past_due'].includes(b.status)) ? 'Switch in billing portal' : 'Subscribe'}
+              </Button>
+            </Card>
+          ))}
+        </div>
+      )}
+
+      {isAdmin && (
+        <>
+          {!b.is_operator && company && (
+            <Card>
+              <h3 className="font-semibold text-sm mb-2">Override for {company.name}</h3>
+              <p className="text-xs text-slate-500 mb-3">For deals handled outside Stripe: comp a pilot, attach a plan, or reset.</p>
+              <div className="flex flex-wrap gap-2">
+                {(data.all_plans || []).map(pl => (
+                  <Button key={pl.id} size="sm" variant="secondary" onClick={() => override('comped', pl.id)}>Comp on {pl.name}</Button>
+                ))}
+                <Button size="sm" variant="ghost" onClick={() => override('none', null)}>Reset to no plan</Button>
+              </div>
+            </Card>
+          )}
+          <Card>
+            <div className="flex items-start justify-between flex-wrap gap-3">
+              <div>
+                <h3 className="font-semibold text-sm">Plans</h3>
+                <p className="text-xs text-slate-500 mt-1">Stripe webhook: <span className="font-mono">{data.webhook_url}</span> — events checkout.session.completed, customer.subscription.*, invoice.paid, invoice.payment_failed.</p>
+              </div>
+              <label className="flex items-center gap-2 text-sm">
+                <input type="checkbox" checked={!!data.billing_required} onChange={ev => setRequired(ev.target.checked)} />
+                Require a subscription for client companies
+              </label>
+            </div>
+            <div className="mt-3 space-y-1.5">
+              {(data.all_plans || []).map(pl => (
+                <div key={pl.id} className="flex flex-wrap items-center gap-3 bg-slate-50 dark:bg-slate-800 rounded-lg px-3 py-2 text-sm">
+                  <span className="font-medium min-w-[8rem]">{pl.name}</span>
+                  <span>{fmtMoney(pl.price_cents, pl.currency)}/mo</span>
+                  <span className="text-xs text-slate-500">budget {pl.monthly_spend_limit != null ? '$' + pl.monthly_spend_limit : 'default'} · {pl.max_users || '∞'} users</span>
+                  <Badge variant={pl.stripe_price_id ? 'success' : 'warning'}>{pl.stripe_price_id ? 'in Stripe' : 'not in Stripe'}</Badge>
+                  {!pl.is_active && <Badge variant="grey">hidden</Badge>}
+                  <Button size="sm" variant="ghost" className="ml-auto" icon="Edit3"
+                    onClick={() => setEditing({ ...pl, price: pl.price_cents / 100, monthly_spend_limit: pl.monthly_spend_limit ?? '', max_users: pl.max_users ?? '', create_in_stripe: !pl.stripe_price_id })}> </Button>
+                </div>
+              ))}
+            </div>
+            {!editing ? (
+              <Button size="sm" variant="secondary" icon="Plus" className="mt-3" onClick={() => setEditing({ ...PLAN_BLANK })}>Add plan</Button>
+            ) : (
+              <div className="mt-3 p-3 border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-lg space-y-2">
+                <div className="grid grid-cols-2 gap-2">
+                  <Input value={e.name} onChange={v => setE('name', v)} placeholder="Plan name, e.g. Growth" />
+                  <Input type="number" value={e.price} onChange={v => setE('price', v)} placeholder="Price per month, e.g. 499" />
+                  <Input type="number" value={e.monthly_spend_limit} onChange={v => setE('monthly_spend_limit', v)} placeholder="API budget $/month (blank = default)" />
+                  <Input type="number" value={e.max_users} onChange={v => setE('max_users', v)} placeholder="Users (blank = unlimited)" />
+                </div>
+                <Input value={e.description} onChange={v => setE('description', v)} placeholder="One line on what's included" />
+                <div className="flex flex-wrap gap-4 text-sm">
+                  <label className="flex items-center gap-2"><input type="checkbox" checked={!!e.create_in_stripe} onChange={ev => setE('create_in_stripe', ev.target.checked)} /> Create / update the price in Stripe</label>
+                  <label className="flex items-center gap-2"><input type="checkbox" checked={!!e.is_active} onChange={ev => setE('is_active', ev.target.checked)} /> Offered to clients</label>
+                </div>
+                {!e.create_in_stripe && <Input value={e.stripe_price_id || ''} onChange={v => setE('stripe_price_id', v)} placeholder="…or paste an existing Stripe price id (price_…)" />}
+                <div className="flex gap-2">
+                  <Button size="sm" onClick={savePlan}>{e.id ? 'Save' : 'Create'}</Button>
+                  <Button size="sm" variant="ghost" onClick={() => setEditing(null)}>Cancel</Button>
+                </div>
+              </div>
+            )}
+          </Card>
+        </>
+      )}
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────
 //  Auth: Login Screen
 // ─────────────────────────────────────────────────
 const LoginScreen = ({ onLogin }) => {
@@ -6726,6 +6913,7 @@ const App = ({ role = 'admin' }) => {
   };
   const [brand, setBrand] = useState({ name: 'Controva', color: '' });
   const [companyTheme, setCompanyTheme] = useState(null);
+  const [billingBlock, setBillingBlock] = useState(null);
   const [accent, setAccent] = useAccentTheme(companyTheme);
   const isAdmin = role === 'admin';
 
@@ -6735,7 +6923,14 @@ const App = ({ role = 'admin' }) => {
         setBrand({ name: c.client_brand_name || 'Controva', color: c.client_brand_color || '' });
       }
       if (c.client_theme) setCompanyTheme(c.client_theme);
+      setBillingBlock(c.billing_block || null);
     }).catch(() => {});
+    // Back from Stripe Checkout: land on Billing with a note.
+    const q = new URLSearchParams(window.location.search).get('billing');
+    if (q) {
+      setPage('billing');
+      window.history.replaceState(null, '', window.location.pathname);
+    }
   }, []);
 
   const nav = [
@@ -6752,6 +6947,7 @@ const App = ({ role = 'admin' }) => {
     { id: 'analytics', label: 'Analytics', icon: 'Activity' },
     { id: 'performance', label: 'Performance', icon: 'BarChart3' },
     { id: 'company',   label: 'Company',   icon: 'Building2' },
+    { id: 'billing',   label: 'Billing',   icon: 'DollarSign' },
     { section: 'Research Tools' },
     { id: 'seo',         label: 'SEO',         icon: 'TrendingUp' },
     { id: 'competitor',  label: 'Competitors', icon: 'Target' },
@@ -6779,6 +6975,7 @@ const App = ({ role = 'admin' }) => {
   else if (page === 'analytics') CurrentPage = AnalyticsPage;
   else if (page === 'performance') CurrentPage = PerformancePage;
   else if (page === 'company') CurrentPage = CompanyPage;
+  else if (page === 'billing') CurrentPage = BillingPage;
   else if (page === 'intent') CurrentPage = IntentPage;
   else if (page === 'activity' && isAdmin) CurrentPage = ActivityLogPage;
   else if (page === 'n8n' && isAdmin) CurrentPage = N8nWorkflowsPage;
@@ -6858,7 +7055,13 @@ const App = ({ role = 'admin' }) => {
           </div>
         </header>
         <div className="p-5 lg:p-8 w-full">
-          <CurrentPage setPage={setPage} />
+          {billingBlock && page !== 'billing' && (
+            <div className="mb-5 p-3 rounded-lg border-2 border-amber-300 bg-amber-50 dark:bg-amber-900/20 text-sm text-amber-800 dark:text-amber-300 flex items-center justify-between gap-3 flex-wrap">
+              <span>{billingBlock}</span>
+              <Button size="sm" variant="secondary" onClick={() => setPage('billing')}>Go to Billing</Button>
+            </div>
+          )}
+          <CurrentPage setPage={setPage} role={role} />
         </div>
       </main>
     </div>

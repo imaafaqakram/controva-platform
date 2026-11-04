@@ -74,6 +74,10 @@ FREELANCER_API_KEY   = os.environ.get('FREELANCER_API_KEY', '')
 # MillionVerifier: paid fallback (~$1/1000 checks) for emails our SMTP probe
 # can't resolve ('unknown'). millionverifier.com — optional.
 MILLIONVERIFIER_KEY = os.environ.get('MILLIONVERIFIER_KEY', '')
+# M17 billing: Stripe secret key (sk_live_/sk_test_) and webhook signing secret (whsec_).
+STRIPE_SECRET_KEY = os.environ.get('STRIPE_SECRET_KEY', '')
+STRIPE_WEBHOOK_SECRET = os.environ.get('STRIPE_WEBHOOK_SECRET', '')
+STRIPE_API_BASE = os.environ.get('STRIPE_API_BASE', 'https://api.stripe.com').rstrip('/')
 
 # ── M3: outreach compliance & tracking ───────────────────────────
 PUBLIC_BASE_URL     = os.environ.get('PUBLIC_BASE_URL', '')   # e.g. https://app.controvallc.com
@@ -109,6 +113,9 @@ CONFIG = {
     'client_monthly_spend_limit': 100,
     'client_paid_requests_per_minute': 20,
     'csv_enrich_max_rows': 500,
+    # M17: when on, a client company needs an active (or comped) subscription
+    # to start paid actions and send outreach.
+    'billing_required': False,
     # M6: autonomous ICP prospecting
     'icp_scheduler_enabled': True,
     'icp_daily_cap': 40,          # max discovery searches per ICP run
@@ -197,6 +204,8 @@ def load_config():
                 'n8n_webhook_url':     'N8N_WEBHOOK_URL',
                 'n8n_url':             'N8N_URL',
                 'n8n_api_key':         'N8N_API_KEY',
+                'stripe_secret_key':   'STRIPE_SECRET_KEY',
+                'stripe_webhook_secret': 'STRIPE_WEBHOOK_SECRET',
             }
             for key, var_name in keys_map.items():
                 if key in saved and saved[key]:
@@ -245,6 +254,8 @@ def save_config():
             'n8n_webhook_url':      N8N_WEBHOOK_URL,
             'n8n_url':              N8N_URL,
             'n8n_api_key':          N8N_API_KEY,
+            'stripe_secret_key':    STRIPE_SECRET_KEY,
+            'stripe_webhook_secret': STRIPE_WEBHOOK_SECRET,
             'config':          CONFIG,
         }
         with open(CONFIG_FILE, 'w') as f:
@@ -263,7 +274,8 @@ API_KEY_NAMES = ['google_api_key', 'serper_key', 'gemini_key', 'claude_key',
                  'millionverifier_key',
                  'public_base_url', 'company_name', 'company_address',
                  'resend_webhook_secret', 'imap_host', 'imap_user', 'imap_pass',
-                 'n8n_webhook_url', 'n8n_url', 'n8n_api_key']
+                 'n8n_webhook_url', 'n8n_url', 'n8n_api_key',
+                 'stripe_secret_key', 'stripe_webhook_secret']
 
 def update_api_key(name, value):
     """Update an API key and save."""
@@ -337,6 +349,8 @@ def get_api_keys_masked():
         'n8n_webhook_url':      {'set': bool(N8N_WEBHOOK_URL), 'preview': N8N_WEBHOOK_URL},
         'n8n_url':              {'set': bool(N8N_URL), 'preview': N8N_URL},
         'n8n_api_key':          mask(N8N_API_KEY),
+        'stripe_secret_key':    mask(STRIPE_SECRET_KEY),
+        'stripe_webhook_secret': mask(STRIPE_WEBHOOK_SECRET),
     }
 
 # Load saved config at startup
@@ -9048,6 +9062,9 @@ def resolve_sender(tenant_id, forced_domain_id=None):
         from_email = st.get('from_email') or (FROM_EMAIL if op else '')
         from_name = st.get('from_name') or (FROM_NAME if op else footer['company'])
     if not op:
+        blocked = billing_block(tenant_id)
+        if blocked:
+            return None, 'Blocked: ' + blocked
         # A client company must send as itself, with the postal address the
         # law requires in commercial email — never fall back to ours.
         missing = [label for label, ok in (('a from address', from_email),
@@ -9106,13 +9123,21 @@ def company_month_spend(tenant_id):
         return 0.0
 
 def company_spend_limit(tenant_id):
+    """Monthly API budget: the admin's per-company override, else its plan's,
+    else the platform default."""
     own = get_tenant_settings(tenant_id).get('monthly_spend_limit')
+    plan = get_billing(tenant_id).get('plan_spend_limit') if tenant_id else None
     try:
-        return float(own) if own not in (None, '') else float(CONFIG.get('client_monthly_spend_limit', 100))
+        if own not in (None, ''):
+            return float(own)
+        return float(plan) if plan is not None else float(CONFIG.get('client_monthly_spend_limit', 100))
     except (TypeError, ValueError):
         return float(CONFIG.get('client_monthly_spend_limit', 100))
 
 def company_spend_block(tenant_id):
+    blocked = billing_block(tenant_id)
+    if blocked:
+        return blocked
     limit = company_spend_limit(tenant_id)
     if limit <= 0:
         return None          # 0 = no cap for this company
@@ -9564,6 +9589,335 @@ def leadhunter_last_event(lead_id):
         return dict(zip(['event_type', 'disposition', 'applied', 'at'], r)) if r else None
     except Exception:
         return None
+
+# ──────────────────────────────────────────────────────────────
+#  M17: BILLING — plans and Stripe subscriptions per client company.
+#
+#  The operator defines plans (price, monthly API budget, user seats).
+#  A company subscribes through Stripe Checkout and manages its card in
+#  Stripe's Customer Portal; Stripe's webhooks keep tenant_billing current.
+#  Stripe is called over its REST API (form-encoded, Bearer secret key);
+#  STRIPE_API_BASE can point at a test double.
+#  Enforcement is off until Settings → Billing "Require a subscription" is
+#  on; then a client company without an active (or comped) subscription
+#  can't start paid actions or send outreach. The operator is never billed.
+# ──────────────────────────────────────────────────────────────
+BILLING_OK_STATUSES = ('active', 'trialing', 'past_due', 'comped')   # past_due: Stripe is still retrying
+
+def ensure_billing_tables():
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS plans (
+            id                   SERIAL PRIMARY KEY,
+            name                 VARCHAR(100) NOT NULL,
+            description          TEXT NOT NULL DEFAULT '',
+            price_cents          INT NOT NULL,
+            currency             VARCHAR(3) NOT NULL DEFAULT 'usd',
+            monthly_spend_limit  NUMERIC(10,2),          -- API budget; NULL = platform default
+            max_users            INT,                    -- seats; NULL = unlimited
+            stripe_price_id      VARCHAR(100),
+            is_active            BOOLEAN NOT NULL DEFAULT TRUE,
+            sort_order           INT NOT NULL DEFAULT 0,
+            created_at           TIMESTAMPTZ DEFAULT NOW()
+        )""")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS tenant_billing (
+            tenant_id               UUID PRIMARY KEY,
+            plan_id                 INT REFERENCES plans(id) ON DELETE SET NULL,
+            status                  VARCHAR(30) NOT NULL DEFAULT 'none',
+            stripe_customer_id      VARCHAR(100),
+            stripe_subscription_id  VARCHAR(100),
+            current_period_end      TIMESTAMPTZ,
+            cancel_at_period_end    BOOLEAN NOT NULL DEFAULT FALSE,
+            updated_at              TIMESTAMPTZ DEFAULT NOW()
+        )""")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS stripe_events (
+            event_id     VARCHAR(100) PRIMARY KEY,
+            type         VARCHAR(80),
+            tenant_id    UUID,
+            received_at  TIMESTAMPTZ DEFAULT NOW()
+        )""")
+    conn.commit(); cur.close(); conn.close()
+
+def stripe_request(method, path, params=None):
+    """One Stripe API call. Returns the decoded JSON; raises ValueError with
+    Stripe's own message on an error response."""
+    if not STRIPE_SECRET_KEY:
+        raise ValueError('Stripe is not configured — add the Stripe secret key in Settings → API Keys')
+    data = None
+    url = STRIPE_API_BASE + path
+    if params:
+        encoded = urllib.parse.urlencode(params)
+        if method == 'GET':
+            url += '?' + encoded
+        else:
+            data = encoded.encode()
+    req = urllib.request.Request(url, data=data, method=method, headers={
+        'Authorization': f'Bearer {STRIPE_SECRET_KEY}',
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Stripe-Version': '2024-06-20'})
+    try:
+        resp = urllib.request.urlopen(req, timeout=20)
+        log_api_usage('stripe', path.split('/')[2] if path.count('/') >= 2 else path, cost=0)
+        return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        try:
+            msg = json.loads(e.read().decode()).get('error', {}).get('message') or str(e)
+        except Exception:
+            msg = str(e)
+        raise ValueError(f'Stripe: {msg}')
+
+def get_billing(tenant_id):
+    if not tenant_id:
+        return {}
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("""SELECT b.plan_id, b.status, b.stripe_customer_id, b.stripe_subscription_id,
+                          to_char(b.current_period_end, 'YYYY-MM-DD'), b.cancel_at_period_end,
+                          p.name, p.monthly_spend_limit, p.max_users
+                   FROM tenant_billing b LEFT JOIN plans p ON p.id = b.plan_id
+                   WHERE b.tenant_id = %s""", (tenant_id,))
+    r = cur.fetchone(); cur.close(); conn.close()
+    if not r:
+        return {'status': 'none'}
+    return {'plan_id': r[0], 'status': r[1], 'stripe_customer_id': r[2], 'stripe_subscription_id': r[3],
+            'current_period_end': r[4], 'cancel_at_period_end': r[5], 'plan_name': r[6],
+            'plan_spend_limit': float(r[7]) if r[7] is not None else None, 'plan_max_users': r[8]}
+
+def set_billing(tenant_id, **fields):
+    cols = ', '.join(fields)
+    sets = ', '.join(f'{k} = EXCLUDED.{k}' for k in fields)
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute(f"""INSERT INTO tenant_billing (tenant_id, {cols}, updated_at)
+                    VALUES (%s, {', '.join(['%s'] * len(fields))}, NOW())
+                    ON CONFLICT (tenant_id) DO UPDATE SET {sets}, updated_at = NOW()""",
+                (tenant_id, *fields.values()))
+    conn.commit(); cur.close(); conn.close()
+
+def billing_block(tenant_id):
+    """Why this company can't run paid work or send right now (None when it
+    can). Only bites when billing is required, and never for the operator."""
+    if not CONFIG.get('billing_required') or not tenant_id or tenant_is_operator(tenant_id):
+        return None
+    b = get_billing(tenant_id)
+    if b.get('status') in BILLING_OK_STATUSES:
+        return None
+    if b.get('status') in ('canceled', 'unpaid', 'incomplete_expired'):
+        return "Your company's subscription has ended — choose a plan on the Billing page to continue."
+    return 'Choose a plan on the Billing page to start prospecting.'
+
+def plan_seat_block(tenant_id):
+    """Reason a company can't add another login, from its plan's seat limit."""
+    if not tenant_id or tenant_is_operator(tenant_id):
+        return None
+    seats = get_billing(tenant_id).get('plan_max_users')
+    if not seats:
+        return None
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM auth_users WHERE tenant_id = %s", (tenant_id,))
+    n = cur.fetchone()[0]; cur.close(); conn.close()
+    return f"This company's plan includes {seats} user(s) and all are in use" if n >= seats else None
+
+def list_plans(active_only=True):
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute(f"""SELECT id, name, description, price_cents, currency, monthly_spend_limit, max_users,
+                           stripe_price_id, is_active, sort_order FROM plans
+                    {'WHERE is_active' if active_only else ''} ORDER BY sort_order, price_cents""")
+    rows = cur.fetchall(); cur.close(); conn.close()
+    return [{'id': r[0], 'name': r[1], 'description': r[2], 'price_cents': r[3], 'currency': r[4],
+             'monthly_spend_limit': float(r[5]) if r[5] is not None else None, 'max_users': r[6],
+             'stripe_price_id': r[7], 'is_active': r[8], 'sort_order': r[9]} for r in rows]
+
+def save_plan(body):
+    """Create/update a plan; with create_in_stripe, also make its monthly
+    Stripe price (a new price each time the amount changes — Stripe prices
+    are immutable)."""
+    name = (body.get('name') or '').strip()[:100]
+    if not name:
+        raise ValueError('name required')
+    try:
+        price_cents = int(round(float(body.get('price')) * 100))
+        spend = body.get('monthly_spend_limit')
+        spend = None if spend in (None, '') else round(max(0.0, float(spend)), 2)
+        seats = body.get('max_users')
+        seats = None if seats in (None, '', 0, '0') else max(1, int(seats))
+    except (TypeError, ValueError):
+        raise ValueError('price, monthly_spend_limit and max_users must be numbers')
+    if price_cents < 0:
+        raise ValueError('price cannot be negative')
+    currency = (body.get('currency') or 'usd').lower()[:3]
+    price_id = (body.get('stripe_price_id') or '').strip() or None
+    pid = body.get('id')
+    if pid:
+        old = next((p for p in list_plans(False) if p['id'] == int(pid)), None)
+        if not old:
+            raise ValueError('plan not found')
+        if body.get('create_in_stripe') and (old['price_cents'] != price_cents or old['currency'] != currency
+                                             or not old['stripe_price_id']):
+            price_id = None
+        elif not price_id:
+            price_id = old['stripe_price_id']
+    if body.get('create_in_stripe') and not price_id:
+        price = stripe_request('POST', '/v1/prices', {
+            'currency': currency, 'unit_amount': price_cents, 'recurring[interval]': 'month',
+            'product_data[name]': f'{COMPANY_NAME or "Controva"} — {name}',
+            'metadata[controva_plan]': name})
+        price_id = price['id']
+    fields = {'name': name, 'description': (body.get('description') or '').strip()[:500],
+              'price_cents': price_cents, 'currency': currency, 'monthly_spend_limit': spend,
+              'max_users': seats, 'stripe_price_id': price_id, 'is_active': bool(body.get('is_active', True)),
+              'sort_order': int(body.get('sort_order') or 0)}
+    conn = db_conn(); cur = conn.cursor()
+    if pid:
+        cur.execute(f"UPDATE plans SET {', '.join(k + '=%s' for k in fields)} WHERE id=%s", (*fields.values(), pid))
+    else:
+        cur.execute(f"INSERT INTO plans ({', '.join(fields)}) VALUES ({', '.join(['%s'] * len(fields))}) RETURNING id",
+                    tuple(fields.values()))
+        pid = cur.fetchone()[0]
+    conn.commit(); cur.close(); conn.close()
+    return int(pid)
+
+def _app_url(fragment=''):
+    base = (PUBLIC_BASE_URL or 'http://localhost:8080').rstrip('/')
+    return base + '/' + fragment
+
+def billing_checkout(tenant_id, plan_id):
+    """A Stripe Checkout URL that subscribes this company to the plan."""
+    plan = next((p for p in list_plans() if p['id'] == int(plan_id)), None)
+    if not plan:
+        raise ValueError('That plan is not available')
+    if not plan['stripe_price_id']:
+        raise ValueError('That plan has no Stripe price yet — the platform admin must sync it to Stripe')
+    b = get_billing(tenant_id)
+    if b.get('stripe_subscription_id') and b.get('status') in ('active', 'trialing', 'past_due'):
+        raise ValueError('This company already has a subscription — change plan or card under Manage billing')
+    customer = b.get('stripe_customer_id')
+    if not customer:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("SELECT name FROM tenants WHERE id = %s", (tenant_id,))
+        tname = (cur.fetchone() or ['Company'])[0]; cur.close(); conn.close()
+        customer = stripe_request('POST', '/v1/customers', {'name': tname, 'metadata[tenant_id]': tenant_id})['id']
+        set_billing(tenant_id, stripe_customer_id=customer)
+    session = stripe_request('POST', '/v1/checkout/sessions', {
+        'mode': 'subscription', 'customer': customer, 'client_reference_id': tenant_id,
+        'line_items[0][price]': plan['stripe_price_id'], 'line_items[0][quantity]': 1,
+        'success_url': _app_url('?billing=success'), 'cancel_url': _app_url('?billing=cancelled'),
+        'metadata[tenant_id]': tenant_id, 'metadata[plan_id]': str(plan['id']),
+        'subscription_data[metadata][tenant_id]': tenant_id,
+        'subscription_data[metadata][plan_id]': str(plan['id'])})
+    return session['url']
+
+def billing_portal(tenant_id):
+    customer = get_billing(tenant_id).get('stripe_customer_id')
+    if not customer:
+        raise ValueError('No Stripe customer yet — subscribe to a plan first')
+    return stripe_request('POST', '/v1/billing_portal/sessions',
+                          {'customer': customer, 'return_url': _app_url()})['url']
+
+def stripe_signature_ok(secret, header, body, tolerance=300):
+    """Stripe-Signature: t=<unix>,v1=<hex HMAC-SHA256(secret, '<t>.<payload>')> (one
+    or more v1 while a secret rotates); the key is the whsec_ string itself."""
+    if not secret or not header:
+        return False
+    ts, sigs = None, []
+    for part in header.split(','):
+        k, _, v = part.strip().partition('=')
+        if k == 't' and v.isdigit():
+            ts = int(v)
+        elif k == 'v1' and v:
+            sigs.append(v)
+    if ts is None or not sigs or abs(int(time.time()) - ts) > tolerance:
+        return False
+    expected = hmac.new(secret.encode(), str(ts).encode() + b'.' + body, hashlib.sha256).hexdigest()
+    return any(hmac.compare_digest(expected, s) for s in sigs)
+
+def _tenant_for_stripe(obj):
+    meta = obj.get('metadata') or {}
+    tid = meta.get('tenant_id') or obj.get('client_reference_id')
+    if not tid and obj.get('customer'):
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("SELECT tenant_id FROM tenant_billing WHERE stripe_customer_id = %s", (obj['customer'],))
+        r = cur.fetchone(); cur.close(); conn.close()
+        tid = str(r[0]) if r else None
+    if tid:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("SELECT 1 FROM tenants WHERE id = %s", (tid,))
+        ok = cur.fetchone() is not None; cur.close(); conn.close()
+        return tid if ok else None
+    return None
+
+def _plan_for_price(price_id):
+    if not price_id:
+        return None
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("SELECT id FROM plans WHERE stripe_price_id = %s", (price_id,))
+    r = cur.fetchone(); cur.close(); conn.close()
+    return r[0] if r else None
+
+def handle_stripe_webhook(headers, raw_body):
+    """Stripe event → tenant_billing. Returns (status, response)."""
+    if not STRIPE_WEBHOOK_SECRET:
+        return 503, {'error': 'Stripe webhook secret not configured'}
+    if not stripe_signature_ok(STRIPE_WEBHOOK_SECRET, headers.get('Stripe-Signature'), raw_body):
+        return 400, {'error': 'bad signature'}
+    try:
+        event = json.loads(raw_body.decode())
+    except Exception:
+        return 400, {'error': 'body is not JSON'}
+    eid, etype = event.get('id'), event.get('type', '')
+    obj = (event.get('data') or {}).get('object') or {}
+    if not eid:
+        return 400, {'error': 'no event id'}
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("SELECT 1 FROM stripe_events WHERE event_id = %s", (eid,))
+    seen = cur.fetchone() is not None; cur.close(); conn.close()
+    if seen:
+        return 200, {'received': True, 'duplicate': True}
+    tid = _tenant_for_stripe(obj)
+    applied = 'ignored'
+    if tid and etype == 'checkout.session.completed' and obj.get('mode') == 'subscription':
+        plan = (obj.get('metadata') or {}).get('plan_id')
+        set_billing(tid, stripe_customer_id=obj.get('customer'), stripe_subscription_id=obj.get('subscription'),
+                    status='active', plan_id=int(plan) if str(plan or '').isdigit() else None)
+        applied = 'subscribed'
+    elif tid and etype in ('customer.subscription.created', 'customer.subscription.updated',
+                           'customer.subscription.deleted'):
+        items = ((obj.get('items') or {}).get('data') or [])
+        price_id = ((items[0].get('price') or {}).get('id')) if items else None
+        meta_plan = (obj.get('metadata') or {}).get('plan_id')
+        plan = _plan_for_price(price_id) or (int(meta_plan) if str(meta_plan or '').isdigit() else None)
+        end = obj.get('current_period_end') or (items[0].get('current_period_end') if items else None)
+        fields = {'stripe_customer_id': obj.get('customer'), 'stripe_subscription_id': obj.get('id'),
+                  'status': 'canceled' if etype.endswith('deleted') else (obj.get('status') or 'active'),
+                  'cancel_at_period_end': bool(obj.get('cancel_at_period_end')),
+                  'current_period_end': datetime_from_unix(end)}
+        if plan:
+            fields['plan_id'] = plan
+        set_billing(tid, **fields)
+        applied = fields['status']
+    elif tid and etype == 'invoice.payment_failed':
+        set_billing(tid, status='past_due'); applied = 'past_due'
+    elif tid and etype == 'invoice.paid' and get_billing(tid).get('status') == 'past_due':
+        set_billing(tid, status='active'); applied = 'active'
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("INSERT INTO stripe_events (event_id, type, tenant_id) VALUES (%s,%s,%s) ON CONFLICT DO NOTHING",
+                (eid, etype[:80], tid))
+    conn.commit(); cur.close(); conn.close()
+    return 200, {'received': True, 'applied': applied}
+
+def datetime_from_unix(ts):
+    from datetime import datetime, timezone
+    try:
+        return datetime.fromtimestamp(int(ts), tz=timezone.utc) if ts else None
+    except (TypeError, ValueError):
+        return None
+
+def billing_view(tenant_id):
+    b = get_billing(tenant_id)
+    b.pop('stripe_subscription_id', None)
+    return {**b, 'block': billing_block(tenant_id), 'is_operator': tenant_is_operator(tenant_id),
+            'required': bool(CONFIG.get('billing_required')), 'stripe_configured': bool(STRIPE_SECRET_KEY),
+            'has_customer': bool(b.pop('stripe_customer_id', None))}
 
 def ensure_data_erasure_table():
     conn = db_conn(); cur = conn.cursor()
@@ -10099,6 +10453,7 @@ class Handler(BaseHTTPRequestHandler):
                 safe_keys = ('client_brand_name', 'client_brand_color', 'calendly_url', 'client_footer_text')
                 out = {k: CONFIG.get(k, '') for k in safe_keys}
                 out['calendly_url'] = ''   # a client books into its own Calendly, never the operator's
+                out['billing_block'] = billing_block(self.scope_tenant())
                 # M15: the company's own branding wins over the server-wide one
                 st = get_tenant_settings(self.scope_tenant())
                 for src, dst in (('brand_name', 'client_brand_name'), ('brand_color', 'client_brand_color'),
@@ -10228,8 +10583,27 @@ class Handler(BaseHTTPRequestHandler):
                     companies.append({'id': tid, 'name': name, 'users': users, 'leads': n_leads, 'icps': n_icps,
                                       'created_at': created.isoformat() if created else None,
                                       'is_operator': any(u['role'] in ('admin', 'service') for u in users),
-                                      'readiness': company_send_readiness(tid)})
+                                      'readiness': company_send_readiness(tid),
+                                      'billing': {k: v for k, v in get_billing(tid).items()
+                                                  if k in ('status', 'plan_name', 'current_period_end')}})
                 self.send_json(200, {'companies': companies})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p == '/billing':
+            try:
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                tid = self.target_company((qs.get('tenant_id') or [''])[0])
+                if not tid:
+                    self.send_json(404, {'error': 'unknown company'}); return
+                out = {'tenant_id': tid, 'billing': billing_view(tid), 'plans': list_plans(),
+                       'spend_this_month': round(company_month_spend(tid), 2),
+                       'spend_limit': company_spend_limit(tid)}
+                if self.scope_tenant() is None:
+                    out['all_plans'] = list_plans(active_only=False)
+                    out['billing_required'] = bool(CONFIG.get('billing_required'))
+                    out['webhook_url'] = _app_url('webhook/stripe')
+                self.send_json(200, out)
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
@@ -10706,6 +11080,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(500, {'error': str(e)})
             return
 
+        if p == '/webhook/stripe':
+            try:
+                status, result = handle_stripe_webhook(self.headers, raw_body)
+                self.send_json(status, result)
+            except Exception as e:
+                print(f'[stripe] webhook error: {e}')
+                self.send_json(500, {'error': 'webhook processing failed'})
+            return
+
         if p.startswith('/webhook/leadhunter/'):
             try:
                 status, result = handle_leadhunter_webhook(p.rsplit('/', 1)[1], self.headers, raw_body)
@@ -10993,6 +11376,49 @@ class Handler(BaseHTTPRequestHandler):
                                 'log': ['Starting website verification…'], 'step': 'Verify Websites'}
                 _bg_thread(run_verify_websites_bg, job_id, lead_ids)
                 self.send_json(200, {'job_id': job_id, 'status': 'started'})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p == '/billing/checkout':
+            try:
+                tid = self.target_company(body.get('tenant_id'))
+                if not tid or tenant_is_operator(tid):
+                    self.send_json(400, {'error': 'Only client companies subscribe'}); return
+                self.send_json(200, {'url': billing_checkout(tid, body.get('plan_id'))})
+            except ValueError as e:
+                self.send_json(400, {'error': str(e)})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p == '/billing/portal':
+            try:
+                tid = self.target_company(body.get('tenant_id'))
+                self.send_json(200, {'url': billing_portal(tid)})
+            except ValueError as e:
+                self.send_json(400, {'error': str(e)})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p == '/billing/plans/save':
+            if not self.require_admin(): return
+            try:
+                self.send_json(200, {'success': True, 'id': save_plan(body)})
+            except ValueError as e:
+                self.send_json(400, {'error': str(e)})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p == '/billing/company':
+            # Admin override: comp a company, attach a plan without Stripe, or reset.
+            if not self.require_admin(): return
+            try:
+                tid = self.target_company(body.get('tenant_id'))
+                status = body.get('status')
+                if not tid or status not in ('comped', 'none', 'active', 'canceled'):
+                    self.send_json(400, {'error': 'tenant_id and status (comped/none/active/canceled) required'}); return
+                plan = body.get('plan_id')
+                set_billing(tid, status=status, plan_id=int(plan) if str(plan or '').isdigit() else None)
+                self.send_json(200, {'success': True, 'billing': billing_view(tid)})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
@@ -11643,6 +12069,10 @@ class Handler(BaseHTTPRequestHandler):
                         cur.close(); conn.close()
                         self.send_json(404, {'error': 'unknown company'}); return
                     new_tenant_id = row[0]
+                    seats = plan_seat_block(str(new_tenant_id))
+                    if seats:
+                        cur.close(); conn.close()
+                        self.send_json(409, {'error': seats}); return
                 else:
                     company = (body.get('company_name') or '').strip()[:200] or f"{username}'s workspace"
                     cur.execute("INSERT INTO tenants (name) VALUES (%s) RETURNING id", (company,))
@@ -12018,6 +12448,7 @@ def migrate_all():
         ensure_m15_tables()
         ensure_data_erasure_table()
         ensure_leadhunter_tables()
+        ensure_billing_tables()
         print('Schema migration: OK')
     except Exception as e:
         print(f'Schema migration warning (non-fatal): {e}')
