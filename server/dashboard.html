@@ -277,6 +277,9 @@ const ICONS = {
   Activity:      'M22 12h-4l-3 9L9 3l-3 9H2',
   Trash2:        'M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6h14zM10 11v6M14 11v6',
   Eye:           'M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8zM12 15a3 3 0 100-6 3 3 0 000 6z',
+  Phone:         'M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72 12.84 12.84 0 00.7 2.81 2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45 12.84 12.84 0 002.81.7A2 2 0 0122 16.92z',
+  FileText:      'M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8zM14 2v6h6M16 13H8M16 17H8M10 9H8',
+  Printer:       'M6 9V2h12v7M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2M6 14h12v8H6z',
   EyeOff:        'M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19M14.12 14.12a3 3 0 11-4.24-4.24M1 1l22 22',
 
 };
@@ -6497,7 +6500,7 @@ const CompanyPage = () => {
       if (!tenantId && d.companies) setTenantId(d.tenant_id);
     }).catch(e => showToast('Failed to load: ' + e.message, 'error'));
   };
-  useEffect(load, [tenantId]);
+  useEffect(() => { load(); }, [tenantId]);
 
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
   const save = async () => {
@@ -6665,6 +6668,244 @@ const fmtMoney = (cents, cur) => (cur || 'usd').toUpperCase() === 'USD'
 const BILLING_BADGE = { active: 'success', trialing: 'success', comped: 'info', past_due: 'warning', canceled: 'danger', unpaid: 'danger', none: 'grey' };
 const PLAN_BLANK = { name: '', description: '', price: '', currency: 'usd', monthly_spend_limit: '', max_users: '', sort_order: 0, is_active: true, create_in_stripe: true, stripe_price_id: '' };
 
+// M18 Reply inbox: every matched reply, an AI-drafted answer to edit and
+// send, and one-click outcomes.
+const REPLY_CLASS = {
+  interested:         { label: 'Interested',     v: 'success' },
+  objection:          { label: 'Objection',      v: 'warning' },
+  not_interested:     { label: 'Not interested', v: 'grey' },
+  ooo:                { label: 'Out of office',  v: 'default' },
+  unsubscribe_intent: { label: 'Asked to stop',  v: 'danger' },
+  unclear:            { label: 'Unclear',        v: 'info' },
+};
+const OUTCOME_LABEL = { replied: 'Replied', meeting_booked: 'Meeting booked', not_interested: 'Not interested',
+                        leadhunter: 'Sent to Lead Hunter', done: 'Done' };
+const whenShort = (iso) => {
+  if (!iso) return '';
+  const d = new Date(iso), mins = Math.round((Date.now() - d.getTime()) / 60000);
+  if (mins < 60) return Math.max(mins, 1) + 'm ago';
+  if (mins < 1440) return Math.round(mins / 60) + 'h ago';
+  if (mins < 10080) return Math.round(mins / 1440) + 'd ago';
+  return d.toLocaleDateString();
+};
+
+const InboxPage = ({ role, readOnly }) => {
+  const isAdmin = role === 'admin';
+  const [view, setView] = useState('open');
+  const [data, setData] = useState(null);
+  const [selId, setSelId] = useState(null);
+  const [draft, setDraft] = useState({ subject: '', body: '', instructions: '', source: '' });
+  const [busy, setBusy] = useState('');
+  const { showToast } = useToast();
+
+  const load = (keep) => api.get('/inbox?view=' + view).then(d => {
+    setData(d);
+    const still = keep && (d.items || []).some(i => i.id === keep);
+    setSelId(still ? keep : ((d.items || [])[0] || {}).id || null);
+  }).catch(e => showToast('Failed to load: ' + e.message, 'error'));
+  useEffect(() => { setData(null); load(); }, [view]);
+
+  const items = (data && data.items) || [];
+  const sel = items.find(i => i.id === selId) || null;
+  useEffect(() => {
+    setDraft({ subject: sel ? (sel.subject.toLowerCase().startsWith('re:') ? sel.subject : 'Re: ' + sel.subject) : '',
+               body: '', instructions: '', source: '' });
+  }, [selId]);
+
+  const makeDraft = async () => {
+    setBusy('draft');
+    try {
+      const r = await api.post('/inbox/' + sel.id + '/draft', { instructions: draft.instructions });
+      if (r.success) setDraft({ ...draft, subject: r.subject, body: r.body, source: r.source });
+      else showToast(r.error || 'Could not draft a reply', 'error');
+    } catch (e) { showToast(e.message, 'error'); }
+    setBusy('');
+  };
+  const send = async () => {
+    if (!draft.body.trim()) { showToast('Write a reply first', 'error'); return; }
+    if (!confirm('Send this reply to ' + sel.email_to + '?')) return;
+    setBusy('send');
+    try {
+      const r = await api.post('/inbox/' + sel.id + '/send', { subject: draft.subject, body: draft.body });
+      if (r.success) { showToast('Reply sent'); load(); } else showToast(r.error || 'Send failed', 'error');
+    } catch (e) { showToast(e.message, 'error'); }
+    setBusy('');
+  };
+  const act = async (action, label) => {
+    setBusy(action);
+    try {
+      const r = await api.post('/inbox/' + sel.id + '/action', { action });
+      if (r.success) { showToast(label); load(action === 'reopen' ? sel.id : null); }
+      else showToast(r.error || 'Failed', 'error');
+    } catch (e) { showToast(e.message, 'error'); }
+    setBusy('');
+  };
+  const checkNow = async () => {
+    setBusy('check');
+    try {
+      const r = await api.post('/check-replies', {});
+      if (!r.job_id) { showToast(r.error || r.message || 'Could not start', 'error'); setBusy(''); return; }
+      showToast('Checking the reply inbox…', 'info');
+      for (let i = 0; i < 90; i++) {
+        await new Promise(res => setTimeout(res, 2000));
+        const j = await api.get('/job/' + r.job_id);
+        if (j.status === 'completed' || j.status === 'failed') {
+          const n = (j.results || {}).matched;
+          showToast(j.status === 'completed' ? (n ? n + ' new repl' + (n === 1 ? 'y' : 'ies') : 'No new replies')
+                                             : ((j.log || []).slice(-1)[0] || 'Check failed'),
+                    j.status === 'completed' ? 'success' : 'error');
+          break;
+        }
+      }
+      load(selId);
+    } catch (e) { showToast(e.message, 'error'); }
+    setBusy('');
+  };
+
+  const counts = (data && data.counts) || {};
+  const tabs = [['open', 'Needs reply', counts.open], ['handled', 'Handled', counts.handled], ['all', 'All', null]];
+  const cls = sel ? (REPLY_CLASS[sel.classification] || REPLY_CLASS.unclear) : null;
+  const stopped = sel && sel.classification === 'unsubscribe_intent';
+
+  return (
+    <div className="space-y-5 fade-in">
+      <div className="flex items-start justify-between flex-wrap gap-3">
+        <div>
+          <h1 className="text-2xl font-bold">Inbox</h1>
+          <p className="text-sm text-slate-500 mt-1">Replies to your outreach — answer with an AI draft, then record the outcome</p>
+        </div>
+        {!readOnly && <Button variant="secondary" icon="RefreshCw" disabled={!!busy} onClick={checkNow}>
+          {busy === 'check' ? 'Checking…' : 'Check for replies'}</Button>}
+      </div>
+
+      <div className="flex gap-1 border-b border-slate-200 dark:border-slate-800">
+        {tabs.map(([id, label, n]) => (
+          <button key={id} onClick={() => setView(id)}
+            className={'px-3 py-2 text-sm font-medium border-b-2 -mb-px ' + (view === id
+              ? 'border-accent-600 text-accent-700 dark:text-accent-400' : 'border-transparent text-slate-500 hover:text-slate-700 dark:hover:text-slate-300')}>
+            {label}{n != null && <span className="ml-1.5 text-xs text-slate-400">{n}</span>}
+          </button>
+        ))}
+      </div>
+
+      {!data ? <div className="py-16 text-center"><Spinner size="w-6 h-6" /></div> : items.length === 0 ? (
+        <Card><div className="py-10 text-center text-sm text-slate-500">
+          <Icon name="Inbox" className="w-8 h-8 mx-auto mb-3 text-slate-300" />
+          {view === 'open' ? 'No replies waiting. New replies appear here after the reply check runs.' : 'Nothing here yet.'}
+        </div></Card>
+      ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-5 gap-5 items-start">
+          <Card noPad className="lg:col-span-2 overflow-hidden">
+            <ul className="divide-y divide-slate-100 dark:divide-slate-800 max-h-[70vh] overflow-y-auto scrollbar-thin">
+              {items.map(it => {
+                const c = REPLY_CLASS[it.classification] || REPLY_CLASS.unclear;
+                return (
+                  <li key={it.id}>
+                    <button onClick={() => setSelId(it.id)}
+                      className={'w-full text-left px-4 py-3 transition-colors ' + (it.id === selId ? 'bg-accent-50 dark:bg-accent-900/20' : 'hover:bg-slate-50 dark:hover:bg-slate-800/50')}>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-medium text-sm truncate">{it.business_name || it.email_to}</span>
+                        <span className="text-xs text-slate-400 shrink-0">{whenShort(it.replied_at)}</span>
+                      </div>
+                      <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                        <Badge variant={c.v}>{c.label}</Badge>
+                        {it.outcome && <Badge variant="grey">{OUTCOME_LABEL[it.outcome] || it.outcome}</Badge>}
+                        {it.is_follow_up && <Badge variant="default">Follow-up</Badge>}
+                        {isAdmin && it.company && <span className="text-xs text-slate-400 truncate">{it.company}</span>}
+                      </div>
+                      <p className="text-xs text-slate-500 mt-1.5 line-clamp-2">{it.digest || it.reply.slice(0, 160)}</p>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </Card>
+
+          {sel && (
+            <div className="lg:col-span-3 space-y-4">
+              <Card>
+                <div className="flex items-start justify-between gap-3 flex-wrap mb-3">
+                  <div className="min-w-0">
+                    <h3 className="font-semibold truncate">{sel.business_name || sel.email_to}</h3>
+                    <p className="text-xs text-slate-500 break-all">{sel.email_to}{isAdmin && sel.company ? ' · ' + sel.company : ''} · replied {whenShort(sel.replied_at)}</p>
+                  </div>
+                  <div className="flex gap-1.5 flex-wrap">
+                    <Badge variant={cls.v}>{cls.label}</Badge>
+                    {sel.meeting_booked && <Badge variant="success">Meeting booked</Badge>}
+                  </div>
+                </div>
+                {sel.digest && <p className="text-sm text-slate-600 dark:text-slate-400 italic mb-3">{sel.digest}</p>}
+                <div className="text-sm whitespace-pre-wrap break-words bg-slate-50 dark:bg-slate-800/50 rounded-lg p-3 max-h-72 overflow-y-auto scrollbar-thin">{sel.reply || '(empty reply)'}</div>
+                <details className="mt-3 text-sm">
+                  <summary className="cursor-pointer text-xs font-medium text-slate-500">The email we sent — {sel.subject}</summary>
+                  <div className="mt-2 whitespace-pre-wrap break-words text-slate-600 dark:text-slate-400 text-xs">{sel.our_message.replace(/\\n/g, '\n')}</div>
+                </details>
+                {sel.answers.length > 0 && (
+                  <div className="mt-3 space-y-2">
+                    {sel.answers.map((a, i) => (
+                      <div key={i} className="text-xs border-l-2 border-accent-400 pl-3">
+                        <p className="font-medium text-slate-500">Our reply · {whenShort(a.sent_at)}</p>
+                        <p className="whitespace-pre-wrap break-words text-slate-600 dark:text-slate-400 mt-1">{a.body}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </Card>
+
+              {!readOnly && (
+                <Card>
+                  <h3 className="font-semibold mb-3">Reply</h3>
+                  {stopped ? (
+                    <p className="text-sm text-slate-500">They asked to stop receiving email, so the address is suppressed and no reply can be sent. Mark it done.</p>
+                  ) : (
+                    <div className="space-y-3">
+                      <div className="flex gap-2 flex-wrap">
+                        <Input className="flex-1 min-w-[12rem]" value={draft.instructions} onChange={v => setDraft({ ...draft, instructions: v })}
+                          placeholder="Optional direction, e.g. offer Thursday afternoon" />
+                        <Button variant="secondary" icon="Sparkles" disabled={!!busy} onClick={makeDraft}>
+                          {busy === 'draft' ? 'Drafting…' : (draft.body ? 'Redraft' : 'Draft with AI')}</Button>
+                      </div>
+                      <Input value={draft.subject} onChange={v => setDraft({ ...draft, subject: v })} placeholder="Subject" />
+                      <textarea value={draft.body} onChange={e => setDraft({ ...draft, body: e.target.value })} rows={9}
+                        placeholder="Write your reply, or click Draft with AI"
+                        className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg text-sm p-3 focus:outline-none focus:ring-2 focus:ring-accent-500" />
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <span className="text-xs text-slate-400">{draft.source === 'template' ? 'No AI key configured — started from a template' : draft.source ? 'Drafted by AI — check it before sending' : 'Sent from your company’s sending identity, with your legal footer'}</span>
+                        <Button icon="Send" disabled={!!busy || !draft.body.trim()} onClick={send}>{busy === 'send' ? 'Sending…' : 'Send reply'}</Button>
+                      </div>
+                    </div>
+                  )}
+                </Card>
+              )}
+
+              {!readOnly && (
+                <Card>
+                  <h3 className="font-semibold mb-3">Outcome</h3>
+                  <div className="flex gap-2 flex-wrap">
+                    {sel.handled_at ? (
+                      <>
+                        <span className="text-sm text-slate-500 self-center">{OUTCOME_LABEL[sel.outcome] || 'Handled'}{sel.handled_by ? ' by ' + sel.handled_by : ''} · {whenShort(sel.handled_at)}</span>
+                        <Button size="sm" variant="ghost" icon="RotateCw" disabled={!!busy} onClick={() => act('reopen', 'Moved back to Needs reply')}>Reopen</Button>
+                      </>
+                    ) : (
+                      <>
+                        <Button size="sm" variant="success" icon="Calendar" disabled={!!busy || stopped} onClick={() => act('meeting_booked', 'Meeting recorded')}>Meeting booked</Button>
+                        <Button size="sm" variant="secondary" icon="Phone" disabled={!!busy || stopped} onClick={() => act('leadhunter', 'Sent to Lead Hunter')}>Send to Lead Hunter</Button>
+                        <Button size="sm" variant="secondary" icon="XCircle" disabled={!!busy} onClick={() => act('not_interested', 'Marked not interested')}>Not interested</Button>
+                        <Button size="sm" variant="ghost" icon="Check" disabled={!!busy} onClick={() => act('done', 'Marked done')}>Done</Button>
+                      </>
+                    )}
+                  </div>
+                </Card>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const BillingPage = ({ role }) => {
   const isAdmin = role === 'admin';
   const [tenantId, setTenantId] = useState('');
@@ -6677,7 +6918,7 @@ const BillingPage = ({ role }) => {
   const load = () => api.get('/billing' + (tenantId ? '?tenant_id=' + tenantId : '')).then(d => {
     setData(d); if (!tenantId && isAdmin) setTenantId(d.tenant_id);
   }).catch(e => showToast('Failed to load: ' + e.message, 'error'));
-  useEffect(load, [tenantId]);
+  useEffect(() => { load(); }, [tenantId]);
   useEffect(() => { if (isAdmin) api.get('/companies').then(d => setCompanies(d.companies || [])).catch(() => {}); }, []);
 
   const go = async (path, body) => {
@@ -6914,6 +7155,13 @@ const App = ({ role = 'admin' }) => {
   const [brand, setBrand] = useState({ name: 'Controva', color: '' });
   const [companyTheme, setCompanyTheme] = useState(null);
   const [billingBlock, setBillingBlock] = useState(null);
+  const [inboxOpen, setInboxOpen] = useState(0);
+  useEffect(() => {
+    const tick = () => api.get('/inbox/count').then(d => setInboxOpen(d.open || 0)).catch(() => {});
+    tick();
+    const t = setInterval(tick, 60000);
+    return () => clearInterval(t);
+  }, [page]);
   const [accent, setAccent] = useAccentTheme(companyTheme);
   const isAdmin = role === 'admin';
 
@@ -6943,6 +7191,7 @@ const App = ({ role = 'admin' }) => {
     { section: 'Enrich & Send' },
     { id: 'pipeline',  label: 'Pipeline',  icon: 'Workflow' },
     { id: 'outreach',  label: 'Email & Outreach', icon: 'Send' },
+    { id: 'inbox',     label: 'Inbox',     icon: 'Inbox', badge: inboxOpen },
     { id: 'workflows', label: 'Workflows', icon: 'Repeat' },
     { id: 'analytics', label: 'Analytics', icon: 'Activity' },
     { id: 'performance', label: 'Performance', icon: 'BarChart3' },
@@ -6976,6 +7225,7 @@ const App = ({ role = 'admin' }) => {
   else if (page === 'performance') CurrentPage = PerformancePage;
   else if (page === 'company') CurrentPage = CompanyPage;
   else if (page === 'billing') CurrentPage = BillingPage;
+  else if (page === 'inbox') CurrentPage = InboxPage;
   else if (page === 'intent') CurrentPage = IntentPage;
   else if (page === 'activity' && isAdmin) CurrentPage = ActivityLogPage;
   else if (page === 'n8n' && isAdmin) CurrentPage = N8nWorkflowsPage;
@@ -7008,7 +7258,8 @@ const App = ({ role = 'admin' }) => {
                                  : 'text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
               )}>
               <Icon name={item.icon} className="w-4 h-4" />
-              {item.label}
+              <span className="flex-1 text-left">{item.label}</span>
+              {item.badge > 0 && <span className="min-w-[1.25rem] px-1.5 py-0.5 rounded-full bg-accent-600 text-white text-[10px] font-semibold text-center">{item.badge > 99 ? '99+' : item.badge}</span>}
             </button>
           ))}
         </nav>
