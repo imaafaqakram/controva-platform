@@ -1677,12 +1677,12 @@ const CLIENT_STRATEGY_TEXT = {
   oxylabs_only:        { label: 'Deep Search',            desc: 'Most thorough — best for hard-to-find contacts' },
 };
 const stratOpts = (opts) => {
-  const isClient = (localStorage.getItem('auth_role') || 'admin') === 'client';
+  const isClient = (localStorage.getItem('auth_role') || 'admin') !== 'admin';
   if (!isClient) return opts;
   return opts.map(o => ({ ...o, ...(CLIENT_STRATEGY_TEXT[o.id] || {}) }));
 };
 const stratLabel = (id, fallback) => {
-  const isClient = (localStorage.getItem('auth_role') || 'admin') === 'client';
+  const isClient = (localStorage.getItem('auth_role') || 'admin') !== 'admin';
   return (isClient && CLIENT_STRATEGY_TEXT[id]) ? CLIENT_STRATEGY_TEXT[id].label : fallback;
 };
 
@@ -2126,7 +2126,7 @@ const PipelinePage = () => {
                 {pStats.enriched_no_contact} leads enriched — no contact info found
               </h3>
               <p className="text-xs text-slate-600 dark:text-slate-400 mt-1">
-                {(localStorage.getItem('auth_role') || 'admin') === 'client'
+                {(localStorage.getItem('auth_role') || 'admin') !== 'admin'
                   ? 'The first pass searched these leads but couldn\'t find an email or LinkedIn profile. Run a deeper pass or a different strategy to try harder.'
                   : 'Serper searched these leads but couldn\'t find an email or LinkedIn profile. Run Oxylabs deep scrape or a different strategy to try harder.'}
               </p>
@@ -4133,6 +4133,38 @@ const CrmConnectionsEditor = ({ tenantId }) => {
   );
 };
 
+// M19 deliverability: SPF / DKIM / DMARC / MX for one sending domain.
+const DNS_BADGE = { ok: 'success', warn: 'warning', fail: 'danger' };
+const DomainDnsCheck = ({ domain, readOnly }) => {
+  const [rep, setRep] = useState(domain.dns_report || null);
+  const [busy, setBusy] = useState(false);
+  const [open, setOpen] = useState(false);
+  const { showToast } = useToast();
+  const run = async () => {
+    setBusy(true);
+    try { const r = await api.post('/sending-domains/' + domain.id + '/dns', {}); setRep(r); setOpen(r.status !== 'ok'); }
+    catch (e) { showToast('DNS check failed: ' + e.message, 'error'); }
+    setBusy(false);
+  };
+  const fixes = rep && rep.checks ? rep.checks.filter(c => c.fix) : [];
+  return (
+    <div className="mt-2">
+      <div className="flex items-center gap-1.5 flex-wrap">
+        {rep && (rep.checks || []).map(c => <Badge key={c.key} variant={DNS_BADGE[c.status] || 'grey'} title={c.value || c.fix}>{c.status === 'ok' ? '✓ ' : c.status === 'warn' ? '! ' : '✗ '}{c.label}</Badge>)}
+        {rep && rep.error && <span className="text-xs text-red-500">{rep.error}</span>}
+        {!rep && <span className="text-xs text-slate-400">DNS not checked yet</span>}
+        {!readOnly && <Button size="sm" variant="ghost" icon="ShieldCheck" disabled={busy} onClick={run}>{busy ? 'Checking…' : (rep ? 'Re-check DNS' : 'Check DNS')}</Button>}
+        {fixes.length > 0 && <button type="button" className="text-xs text-accent-600 dark:text-accent-400 hover:underline" onClick={() => setOpen(!open)}>{open ? 'Hide fixes' : 'How to fix'}</button>}
+      </div>
+      {open && fixes.length > 0 && (
+        <ul className="mt-2 space-y-1.5 text-xs text-slate-600 dark:text-slate-400">
+          {fixes.map(c => <li key={c.key}><span className="font-semibold">{c.label}:</span> {c.fix}</li>)}
+        </ul>
+      )}
+    </div>
+  );
+};
+
 const SendingDomainsEditor = () => {
   const [domains, setDomains] = useState([]);
   const [companies, setCompanies] = useState([]);
@@ -4187,6 +4219,7 @@ const SendingDomainsEditor = () => {
                 {d.sent_today}/{d.daily_cap} sent today · {d.bad_7d}/{d.sent_7d || 0} bounced or complained (7d) · {d.company || 'platform (unassigned)'}
               </p>
               {d.paused_reason && <p className="text-xs text-red-500 mt-0.5">{d.paused_reason}</p>}
+              <DomainDnsCheck domain={d} />
             </div>
             <div className="flex gap-2 flex-shrink-0">
               <Button size="sm" variant="secondary" icon="Edit3" onClick={() => setEditing(d)}>Edit</Button>
@@ -4286,6 +4319,7 @@ const UserAccountsEditor = () => {
   const [newPassword, setNewPassword] = useState('');
   const [newCompany, setNewCompany] = useState('');       // '' = new company, else tenant id
   const [newCompanyName, setNewCompanyName] = useState('');
+  const [newRole, setNewRole] = useState('client');
   const [companies, setCompanies] = useState([]);
   const [resettingUser, setResettingUser] = useState(null); // username being reset, or null
   const [resetPassword, setResetPassword] = useState('');
@@ -4308,11 +4342,11 @@ const UserAccountsEditor = () => {
   const create = async () => {
     if (!newUsername.trim() || !newPassword.trim()) { showToast('Username and password required', 'error'); return; }
     try {
-      await api.post('/users/create', { username: newUsername.trim(), password: newPassword,
+      await api.post('/users/create', { username: newUsername.trim(), password: newPassword, role: newCompany ? newRole : 'client',
                                         tenant_id: newCompany || undefined, company_name: newCompany ? undefined : newCompanyName });
       showToast(newCompany ? `"${newUsername.trim()}" added to the company — they share its leads and settings`
                            : `Client account "${newUsername.trim()}" created — its own company workspace, invisible to other clients`);
-      setAdding(false); setNewUsername(''); setNewPassword(''); setNewCompany(''); setNewCompanyName('');
+      setAdding(false); setNewUsername(''); setNewPassword(''); setNewCompany(''); setNewCompanyName(''); setNewRole('client');
       load();
     } catch (e) { showToast('Failed: ' + e.message, 'error'); }
   };
@@ -4349,7 +4383,7 @@ const UserAccountsEditor = () => {
             <div className="min-w-0">
               <div className="font-medium text-sm flex items-center gap-2">
                 <span className="truncate">{u.username}</span>
-                <Badge variant="grey">{u.role}</Badge>
+                <Badge variant={u.role === 'viewer' ? 'info' : 'grey'}>{u.role === 'viewer' ? 'viewer (read-only)' : u.role}</Badge>
               </div>
               <p className="text-xs text-slate-500 mt-0.5">{u.company || 'workspace ' + (u.tenant_id || '').slice(0, 8) + '…'} · created {u.created_at ? new Date(u.created_at).toLocaleDateString() : ''}</p>
             </div>
@@ -4387,6 +4421,13 @@ const UserAccountsEditor = () => {
             {companies.map(c => <option key={c.id} value={c.id}>Join {c.name}</option>)}
           </select>
           {!newCompany && <Input value={newCompanyName} onChange={setNewCompanyName} placeholder="Company name, e.g. Acme Inc." />}
+          {newCompany && (
+            <select value={newRole} onChange={e => setNewRole(e.target.value)}
+              className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-2 text-sm">
+              <option value="client">Full user — can search, send and change settings</option>
+              <option value="viewer">Viewer — read-only (for the client's owner or manager)</option>
+            </select>
+          )}
           <div className="flex gap-2">
             <Input value={newPassword} onChange={setNewPassword} placeholder="password" revealable />
             <Button size="sm" variant="secondary" onClick={genPassword}>Generate</Button>
@@ -6249,7 +6290,7 @@ const daysAgo = (n) => { const d = new Date(); d.setDate(d.getDate() - n); retur
 
 const BENCH_BLANK = { channel: 'meta_ads', label: '', period_start: '', period_end: '', spend: '', leads: '', qualified_leads: '', meetings_booked: '', meetings_attended: '', customers: '', revenue: '', notes: '' };
 
-const PerformancePage = () => {
+const PerformancePage = ({ readOnly }) => {
   const [range, setRange] = useState({ from: daysAgo(29), to: isoDay(new Date()) });
   const [tenantId, setTenantId] = useState('');
   const [data, setData] = useState(null);
@@ -6265,6 +6306,24 @@ const PerformancePage = () => {
       .catch(e => { showToast('Failed to load: ' + e.message, 'error'); setLoading(false); });
   };
   useEffect(refresh, [range.from, range.to, tenantId]);
+  const reportQs = () => '?from=' + range.from + '&to=' + range.to + (tenantId ? '&tenant_id=' + tenantId : '');
+  const openReport = async () => {
+    // Open the tab now (a popup opened after an await is blocked), then fill it.
+    const w = window.open('', '_blank');
+    try {
+      const token = localStorage.getItem('auth_token');
+      const r = await fetch(API + '/performance/report' + reportQs(), { headers: token ? { Authorization: 'Bearer ' + token } : {} });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const url = URL.createObjectURL(new Blob([await r.text()], { type: 'text/html' }));
+      if (w) w.location.href = url; else window.location.href = url;
+    } catch (e) { if (w) w.close(); showToast('Could not build the report: ' + e.message, 'error'); }
+  };
+  const emailReport = async () => {
+    try {
+      const r = await api.post('/performance/report/email', { from: range.from, to: range.to, tenant_id: tenantId || undefined });
+      if (r.success) showToast('Report emailed to ' + r.sent_to); else showToast(r.error || 'Failed', 'error');
+    } catch (e) { showToast(e.message, 'error'); }
+  };
 
   const save = async () => {
     try {
@@ -6305,9 +6364,13 @@ const PerformancePage = () => {
           <h1 className="text-2xl font-bold">Performance</h1>
           <p className="text-sm text-slate-500 mt-1">Prospecting compared with your other lead channels</p>
         </div>
-        <Button variant="primary" icon="Plus" onClick={() => setEditing({ ...BENCH_BLANK, period_start: range.from, period_end: range.to })}>
-          Add channel figures
-        </Button>
+        <div className="flex gap-2 flex-wrap">
+          <Button variant="secondary" icon="Printer" onClick={openReport}>Client report</Button>
+          {!readOnly && <Button variant="secondary" icon="Mail" onClick={emailReport} disabled={!tenantId && !!(data && data.tenants)}>Email report</Button>}
+          {!readOnly && <Button variant="primary" icon="Plus" onClick={() => setEditing({ ...BENCH_BLANK, period_start: range.from, period_end: range.to })}>
+            Add channel figures
+          </Button>}
+        </div>
       </div>
 
       <Card>
@@ -6485,7 +6548,7 @@ const COMPANY_FIELD_GROUPS = [
   ] },
 ];
 
-const CompanyPage = () => {
+const CompanyPage = ({ readOnly }) => {
   const [tenantId, setTenantId] = useState('');
   const [data, setData] = useState(null);
   const [form, setForm] = useState({});
@@ -6602,6 +6665,9 @@ const CompanyPage = () => {
           </label>
           <label className="text-xs font-medium text-slate-500 block mb-1">Send it to</label>
           <Input value={form.digest_email || ''} onChange={v => set('digest_email', v)} placeholder="you@acme.com" />
+          <label className="flex items-center gap-2 text-sm mt-3">
+            <input type="checkbox" checked={!!form.monthly_report_enabled} onChange={e => set('monthly_report_enabled', e.target.checked)} /> Also email last month's results report on the 1st
+          </label>
         </Card>
         {data.admin_keys_editable && (
           <Card>
@@ -6624,13 +6690,13 @@ const CompanyPage = () => {
         )}
       </div>
 
-      <div className="flex flex-wrap items-center gap-3">
+      {!readOnly && <div className="flex flex-wrap items-center gap-3">
         <Button variant="primary" icon="Check" onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Save company settings'}</Button>
         <div className="flex items-center gap-2 ml-auto">
           <Input value={testTo} onChange={setTestTo} placeholder="send a test to…" className="w-56" />
           <Button variant="secondary" icon="Send" onClick={sendTest} disabled={!testTo}>Send test email</Button>
         </div>
-      </div>
+      </div>}
 
       <Card>
         <h3 className="font-semibold text-sm mb-1">Sending domains</h3>
@@ -6638,10 +6704,13 @@ const CompanyPage = () => {
         {data.domains.length === 0 ? <p className="text-sm text-slate-500">None assigned.</p> : (
           <div className="space-y-1.5">
             {data.domains.map(d => (
-              <div key={d.id} className="flex items-center gap-2 text-sm bg-slate-50 dark:bg-slate-800 rounded-lg px-3 py-2">
-                <span className="font-mono">{d.from_name} &lt;{d.from_email}&gt;</span>
-                <Badge variant={d.is_active ? 'success' : 'grey'}>{d.is_active ? 'Active' : 'Paused'}</Badge>
-                <span className="text-xs text-slate-500 ml-auto">cap {d.daily_cap}/day</span>
+              <div key={d.id} className="text-sm bg-slate-50 dark:bg-slate-800 rounded-lg px-3 py-2">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="font-mono break-all">{d.from_name} &lt;{d.from_email}&gt;</span>
+                  <Badge variant={d.is_active ? 'success' : 'grey'}>{d.is_active ? 'Active' : 'Paused'}</Badge>
+                  <span className="text-xs text-slate-500 ml-auto">cap {d.daily_cap}/day</span>
+                </div>
+                <DomainDnsCheck domain={d} readOnly={readOnly} />
               </div>
             ))}
           </div>
@@ -6906,7 +6975,7 @@ const InboxPage = ({ role, readOnly }) => {
   );
 };
 
-const BillingPage = ({ role }) => {
+const BillingPage = ({ role, readOnly }) => {
   const isAdmin = role === 'admin';
   const [tenantId, setTenantId] = useState('');
   const [companies, setCompanies] = useState([]);
@@ -6985,7 +7054,7 @@ const BillingPage = ({ role }) => {
               {b.current_period_end && <p className="text-xs text-slate-500 mt-1">{b.cancel_at_period_end ? 'Ends' : 'Renews'} on {b.current_period_end}</p>}
               <p className="text-xs text-slate-500 mt-1">API spend this month: ${Number(data.spend_this_month || 0).toFixed(2)}{data.spend_limit > 0 ? ' of $' + Number(data.spend_limit).toFixed(2) : ''}</p>
             </div>
-            {b.has_customer && <Button variant="secondary" icon="ExternalLink" onClick={() => go('/billing/portal', {})} disabled={busy}>Manage billing</Button>}
+            {b.has_customer && !readOnly && <Button variant="secondary" icon="ExternalLink" onClick={() => go('/billing/portal', {})} disabled={busy}>Manage billing</Button>}
           </div>
           {!b.stripe_configured && <p className="text-xs text-amber-600 mt-3">Online payments aren't set up yet{isAdmin ? ' — add the Stripe keys in Settings → API Keys.' : '.'}</p>}
         </Card>
@@ -7002,11 +7071,11 @@ const BillingPage = ({ role }) => {
                 <li>API budget: {pl.monthly_spend_limit != null ? '$' + pl.monthly_spend_limit + '/month' : 'standard'}</li>
                 <li>Users: {pl.max_users || 'unlimited'}</li>
               </ul>
-              <Button className="mt-4 w-full justify-center" variant={pl.id === b.plan_id ? 'secondary' : 'primary'}
+              {!readOnly && <Button className="mt-4 w-full justify-center" variant={pl.id === b.plan_id ? 'secondary' : 'primary'}
                 disabled={busy || pl.id === b.plan_id || !b.stripe_configured || !pl.stripe_price_id}
                 onClick={() => (b.has_customer && ['active', 'trialing', 'past_due'].includes(b.status)) ? go('/billing/portal', {}) : go('/billing/checkout', { plan_id: pl.id })}>
                 {pl.id === b.plan_id ? 'Current plan' : (b.has_customer && ['active', 'trialing', 'past_due'].includes(b.status)) ? 'Switch in billing portal' : 'Subscribe'}
-              </Button>
+              </Button>}
             </Card>
           ))}
         </div>
@@ -7164,6 +7233,7 @@ const App = ({ role = 'admin' }) => {
   }, [page]);
   const [accent, setAccent] = useAccentTheme(companyTheme);
   const isAdmin = role === 'admin';
+  const readOnly = role === 'viewer';
 
   useEffect(() => {
     api.get('/config').then(c => {
@@ -7306,13 +7376,19 @@ const App = ({ role = 'admin' }) => {
           </div>
         </header>
         <div className="p-5 lg:p-8 w-full">
-          {billingBlock && page !== 'billing' && (
+          {billingBlock && page !== 'billing' && !readOnly && (
             <div className="mb-5 p-3 rounded-lg border-2 border-amber-300 bg-amber-50 dark:bg-amber-900/20 text-sm text-amber-800 dark:text-amber-300 flex items-center justify-between gap-3 flex-wrap">
               <span>{billingBlock}</span>
               <Button size="sm" variant="secondary" onClick={() => setPage('billing')}>Go to Billing</Button>
             </div>
           )}
-          <CurrentPage setPage={setPage} role={role} />
+          {readOnly && (
+            <div className="mb-5 p-3 rounded-lg border border-accent-200 dark:border-accent-800 bg-accent-50 dark:bg-accent-900/20 text-sm text-accent-800 dark:text-accent-300 flex items-center gap-2">
+              <Icon name="Eye" className="w-4 h-4 shrink-0" />
+              <span>Read-only access — you can see your company's leads, replies and results, but not change anything.</span>
+            </div>
+          )}
+          <CurrentPage setPage={setPage} role={role} readOnly={readOnly} />
         </div>
       </main>
     </div>

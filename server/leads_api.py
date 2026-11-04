@@ -6825,8 +6825,9 @@ def run_daily_digest():
         print(f'[digest] failed: {e}')
 
 def digest_scheduler_loop():
-    """Fires run_daily_digest() once per calendar day, around 08:00 UTC."""
-    global _last_digest_date
+    """Fires run_daily_digest() once per calendar day, around 08:00 UTC,
+    and the monthly results reports on the 1st."""
+    global _last_digest_date, _last_monthly_report
     while True:
         try:
             now = time.gmtime()
@@ -6834,6 +6835,10 @@ def digest_scheduler_loop():
             if now.tm_hour == 8 and _last_digest_date != today:
                 run_daily_digest()
                 _last_digest_date = today
+            month = today[:7]
+            if now.tm_mday == 1 and now.tm_hour == 8 and _last_monthly_report != month:
+                _last_monthly_report = month
+                run_monthly_reports()
         except Exception as e:
             print(f'[digest] scheduler error: {e}')
         time.sleep(1800)
@@ -8942,7 +8947,7 @@ def icp_in_scope(icp_id, tenant_id):
 COMPANY_SETTING_KEYS = ('from_name', 'from_email', 'reply_to', 'company_name', 'company_address',
                         'footer_text', 'brand_name', 'brand_color', 'calendly_url',
                         'digest_enabled', 'digest_email', 'imap_host', 'imap_user', 'imap_pass', 'theme',
-                        'calendly_signing_key')
+                        'calendly_signing_key', 'monthly_report_enabled')
 DASHBOARD_THEMES = ('controva', 'ocean', 'emerald', 'violet', 'sunset', 'graphite')
 COMPANY_ADMIN_KEYS = ('daily_send_limit', 'monthly_spend_limit')
 COMPANY_SECRET_KEYS = ('imap_pass', 'calendly_signing_key')
@@ -9106,7 +9111,7 @@ PAID_POST_PATHS = frozenset((
     '/run-pipeline', '/research/queue', '/icp/run', '/workflows/run', '/check-replies',
     '/keywords', '/serp', '/competitor', '/ecommerce', '/product-hunt', '/find-emails', '/find-people',
     '/find-domain', '/domain-intel', '/wayback', '/trends', '/social-scout', '/verify-email',
-    '/backlinks', '/tech-stack', '/company/test-email'))
+    '/backlinks', '/tech-stack', '/company/test-email', '/performance/report/email'))
 PAID_LEAD_ACTIONS = frozenset(('regenerate-email', 'generate-mockup', 'research', 'send'))
 _paid_hits = {}
 
@@ -10207,6 +10212,303 @@ def inbox_action(item, action, username):
     _mark_handled(item['id'], username, action)
     return {'success': True, 'outcome': action}
 
+# ──────────────────────────────────────────────────────────────
+#  M19: CLIENT RESULTS REPORT, DELIVERABILITY CHECK, READ-ONLY VIEWERS
+#
+#  Report: one printable page per company and period (the Performance
+#  numbers, the replies that showed interest, the meetings), opened from
+#  the Performance page or emailed on the 1st for the month before.
+#  Deliverability: SPF / DKIM / DMARC / MX lookups for each sending
+#  domain, with what to fix. Viewer: a login that can read its company's
+#  data and change nothing.
+# ──────────────────────────────────────────────────────────────
+VIEWER_POST_OK = frozenset(('/auth/logout', '/auth/change-password', '/auth/check',
+                            '/research-history/list'))   # reads sent as POST
+USER_ROLES_CREATABLE = ('client', 'viewer')
+_last_monthly_report = None
+
+def _esc(v):
+    import html as _html
+    return _html.escape('' if v is None else str(v))
+
+def _money(v):
+    return '—' if v is None else '$' + f'{float(v):,.2f}'
+
+def _pct(v):
+    return '—' if v is None else f'{float(v):.1f}%'
+
+def report_highlights(tenant_id, date_from, date_to):
+    """Interested replies and booked meetings in the period, for the report."""
+    lt, tp = ("AND l.tenant_id = %s", (tenant_id,)) if tenant_id else ("", ())
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute(f"""SELECT l.business_name, l.city, o.reply_digest, o.replied_at
+                      FROM outreach_log o JOIN leads l ON l.id = o.lead_id
+                     WHERE o.reply_classification = 'interested'
+                       AND o.replied_at >= %s AND o.replied_at < %s::date + 1 {lt}
+                     ORDER BY o.replied_at DESC LIMIT 10""", (date_from, date_to, *tp))
+    interested = [{'business': r[0] or '', 'city': r[1] or '', 'digest': r[2] or '',
+                   'date': r[3].date().isoformat() if r[3] else ''} for r in cur.fetchall()]
+    cur.execute(f"""SELECT l.business_name, l.city, l.meeting_booked_at, l.meeting_attended, l.deal_stage, l.deal_value
+                      FROM leads l
+                     WHERE l.meeting_booked AND l.meeting_booked_at >= %s AND l.meeting_booked_at < %s::date + 1 {lt}
+                     ORDER BY l.meeting_booked_at DESC LIMIT 15""", (date_from, date_to, *tp))
+    meetings = [{'business': r[0] or '', 'city': r[1] or '',
+                 'date': r[2].date().isoformat() if r[2] else '',
+                 'attended': r[3], 'stage': r[4] or 'open',
+                 'value': float(r[5]) if r[5] is not None else None} for r in cur.fetchall()]
+    cur.close(); conn.close()
+    return interested, meetings
+
+def render_results_report(tenant_id, date_from, date_to, for_email=False):
+    """Self-contained HTML: inline styles only, every value escaped. In a
+    browser it prints to a clean PDF; in email it reads as-is."""
+    rep = performance_report(tenant_id, date_from, date_to)
+    interested, meetings = report_highlights(tenant_id, date_from, date_to)
+    st = get_tenant_settings(tenant_id) if tenant_id else {}
+    op = tenant_is_operator(tenant_id) if tenant_id else True
+    name = st.get('brand_name') or st.get('company_name') or \
+           ((CONFIG.get('client_brand_name') or COMPANY_NAME) if op else '')
+    if not name and tenant_id:
+        try:
+            conn = db_conn(); cur = conn.cursor()
+            cur.execute("SELECT name FROM tenants WHERE id = %s", (tenant_id,))
+            row = cur.fetchone(); cur.close(); conn.close()
+            name = row[0] if row else ''
+        except Exception:
+            pass
+    color = st.get('brand_color') or ''
+    color = color if re.match(r'^#[0-9a-fA-F]{6}$', color) else '#e11d48'
+    p = rep['prospecting']
+    tiles = [('Leads found', f"{p['leads']:,}"), ('Qualified', f"{p['qualified_leads']:,}"),
+             ('Contacted', f"{p['contacted']:,}"), ('Replies', f"{p['replied']:,}"),
+             ('Interested', f"{p['positive_responses']:,}"), ('Meetings booked', f"{p['meetings_booked']:,}"),
+             ('Deals won', f"{p['customers']:,}"), ('Revenue won', _money(p['revenue']))]
+    funnel = [('Positive response rate', _pct(p['positive_response_rate']), 'interested replies per business contacted'),
+              ('Qualified share', _pct(p['icp_match_pct']), 'leads that met the qualification criteria'),
+              ('Meeting attendance', _pct(p['attendance_rate']), 'booked meetings that were attended'),
+              ('Lead to customer', _pct(p['lead_to_customer_rate']), 'qualified leads that became customers'),
+              ('Spend', _money(p['spend']), 'API cost plus any extra costs entered'),
+              ('Cost per qualified lead', _money(p['cost_per_qualified_lead']), ''),
+              ('Cost per customer', _money(p['customer_acquisition_cost']), '')]
+    td = 'padding:8px 10px;border-bottom:1px solid #eee;font-size:13px;'
+    th = 'padding:8px 10px;border-bottom:2px solid #ddd;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#666;text-align:left;'
+    h = []
+    h.append(f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{_esc(name or 'Prospecting')} results {_esc(date_from)} to {_esc(date_to)}</title>
+<style>@media print {{ .noprint {{ display:none !important; }} body {{ margin:0; }} }} @page {{ margin:14mm; }}</style>
+</head><body style="margin:0;background:#f6f7f9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#1f2937;">
+<div style="max-width:820px;margin:0 auto;padding:28px 20px;background:#fff;">""")
+    if not for_email:
+        h.append(f"""<div class="noprint" style="text-align:right;margin-bottom:12px;">
+<button onclick="window.print()" style="background:{color};color:#fff;border:0;border-radius:8px;padding:8px 14px;font-size:13px;cursor:pointer;">Print / save as PDF</button></div>""")
+    h.append(f"""<div style="border-left:5px solid {color};padding-left:14px;margin-bottom:22px;">
+<div style="font-size:12px;color:#6b7280;text-transform:uppercase;letter-spacing:.06em;">Prospecting results</div>
+<div style="font-size:24px;font-weight:700;margin-top:2px;">{_esc(name or 'All companies')}</div>
+<div style="font-size:13px;color:#6b7280;margin-top:2px;">{_esc(date_from)} to {_esc(date_to)}</div></div>
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:separate;border-spacing:8px;margin:0 -8px 14px;"><tr>""")
+    for i, (label, val) in enumerate(tiles):
+        if i and i % 4 == 0:
+            h.append('</tr><tr>')
+        h.append(f"""<td width="25%" style="background:#f9fafb;border:1px solid #eef0f3;border-radius:10px;padding:12px;vertical-align:top;">
+<div style="font-size:11px;color:#6b7280;">{_esc(label)}</div><div style="font-size:22px;font-weight:700;margin-top:4px;">{_esc(val)}</div></td>""")
+    h.append('</tr></table>')
+    h.append(f'<h2 style="font-size:15px;margin:22px 0 6px;">How it converts</h2><table width="100%" cellspacing="0" style="border-collapse:collapse;">')
+    for label, val, note in funnel:
+        h.append(f'<tr><td style="{td}">{_esc(label)}<div style="font-size:11px;color:#9ca3af;">{_esc(note)}</div></td>'
+                 f'<td style="{td}text-align:right;font-weight:600;">{_esc(val)}</td></tr>')
+    h.append('</table>')
+    if rep['channels']:
+        h.append(f"""<h2 style="font-size:15px;margin:22px 0 6px;">Compared with other channels</h2>
+<table width="100%" cellspacing="0" style="border-collapse:collapse;"><tr><th style="{th}">Channel</th><th style="{th}text-align:right;">Spend</th>
+<th style="{th}text-align:right;">Qualified</th><th style="{th}text-align:right;">Cost / qualified</th><th style="{th}text-align:right;">Customers</th></tr>""")
+        for c in [p] + rep['channels']:
+            h.append(f"""<tr><td style="{td}{'font-weight:600;' if c is p else ''}">{_esc(c['label'])}</td><td style="{td}text-align:right;">{_esc(_money(c['spend']))}</td>
+<td style="{td}text-align:right;">{_esc(c['qualified_leads'])}</td><td style="{td}text-align:right;">{_esc(_money(c['cost_per_qualified_lead']))}</td>
+<td style="{td}text-align:right;">{_esc(c['customers'])}</td></tr>""")
+        h.append('</table>')
+    if interested:
+        h.append(f'<h2 style="font-size:15px;margin:22px 0 6px;">Businesses that said yes</h2><table width="100%" cellspacing="0" style="border-collapse:collapse;">')
+        for r in interested:
+            h.append(f'<tr><td style="{td}"><b>{_esc(r["business"])}</b>{" · " + _esc(r["city"]) if r["city"] else ""}'
+                     f'<div style="font-size:12px;color:#6b7280;">{_esc(r["digest"])}</div></td>'
+                     f'<td style="{td}text-align:right;color:#6b7280;white-space:nowrap;">{_esc(r["date"])}</td></tr>')
+        h.append('</table>')
+    if meetings:
+        h.append(f"""<h2 style="font-size:15px;margin:22px 0 6px;">Meetings booked</h2><table width="100%" cellspacing="0" style="border-collapse:collapse;">
+<tr><th style="{th}">Business</th><th style="{th}">Date</th><th style="{th}">Attended</th><th style="{th}">Deal</th></tr>""")
+        for m in meetings:
+            att = 'yes' if m['attended'] else ('no' if m['attended'] is False else '—')
+            deal = m['stage'] + (f" · {_money(m['value'])}" if m['value'] else '')
+            h.append(f'<tr><td style="{td}">{_esc(m["business"])}</td><td style="{td}">{_esc(m["date"])}</td>'
+                     f'<td style="{td}">{_esc(att)}</td><td style="{td}">{_esc(deal)}</td></tr>')
+        h.append('</table>')
+    if not (p['leads'] or p['contacted'] or interested or meetings):
+        h.append('<p style="font-size:13px;color:#6b7280;margin-top:20px;">No prospecting activity in this period.</p>')
+    h.append(f"""<p style="font-size:11px;color:#9ca3af;margin-top:28px;border-top:1px solid #eee;padding-top:10px;">
+Counts are for the period shown: leads by the date they were found, replies and meetings by the date they happened.
+Generated {_esc(time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime()))}.</p></div></body></html>""")
+    return ''.join(h)
+
+def previous_month_range(today=None):
+    from datetime import date as _date, timedelta as _td
+    today = today or _date.today()
+    last = today.replace(day=1) - _td(days=1)
+    return last.replace(day=1).isoformat(), last.isoformat()
+
+def email_results_report(tenant_id, recipient, date_from, date_to):
+    html_body = render_results_report(tenant_id, date_from, date_to, for_email=True)
+    rep = performance_report(tenant_id, date_from, date_to)['prospecting']
+    st = get_tenant_settings(tenant_id)
+    brand = st.get('brand_name') or st.get('company_name') or 'Prospecting'
+    text = (f"{brand} prospecting results, {date_from} to {date_to}\n\n"
+            f"Leads found: {rep['leads']}\nQualified: {rep['qualified_leads']}\nContacted: {rep['contacted']}\n"
+            f"Replies: {rep['replied']} ({rep['positive_responses']} interested)\n"
+            f"Meetings booked: {rep['meetings_booked']}\nDeals won: {rep['customers']} ({_money(rep['revenue'])})\n")
+    return send_email_via_resend(recipient, f'{brand} prospecting results: {date_from} to {date_to}',
+                                 text, html_body, skip_footer=True)
+
+def run_monthly_reports():
+    """On the 1st: last month's report to every company that turned it on."""
+    date_from, date_to = previous_month_range()
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("""SELECT tenant_id, settings->>'digest_email' FROM tenant_settings
+                       WHERE (settings->>'monthly_report_enabled')::boolean IS TRUE
+                         AND COALESCE(settings->>'digest_email','') <> ''""")
+        rows = cur.fetchall(); cur.close(); conn.close()
+    except Exception as e:
+        print(f'[monthly-report] lookup failed: {e}'); return 0
+    sent = 0
+    for tid, recipient in rows:
+        try:
+            r = email_results_report(str(tid), recipient, date_from, date_to)
+            sent += 1 if r.get('success') else 0
+            if not r.get('success'):
+                print(f'[monthly-report] company {tid}: {str(r.get("error"))[:200]}')
+        except Exception as e:
+            print(f'[monthly-report] company {tid} failed: {e}')
+    print(f'[monthly-report] {date_from}..{date_to}: sent {sent}/{len(rows)}')
+    return sent
+
+# ── Deliverability (DNS) ─────────────────────────────────────────
+_DOMAIN_RE = re.compile(r'^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$')
+
+def ensure_deliverability_columns():
+    conn = db_conn(); cur = conn.cursor()
+    cur.execute("ALTER TABLE sending_domains ADD COLUMN IF NOT EXISTS dns_report JSONB")
+    cur.execute("ALTER TABLE sending_domains ADD COLUMN IF NOT EXISTS dns_checked_at TIMESTAMPTZ")
+    conn.commit(); cur.close(); conn.close()
+
+def _txt(name):
+    """TXT strings at name; [] when the name has none."""
+    import dns.resolver, dns.exception
+    r = dns.resolver.Resolver(); r.lifetime = 5.0
+    try:
+        ans = r.resolve(name, 'TXT')
+    except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+        return []
+    return [b''.join(rd.strings).decode('utf-8', 'replace') for rd in ans]
+
+def _mx(name):
+    import dns.resolver
+    r = dns.resolver.Resolver(); r.lifetime = 5.0
+    try:
+        return sorted(str(rd.exchange).rstrip('.').lower() for rd in r.resolve(name, 'MX'))
+    except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+        return []
+
+def _name_exists(name):
+    import dns.resolver
+    r = dns.resolver.Resolver(); r.lifetime = 5.0
+    try:
+        r.resolve(name, 'SOA')
+    except dns.resolver.NXDOMAIN:
+        return False
+    except dns.resolver.NoAnswer:
+        pass
+    return True
+
+def check_domain_dns(domain, dkim_selector='resend'):
+    """What the receiving mail servers will look up for this domain.
+    Each check: {key, label, status ok|warn|fail, value, fix}."""
+    domain = (domain or '').strip().lower().rstrip('.')
+    if not _DOMAIN_RE.match(domain):
+        return {'domain': domain, 'status': 'fail', 'error': 'not a valid domain name', 'checks': []}
+    import dns.exception
+    checks = []
+    def add(key, label, status, value, fix=''):
+        checks.append({'key': key, 'label': label, 'status': status, 'value': (value or '')[:400], 'fix': fix})
+    try:
+        if not _name_exists(domain):
+            return {'domain': domain, 'status': 'fail', 'checks': [],
+                    'error': f'{domain} does not exist in DNS. Check the spelling, or add the domain at your DNS provider first.'}
+        root_txt = _txt(domain)
+        spf_root = [t for t in root_txt if t.lower().startswith('v=spf1')]
+        send_txt = _txt('send.' + domain)
+        spf_send = [t for t in send_txt if t.lower().startswith('v=spf1')]
+        if len(spf_root) > 1:
+            add('spf', 'SPF', 'fail', ' | '.join(spf_root),
+                'There are several SPF records on the domain. Receivers treat that as an error. Merge them into one.')
+        elif spf_send or spf_root:
+            rec = (spf_send or spf_root)[0]
+            ok = any(x in rec.lower() for x in ('amazonses.com', 'resend', 'include:'))
+            ends = rec.strip().lower().split()[-1] if rec.strip() else ''
+            if ends == '+all':
+                add('spf', 'SPF', 'fail', rec, 'The record ends in +all, which lets anyone send as this domain. Use ~all or -all.')
+            else:
+                add('spf', 'SPF', 'ok' if ok else 'warn', rec,
+                    '' if ok else 'The SPF record does not include your email provider. Add the SPF record your provider shows for this domain.')
+        else:
+            add('spf', 'SPF', 'fail', '', f'No SPF record. Add the TXT record your email provider shows for send.{domain} (Resend: "v=spf1 include:amazonses.com ~all").')
+        dkim_name = f'{dkim_selector}._domainkey.{domain}'
+        dkim = [t for t in _txt(dkim_name) if 'p=' in t]
+        if dkim:
+            add('dkim', 'DKIM', 'ok', dkim_name)
+        else:
+            add('dkim', 'DKIM', 'fail', '', f'No DKIM key at {dkim_name}. Add the DKIM TXT record from your email provider. Without it, Gmail and Outlook treat mail as unauthenticated.')
+        dmarc = [t for t in _txt('_dmarc.' + domain) if t.lower().startswith('v=dmarc1')]
+        if not dmarc:
+            add('dmarc', 'DMARC', 'fail', '', f'No DMARC record. Gmail and Yahoo require one from bulk senders. Start with a TXT record at _dmarc.{domain}: "v=DMARC1; p=none; rua=mailto:dmarc@{domain}".')
+        else:
+            pol = (re.search(r'\bp\s*=\s*(\w+)', dmarc[0], re.I) or [None, ''])[1].lower()
+            if pol in ('quarantine', 'reject'):
+                add('dmarc', 'DMARC', 'ok', dmarc[0])
+            else:
+                add('dmarc', 'DMARC', 'warn', dmarc[0], 'The policy is p=none (monitoring only). That meets the requirement. Move to p=quarantine once reports look clean.')
+        mx_root = _mx(domain)
+        add('mx', 'Inbox (MX)', 'ok' if mx_root else 'warn', ', '.join(mx_root[:3]),
+            '' if mx_root else 'No mail server for the domain. Replies sent to the from-address will bounce unless a reply-to address on another domain is set.')
+        mx_send = _mx('send.' + domain)
+        add('return_path', 'Bounce handling (send.)', 'ok' if mx_send else 'warn', ', '.join(mx_send[:2]),
+            '' if mx_send else f'No MX on send.{domain}. Add the MX record your email provider shows, so bounces are processed.')
+    except dns.exception.Timeout:
+        return {'domain': domain, 'status': 'fail', 'error': 'DNS lookups timed out. Try again in a minute.', 'checks': checks}
+    except Exception as e:
+        print(f'[dns] {domain}: {e}')
+        return {'domain': domain, 'status': 'fail', 'error': 'DNS lookup failed', 'checks': checks}
+    worst = 'fail' if any(c['status'] == 'fail' for c in checks) else \
+            ('warn' if any(c['status'] == 'warn' for c in checks) else 'ok')
+    return {'domain': domain, 'status': worst, 'checks': checks,
+            'checked_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}
+
+def check_sending_domain(domain_id, scope):
+    """Run and store the DNS check for one sending domain the caller may
+    see (scope None = admin, any domain)."""
+    conn = db_conn(); cur = conn.cursor()
+    if scope is None:
+        cur.execute("SELECT id, domain FROM sending_domains WHERE id = %s", (domain_id,))
+    else:
+        cur.execute("SELECT id, domain FROM sending_domains WHERE id = %s AND tenant_id = %s", (domain_id, scope))
+    row = cur.fetchone()
+    if not row:
+        cur.close(); conn.close()
+        return None
+    report = check_domain_dns(row[1])
+    cur.execute("UPDATE sending_domains SET dns_report = %s, dns_checked_at = NOW() WHERE id = %s",
+                (json.dumps(report), row[0]))
+    conn.commit(); cur.close(); conn.close()
+    return report
+
 def ensure_data_erasure_table():
     conn = db_conn(); cur = conn.cursor()
     cur.execute("""
@@ -10620,6 +10922,28 @@ class Handler(BaseHTTPRequestHandler):
                 return fwd[:64]
         return ip
 
+    def report_range(self):
+        """(tenant, from, to) for a report request, or None after sending
+        the error. A client always gets its own company; admin may name one
+        (tenant_id) or get every company together."""
+        from datetime import date as _date, timedelta as _td
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        try:
+            date_to = _date.fromisoformat((qs.get('to') or [''])[0] or _date.today().isoformat())
+            date_from = _date.fromisoformat((qs.get('from') or [''])[0] or (date_to - _td(days=29)).isoformat())
+        except ValueError:
+            self.send_json(400, {'error': 'from/to must be YYYY-MM-DD'}); return None
+        if date_from > date_to or (date_to - date_from).days > 400:
+            self.send_json(400, {'error': 'choose a period of at most 400 days'}); return None
+        scope = self.scope_tenant()
+        if scope is None:
+            wanted = (qs.get('tenant_id') or [''])[0]
+            if wanted:
+                scope = self.target_company(wanted)
+                if not scope:
+                    self.send_json(404, {'error': 'unknown company'}); return None
+        return scope, date_from.isoformat(), date_to.isoformat()
+
     def job_visible(self, job):
         """Admin sees every job; a client only its own company's."""
         scope = self.scope_tenant()
@@ -10918,10 +11242,13 @@ class Handler(BaseHTTPRequestHandler):
                 conn = db_conn(); cur = conn.cursor()
                 cur.execute("SELECT name FROM tenants WHERE id = %s", (tid,))
                 row = cur.fetchone()
-                cur.execute("""SELECT d.id, d.domain, d.from_email, d.from_name, d.daily_cap, d.is_active, d.paused_reason
+                cur.execute("""SELECT d.id, d.domain, d.from_email, d.from_name, d.daily_cap, d.is_active, d.paused_reason,
+                                      d.dns_report, d.dns_checked_at
                                FROM sending_domains d WHERE d.tenant_id = %s ORDER BY d.id""", (tid,))
                 domains = [dict(zip(['id', 'domain', 'from_email', 'from_name', 'daily_cap', 'is_active',
-                                     'paused_reason'], r)) for r in cur.fetchall()]
+                                     'paused_reason', 'dns_report', 'dns_checked_at'], r)) for r in cur.fetchall()]
+                for d in domains:
+                    d['dns_checked_at'] = d['dns_checked_at'].isoformat() if d['dns_checked_at'] else None
                 companies = None
                 if is_admin:
                     cur.execute("""SELECT t.id, t.name, string_agg(u.username, ', ' ORDER BY u.username)
@@ -10984,14 +11311,14 @@ class Handler(BaseHTTPRequestHandler):
                            COUNT(o.id) FILTER (WHERE o.sent_at > NOW() - INTERVAL '24 hours') as sent_today,
                            COUNT(o.id) FILTER (WHERE o.sent_at > NOW() - INTERVAL '7 days') as sent_7d,
                            COUNT(o.id) FILTER (WHERE o.sent_at > NOW() - INTERVAL '7 days' AND o.status IN ('bounced','complained')) as bad_7d,
-                           d.tenant_id::text, t.name
+                           d.tenant_id::text, t.name, d.dns_report
                     FROM sending_domains d LEFT JOIN outreach_log o ON o.sending_domain_id = d.id
                     LEFT JOIN tenants t ON t.id = d.tenant_id
                     GROUP BY d.id, t.name ORDER BY d.id ASC
                 """)
                 rows = cur.fetchall(); cur.close(); conn.close()
                 domains = [dict(zip(['id','domain','from_email','from_name','daily_cap','is_active',
-                                     'paused_reason','sent_today','sent_7d','bad_7d','tenant_id','company'], r))
+                                     'paused_reason','sent_today','sent_7d','bad_7d','tenant_id','company','dns_report'], r))
                            for r in rows]
                 self.send_json(200, {'domains': domains, 'automation_mode': CONFIG.get('outreach_automation_mode', 'off')})
             except Exception as e:
@@ -11286,6 +11613,15 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
+        elif p == '/performance/report':
+            try:
+                rng = self.report_range()
+                if rng:
+                    scope, date_from, date_to = rng
+                    self.send_html(render_results_report(scope, date_from, date_to))
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
         elif p == '/performance':
             try:
                 from datetime import date as _date, timedelta as _td
@@ -11439,6 +11775,9 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if not self.require_auth():
+            return
+        if p not in VIEWER_POST_OK and get_user_role(self.current_username() or '') == 'viewer':
+            self.send_json(403, {'error': 'This is a read-only login — ask your company admin to make changes'})
             return
         if self.paid_action_blocked(p, body):
             return
@@ -11696,6 +12035,43 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200 if result.get('success') else 400, result)
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
+        elif p.startswith('/sending-domains/') and p.endswith('/dns'):
+            try:
+                did = p.split('/')[2]
+                if not did.isdigit():
+                    self.send_json(404, {'error': 'Sending domain not found'}); return
+                report = check_sending_domain(int(did), self.scope_tenant())
+                if report is None:
+                    self.send_json(404, {'error': 'Sending domain not found'}); return
+                self.send_json(200, report)
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif p == '/performance/report/email':
+            try:
+                tid = self.target_company(body.get('tenant_id'))
+                if not tid:
+                    self.send_json(404, {'error': 'unknown company'}); return
+                from datetime import date as _date
+                try:
+                    date_from = _date.fromisoformat(str(body.get('from') or ''))
+                    date_to = _date.fromisoformat(str(body.get('to') or ''))
+                except ValueError:
+                    self.send_json(400, {'error': 'from/to must be YYYY-MM-DD'}); return
+                if date_from > date_to or (date_to - date_from).days > 400:
+                    self.send_json(400, {'error': 'choose a period of at most 400 days'}); return
+                to = get_tenant_settings(tid).get('digest_email')
+                if not to:
+                    self.send_json(400, {'error': 'Set the digest email in Company settings first — the report goes there'}); return
+                r = email_results_report(tid, to, date_from.isoformat(), date_to.isoformat())
+                if r.get('success'):
+                    self.send_json(200, {'success': True, 'sent_to': to})
+                else:
+                    print(f'[report-email] {tid}: {str(r.get("error"))[:200]}')
+                    self.send_json(400, {'success': False, 'error': 'The email provider refused the message'})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
         elif p == '/billing/checkout':
             try:
                 tid = self.target_company(body.get('tenant_id'))
@@ -11752,7 +12128,7 @@ class Handler(BaseHTTPRequestHandler):
                     if k not in incoming:
                         continue
                     v = incoming[k]
-                    if k == 'digest_enabled':
+                    if k in ('digest_enabled', 'monthly_report_enabled'):
                         v = bool(v)
                     elif k == 'daily_send_limit':
                         try:
@@ -12368,6 +12744,11 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 username = (body.get('username') or '').strip().lower()
                 password = str(body.get('password') or '')
+                new_role = body.get('role') or 'client'
+                if new_role not in USER_ROLES_CREATABLE:
+                    self.send_json(400, {'error': 'role must be client or viewer'}); return
+                if new_role == 'viewer' and not body.get('tenant_id'):
+                    self.send_json(400, {'error': 'a viewer joins an existing company — choose one'}); return
                 if not username or not re.match(r'^[a-z0-9_-]{3,50}$', username):
                     self.send_json(400, {'error': 'username must be 3-50 chars: letters, numbers, _ or -'}); return
                 if len(password) < 10:
@@ -12397,10 +12778,10 @@ class Handler(BaseHTTPRequestHandler):
                 salt = _h_secrets.token_hex(16)
                 pwhash = auth_hash(password, salt)
                 cur.execute("""INSERT INTO auth_users (username, salt, pwhash, role, tenant_id)
-                               VALUES (%s, %s, %s, 'client', %s)""",
-                            (username, salt, pwhash, new_tenant_id))
+                               VALUES (%s, %s, %s, %s, %s)""",
+                            (username, salt, pwhash, new_role, new_tenant_id))
                 conn.commit(); cur.close(); conn.close()
-                self.send_json(200, {'success': True, 'username': username, 'role': 'client'})
+                self.send_json(200, {'success': True, 'username': username, 'role': new_role})
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
@@ -12767,6 +13148,7 @@ def migrate_all():
         ensure_leadhunter_tables()
         ensure_billing_tables()
         ensure_inbox_columns()
+        ensure_deliverability_columns()
         print('Schema migration: OK')
     except Exception as e:
         print(f'Schema migration warning (non-fatal): {e}')
