@@ -10,15 +10,18 @@ Limits : 100 req/min per key
 Port   : 8081
 
 Quickstart:
-    python server/controva_api.py
+    API_MASTER_SECRET=<long-random-string> python server/controva_api.py
+
+    API_MASTER_SECRET  required to create keys (key creation is refused if unset)
+    API_HOST           bind address, default 127.0.0.1 (set 0.0.0.0 to expose)
 
 Create first key:
     curl -X POST http://localhost:8081/api/v1/keys \
       -H "Content-Type: application/json" \
       -d '{"master_secret":"YOUR_MASTER_SECRET","name":"my-app","scopes":["read","write"]}'
 """
-import json, time, hashlib, os, threading, urllib.request, urllib.parse, io, csv as csvlib
-import psycopg2, secrets, uuid
+import json, time, hashlib, os, threading, urllib.request, urllib.parse, urllib.error, io, csv as csvlib
+import psycopg2, secrets, uuid, hmac, socket, ipaddress
 
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
@@ -27,6 +30,7 @@ from socketserver import ThreadingMixIn
 #  Config
 # ─────────────────────────────────────────────────────────
 API_PORT   = int(os.environ.get('API_PORT', 8081))
+API_HOST   = os.environ.get('API_HOST', '127.0.0.1')   # loopback unless explicitly exposed
 API_VER    = 'v1'
 BASE       = f'/api/{API_VER}'
 RATE_LIMIT = 100          # req / minute per key
@@ -71,6 +75,39 @@ MASTER_KEY    = os.environ.get('API_MASTER_SECRET', '') or _shared.get('master_s
 SERVICE_TOKEN = os.environ.get('SERVICE_TOKEN', '') or _shared.get('service_token', '')
 
 
+
+# ─────────────────────────────────────────────────────────
+#  SSRF guard  (caller-supplied URLs)
+# ─────────────────────────────────────────────────────────
+def _blocked_url(url):
+    """Return a reason string if url must not be fetched, else None."""
+    try:
+        u = urllib.parse.urlparse(url)
+        host, port = u.hostname, u.port
+    except ValueError:
+        return 'malformed URL'
+    if u.scheme not in ('http', 'https'):
+        return 'only http/https URLs are allowed'
+    if not host:
+        return 'URL has no hostname'
+    try:
+        infos = socket.getaddrinfo(host, port or (443 if u.scheme == 'https' else 80),
+                                   proto=socket.IPPROTO_TCP)
+    except socket.gaierror:
+        return 'hostname does not resolve'
+    if not infos:
+        return 'hostname does not resolve'
+    for info in infos:
+        addr = info[4][0].split('%')[0]
+        if not ipaddress.ip_address(addr).is_global:
+            return 'hostname resolves to a non-public address'
+    return None
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, 'redirects are not followed', headers, fp)
+
+_no_redirect_opener = urllib.request.build_opener(_NoRedirect)
 
 # ─────────────────────────────────────────────────────────
 #  Rate limiter  (in-memory)
@@ -166,7 +203,7 @@ def validate_key(raw):
         pass
     # File fallback
     for k in _load_keys():
-        if k.get('key_hash') == h and k.get('is_active', True):
+        if hmac.compare_digest(str(k.get('key_hash', '')), h) and k.get('is_active', True):
             return {'scopes': k.get('scopes', ['read'])}
     return None
 
@@ -674,7 +711,12 @@ class H(BaseHTTPRequestHandler):
             return self.err(e)
 
     def create_key(self, body):
-        if body.get('master_secret') != MASTER_KEY:
+        if not MASTER_KEY:
+            return self._resp(503, {'error': 'Key creation disabled: set API_MASTER_SECRET '
+                                    'on the server and restart.', 'status': 503})
+        given = body.get('master_secret')
+        if not isinstance(given, str) or not hmac.compare_digest(
+                given.encode(), MASTER_KEY.encode()):
             return self.unauth('Invalid master_secret')
         name   = (body.get('name') or 'unnamed').strip()
         scopes = [s for s in body.get('scopes', ['read'])
@@ -721,9 +763,13 @@ class H(BaseHTTPRequestHandler):
             return self.err(e)
 
     def test_webhook(self, body):
-        url = (body.get('url') or '').strip()
+        url = body.get('url')
+        url = url.strip() if isinstance(url, str) else ''
         if not url:
             return self.bad('url is required')
+        reason = _blocked_url(url)
+        if reason:
+            return self.bad(f'url blocked: {reason}')
         payload = json.dumps({
             'event': 'test', 'source': 'Controva API',
             'ts': int(time.time()),
@@ -733,7 +779,7 @@ class H(BaseHTTPRequestHandler):
             req = urllib.request.Request(
                 url, data=payload, method='POST',
                 headers={'Content-Type': 'application/json', 'X-Controva-Event': 'test'})
-            resp = urllib.request.urlopen(req, timeout=10)
+            resp = _no_redirect_opener.open(req, timeout=10)
             return self.ok({'success': True, 'http_status': resp.status, 'url': url})
         except Exception as e:
             return self.ok({'success': False, 'error': str(e), 'url': url})
@@ -774,7 +820,7 @@ class H(BaseHTTPRequestHandler):
                 f'POST {BASE}/webhooks/test':       'Test a webhook URL [admin]',
             },
             'quick_examples': {
-                'create_key':   f'curl -X POST http://localhost:{API_PORT}{BASE}/keys -H "Content-Type: application/json" -d \'{{"master_secret":"{MASTER_KEY}","name":"my-app","scopes":["read","write"]}}\'',
+                'create_key':   f'curl -X POST http://localhost:{API_PORT}{BASE}/keys -H "Content-Type: application/json" -d \'{{"master_secret":"YOUR_MASTER_SECRET","name":"my-app","scopes":["read","write"]}}\'',
                 'search':       f'curl -X POST http://localhost:{API_PORT}{BASE}/search -H "X-API-Key: YOUR_KEY" -H "Content-Type: application/json" -d \'{{"query":"plumbers in Dallas USA"}}\'',
                 'list_leads':   f'curl "http://localhost:{API_PORT}{BASE}/leads?city=dallas&per_page=20" -H "X-API-Key: YOUR_KEY"',
                 'export_csv':   f'curl -X POST http://localhost:{API_PORT}{BASE}/leads/export -H "X-API-Key: YOUR_KEY" -H "Content-Type: application/json" -d \'{{"format":"csv","niche":"plumber"}}\' -o leads.csv',
@@ -791,11 +837,11 @@ class Server(ThreadingMixIn, HTTPServer):
 
 if __name__ == '__main__':
     ensure_tables()
-    srv = Server(('0.0.0.0', API_PORT), H)
+    srv = Server((API_HOST, API_PORT), H)
     print('=' * 62)
     print('  Controva Platform Public API  v1.0')
     print('=' * 62)
-    print(f'  Listening  : http://0.0.0.0:{API_PORT}')
+    print(f'  Listening  : http://{API_HOST}:{API_PORT}')
     print(f'  Health     : http://localhost:{API_PORT}{BASE}/health')
     print(f'  Docs       : http://localhost:{API_PORT}{BASE}/docs')
     print(f'  Platform   : {PLATFORM}')
@@ -803,6 +849,8 @@ if __name__ == '__main__':
     print('  Create first API key:')
     print(f'  curl -X POST http://localhost:{API_PORT}{BASE}/keys \\')
     print(f'       -H "Content-Type: application/json" \\')
-    print(f'       -d \'{{"master_secret":"{MASTER_KEY}","name":"my-app","scopes":["read","write"]}}\'')
+    print(f'       -d \'{{"master_secret":"YOUR_MASTER_SECRET","name":"my-app","scopes":["read","write"]}}\'')
+    if not MASTER_KEY:
+        print('  WARNING: API_MASTER_SECRET not set - key creation is disabled')
     print('=' * 62)
     srv.serve_forever()

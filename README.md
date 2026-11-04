@@ -829,6 +829,26 @@ Before going to production:
 
 ## Changelog
 
+### v9.2 — November 2026 (themes, security audit)
+
+**New features**
+- **Colour themes**: Controva, Ocean, Emerald, Violet, Sunset, Graphite — each in light and dark. Users pick one in the sidebar (remembered per browser); a company sets its users' default on the Company page.
+- **Per-company API budget**: client companies' paid actions (search, enrichment, AI, research tools) stop when the month's budget is used — $100 by default (`client_monthly_spend_limit`), set per company on its Company page (0 = no cap). Plus 20 paid actions/minute per company and 500 rows per CSV enrich. The operator's own workspace is not capped.
+- **Simulation suite** — `testing/simulation/simulate.py` creates two fresh companies and checks 247 things: every read and write route for cross-company leaks, admin-only routes, secrets in responses, the Performance maths, and the hardening below.
+
+**Security fixes** (from a full audit)
+- `controva_api.py`: key creation is refused unless `API_MASTER_SECRET` is set (an empty secret used to mint admin keys for anyone), the secret is no longer printed in `/docs` or the startup banner, it binds to 127.0.0.1 unless `API_HOST` says otherwise, and its webhook test only calls public URLs.
+- The server no longer fetches internal addresses on anyone's behalf: lead websites (website check, scraping incl. self-hosted Crawl4AI, domain intel, About-page scrape), client webhooks and Lead Hunter pushes all require public addresses, and every redirect hop is re-checked.
+- Passwords are stored with PBKDF2-HMAC-SHA256 (old hashes upgrade at next login); sessions are stored as hashes of their tokens; the service token is compared in constant time.
+- Login lockout uses the real client address behind a local proxy, and one username gets at most 50 tries per 15 minutes across all addresses.
+- Session tokens are accepted in the URL only for CSV downloads.
+- The shared Calendly webhook (no secret) is retired; each company's own URL is required, with an optional Calendly signing key that is then enforced.
+- Client accounts no longer see raw server errors, admin-only company settings, another company's cached research, or guessable mockup image names.
+- No `client` account with committed credentials is created on new installs.
+- Resend webhook signatures are verified with the decoded `whsec_` key (real Resend webhooks were being rejected).
+
+**After upgrading**: everyone logs in again (sessions are now stored hashed); move Calendly webhooks to the URL on each Company page; on existing installs, delete or reset the old `client` account in Settings → Client accounts; set `API_MASTER_SECRET` if you run `controva_api.py`.
+
 ### v9.1 — October 2026 (M16: Lead Hunter)
 
 - **Lead Hunter connection**: interested prospects go to the Lead Hunter call center automatically; its call results (meeting, no-show, won, lost, do-not-contact) come back signed and update the lead and the Performance page.

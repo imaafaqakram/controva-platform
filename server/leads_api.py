@@ -103,6 +103,12 @@ CONFIG = {
     'sequence_interval_minutes': 10,
     # M5: monthly API budget (USD) — dashboard alert at 80%
     'cost_budget_monthly': 50,
+    # Per client company: paid API spend it may start per calendar month (USD;
+    # per-company override on its Company page), paid actions per minute, and
+    # rows per CSV enrich. The operator's own workspace is not capped.
+    'client_monthly_spend_limit': 100,
+    'client_paid_requests_per_minute': 20,
+    'csv_enrich_max_rows': 500,
     # M6: autonomous ICP prospecting
     'icp_scheduler_enabled': True,
     'icp_daily_cap': 40,          # max discovery searches per ICP run
@@ -1903,6 +1909,12 @@ def smart_scrape(url, timeout=20, prefer_direct=False):
     Every tier's output is validated with _scrape_ok so a blocked/error page
     falls through to the next tier instead of being returned as a result.
     """
+    # Lead websites come from users and scraped listings: every tier (the
+    # self-hosted Crawl4AI included) fetches only public addresses.
+    bad = public_url_error(url, allow_http=True)
+    if bad:
+        print(f'smart_scrape: refused {url[:70]} ({bad})')
+        return None
     # ── Tier 0: direct fetch with browser headers ─────────────────────────
     # Opt-in (prefer_direct) because it returns plain text without link URLs,
     # which the enrichment pipeline needs from Jina's markdown.
@@ -1913,7 +1925,7 @@ def smart_scrape(url, timeout=20, prefer_direct=False):
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                 'Accept-Language': 'en-US,en;q=0.9',
             })
-            resp = urllib.request.urlopen(req, timeout=min(timeout, 12))
+            resp = safe_urlopen(req, timeout=min(timeout, 12))
             html = resp.read().decode('utf-8', errors='replace')
             mailtos = ' '.join(set(re.findall(r'mailto:([^"\'>\s?]+)', html)))
             text = re.sub(r'<script[\s\S]*?</script>|<style[\s\S]*?</style>', ' ', html)
@@ -3368,7 +3380,8 @@ def generate_mockup_imagine_art(business_name, niche, city, custom_prompt=None):
             # Save image to disk and return URL
             image_bytes = resp.read()
             timestamp = int(time.time())
-            random_id = hashlib.md5(str(timestamp).encode() + business_name.encode()).hexdigest()[:12]
+            # Mockups are served without login, so the name must be unguessable.
+            random_id = _h_secrets.token_hex(16)
             ext = 'jpg' if 'jpeg' in content_type or 'jpg' in content_type else 'png'
             filename = f'mockup_{timestamp}_{random_id}.{ext}'
             filepath = os.path.join(LEADGEN_HOME, 'mockups', filename)
@@ -3822,6 +3835,8 @@ def generate_email_patterns(domain, first_name='', last_name=''):
 def scrape_about_page_for_emails(domain):
     """Use Crawl4AI to scrape the About/Contact page for real emails."""
     emails_found = set()
+    if host_public_error(domain):    # never point Crawl4AI at an internal host
+        return []
     paths = ['/about', '/contact', '/about-us', '/contact-us', '/team', '/']
     for path in paths:
         url = f'https://{domain}{path}'
@@ -4113,6 +4128,10 @@ def domain_intel(domain):
         'description': '',
         'ssl_valid': False
     }
+    bad = host_public_error(domain)
+    if bad:
+        result['error'] = bad
+        return result
 
     import socket
     # DNS A record
@@ -5586,14 +5605,14 @@ def run_verify_websites_bg(job_id, lead_ids=None):
                 try:
                     req = urllib.request.Request(stored_url, method='HEAD',
                                                  headers={'User-Agent': 'Mozilla/5.0'})
-                    r = urllib.request.urlopen(req, timeout=6)
+                    r = safe_urlopen(req, timeout=6)
                     alive = r.status < 400
                 except Exception:
                     # Retry with GET in case HEAD is blocked
                     try:
                         req2 = urllib.request.Request(stored_url,
                                                       headers={'User-Agent': 'Mozilla/5.0'})
-                        r2 = urllib.request.urlopen(req2, timeout=6)
+                        r2 = safe_urlopen(req2, timeout=6)
                         alive = r2.status < 400
                     except Exception:
                         alive = False
@@ -5713,22 +5732,29 @@ _login_locks = {}              # key -> locked-until timestamp
 def auth_lock_key(username, ip):
     return f'{(username or "").lower()}|{ip or "unknown"}'
 
-def auth_is_locked(username, ip):
-    until = _login_locks.get(auth_lock_key(username, ip))
-    if until and until > time.time():
-        return int(until - time.time())
-    return 0
+# Besides the per-(user, IP) lock, one username across ALL addresses gets this
+# many tries per window: rotating source IPs can't brute-force a password.
+AUTH_USER_MAX_FAILURES = 50
 
-def auth_record_failure(username, ip):
-    key = auth_lock_key(username, ip)
+def auth_is_locked(username, ip):
     now = time.time()
+    until = max(_login_locks.get(auth_lock_key(username, ip), 0),
+                _login_locks.get(auth_lock_key(username, '*'), 0))
+    return int(until - now) if until > now else 0
+
+def _auth_count_failure(key, limit, now):
     recent = [t for t in _login_failures.get(key, []) if now - t < AUTH_LOCKOUT_SECONDS]
     recent.append(now)
     _login_failures[key] = recent
-    if len(recent) >= AUTH_MAX_FAILURES:
+    if len(recent) >= limit:
         _login_locks[key] = now + AUTH_LOCKOUT_SECONDS
         _login_failures[key] = []
-    return AUTH_MAX_FAILURES - len(recent)
+    return limit - len(recent)
+
+def auth_record_failure(username, ip):
+    now = time.time()
+    _auth_count_failure(auth_lock_key(username, '*'), AUTH_USER_MAX_FAILURES, now)
+    return _auth_count_failure(auth_lock_key(username, ip), AUTH_MAX_FAILURES, now)
 
 def auth_clear_failures(username, ip):
     _login_failures.pop(auth_lock_key(username, ip), None)
@@ -5783,18 +5809,8 @@ def ensure_auth_tables():
             print('=' * 64)
         else:
             print('Admin user seeded from ADMIN_PASSWORD / config.json')
-    # Seed a restricted 'client' role account for handing to a client/test
-    # user — everything except Settings (API keys, CRM connection secrets,
-    # automation toggles). Fixed credentials so they're known outside the
-    # server log; rotate via /auth/change-password once the client has it.
-    cur.execute("SELECT COUNT(*) FROM auth_users WHERE username = 'client'")
-    if cur.fetchone()[0] == 0:
-        client_salt = '04d689de7dbccc5a283383c39dab94c4'
-        client_pwhash = 'f845da1eb057654174c2aa37562b60f44738ed7f6ba18bc7d4d5f40eec82c40c'
-        cur.execute("INSERT INTO auth_users (username, salt, pwhash, role) VALUES (%s, %s, %s, 'client')",
-                    ('client', client_salt, client_pwhash))
-        print('Client role account seeded: username=client — password was generated once and '
-              'given directly to the operator; rotate it via POST /auth/change-password if lost')
+    # (A 'client' account used to be seeded here with credentials committed in
+    # this file. Client logins are now created in Settings → Client accounts.)
     conn.commit(); cur.close(); conn.close()
 
     # Bridge auth_users to the tenants table: it already existed in the schema
@@ -5845,8 +5861,29 @@ def get_user_role(username):
     except Exception:
         return 'client'
 
+AUTH_PBKDF2_ROUNDS = 200_000
+
 def auth_hash(password, salt):
-    return _h_hashlib.sha256((password + salt).encode()).hexdigest()
+    """Password hash for storage: PBKDF2-HMAC-SHA256, self-describing so the
+    round count can rise later. (Hashes from before this were one SHA-256 of
+    password+salt; auth_verify still accepts those and auth_login upgrades
+    them on the next successful login.)"""
+    dk = _h_hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), AUTH_PBKDF2_ROUNDS)
+    return f'pbkdf2_sha256${AUTH_PBKDF2_ROUNDS}${dk.hex()}'
+
+def auth_verify(password, salt, stored):
+    stored = stored or ''
+    if stored.startswith('pbkdf2_sha256$'):
+        _, rounds, digest = stored.split('$', 2)
+        dk = _h_hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), int(rounds))
+        return hmac.compare_digest(dk.hex(), digest)
+    legacy = _h_hashlib.sha256((password + salt).encode()).hexdigest()
+    return hmac.compare_digest(legacy, stored)
+
+def session_key(token):
+    """Sessions are stored by a hash of their token, so a database leak doesn't
+    hand out live logins."""
+    return _h_hashlib.sha256(token.encode()).hexdigest()
 
 def auth_login(username, password, ip=''):
     if auth_is_locked(username, ip):
@@ -5857,15 +5894,17 @@ def auth_login(username, password, ip=''):
         row = cur.fetchone()
     except Exception:
         return None
-    if not row or auth_hash(password, row[0]) != row[1]:
+    if not row or not auth_verify(password, row[0], row[1]):
         try: cur.close(); conn.close()
         except Exception: pass
         auth_record_failure(username, ip)
         return None
     token = _h_secrets.token_urlsafe(48)
     try:
+        if not row[1].startswith('pbkdf2_sha256$'):
+            cur.execute("UPDATE auth_users SET pwhash = %s WHERE username = %s", (auth_hash(password, row[0]), username))
         cur.execute("INSERT INTO auth_sessions (token, username, expires_at) VALUES (%s, %s, NOW() + INTERVAL '%s days')",
-                    (token, username, AUTH_SESSION_DAYS))
+                    (session_key(token), username, AUTH_SESSION_DAYS))
         conn.commit(); cur.close(); conn.close()
     except Exception:
         pass
@@ -5874,11 +5913,11 @@ def auth_login(username, password, ip=''):
 
 def auth_check(token):
     if not token: return None
-    if SERVICE_TOKEN and token == SERVICE_TOKEN:
+    if SERVICE_TOKEN and hmac.compare_digest(str(token), SERVICE_TOKEN):
         return 'service'          # internal service account (controva_api)
     try:
         conn = db_conn(); cur = conn.cursor()
-        cur.execute("SELECT username FROM auth_sessions WHERE token = %s AND expires_at > NOW()", (token,))
+        cur.execute("SELECT username FROM auth_sessions WHERE token = %s AND expires_at > NOW()", (session_key(token),))
         row = cur.fetchone()
         cur.close(); conn.close()
         return row[0] if row else None
@@ -5888,7 +5927,7 @@ def auth_check(token):
 def auth_logout(token):
     try:
         conn = db_conn(); cur = conn.cursor()
-        cur.execute("DELETE FROM auth_sessions WHERE token = %s", (token,))
+        cur.execute("DELETE FROM auth_sessions WHERE token = %s", (session_key(token),))
         conn.commit(); cur.close(); conn.close()
     except Exception:
         pass
@@ -5901,7 +5940,7 @@ def auth_change_password(username, old_password, new_password):
         conn = db_conn(); cur = conn.cursor()
         cur.execute("SELECT salt, pwhash FROM auth_users WHERE username = %s", (username,))
         row = cur.fetchone()
-        if not row or auth_hash(old_password, row[0]) != row[1]:
+        if not row or not auth_verify(old_password, row[0], row[1]):
             cur.close(); conn.close()
             return False, 'Current password is incorrect'
         new_salt = _h_secrets.token_hex(16)
@@ -6408,26 +6447,55 @@ def pipedrive_push(detail, config):
     except Exception as e:
         return False, None, {'error': str(e)}
 
-def public_https_url_error(url):
-    """Why a client-supplied webhook URL is unsafe to call from this server
-    (None when fine): must be https and resolve only to public addresses, so
-    a client can't make the server probe its own network or cloud metadata."""
-    import ipaddress
+def public_url_error(url, allow_http=False):
+    """Why a URL is unsafe for this server to fetch (None when fine): it must
+    be https (or http when allow_http) and resolve only to public addresses,
+    so nobody can make the server probe its own network, Crawl4AI/n8n on
+    localhost, or cloud metadata (169.254.169.254)."""
     try:
         u = urllib.parse.urlparse(url or '')
     except Exception:
         return 'not a valid URL'
-    if u.scheme != 'https' or not u.hostname:
-        return 'webhook URL must start with https://'
+    if u.scheme not in (('http', 'https') if allow_http else ('https',)) or not u.hostname:
+        return 'URL must start with https://' if not allow_http else 'URL must start with http:// or https://'
+    return host_public_error(u.hostname, u.port or (443 if u.scheme == 'https' else 80))
+
+def host_public_error(host, port=443):
+    import ipaddress
     try:
-        addrs = {ai[4][0] for ai in socket.getaddrinfo(u.hostname, u.port or 443)}
+        addrs = {ai[4][0] for ai in socket.getaddrinfo(host, port)}
     except Exception:
-        return f'cannot resolve {u.hostname}'
+        return f'cannot resolve {host}'
     for a in addrs:
-        ip = ipaddress.ip_address(a.split('%')[0])
-        if not ip.is_global:
-            return f'{u.hostname} points to a private or reserved address'
+        if not ipaddress.ip_address(a.split('%')[0]).is_global:
+            return f'{host} points to a private or reserved address'
     return None
+
+def public_https_url_error(url):
+    """Client-supplied webhook URLs: https and public only."""
+    err = public_url_error(url)
+    return 'webhook URL must start with https://' if err == 'URL must start with https://' else err
+
+class _CheckedRedirect(urllib.request.HTTPRedirectHandler):
+    """Re-checks every redirect hop, so a public URL can't 302 the server to
+    an internal one after the first check passed."""
+    allow_http = True
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        bad = public_url_error(newurl, allow_http=self.allow_http)
+        if bad:
+            raise urllib.error.URLError(f'redirect blocked: {bad}')
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+def safe_urlopen(req, timeout=15, allow_http=True):
+    """urlopen for URLs that came from users or scraped data: the target and
+    every redirect must be public."""
+    url = req.full_url if isinstance(req, urllib.request.Request) else req
+    bad = public_url_error(url, allow_http=allow_http)
+    if bad:
+        raise urllib.error.URLError(f'blocked: {bad}')
+    handler = _CheckedRedirect()
+    handler.allow_http = allow_http
+    return urllib.request.build_opener(handler).open(req, timeout=timeout)
 
 def webhook_push(detail, config, client_owned=False):
     """Generic signed JSON payload — works with Zapier/n8n/GoHighLevel/any custom endpoint."""
@@ -6453,7 +6521,7 @@ def webhook_push(detail, config, client_owned=False):
         if secret:
             headers['X-Controva-Signature'] = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
         req = urllib.request.Request(url, data=body, method='POST', headers=headers)
-        resp = urllib.request.urlopen(req, timeout=15)
+        resp = (safe_urlopen(req, 15, allow_http=False) if client_owned else urllib.request.urlopen(req, timeout=15))
         return True, None, {'status_code': resp.status}
     except urllib.error.HTTPError as e:
         return False, None, {'error': f'{e.code} {e.reason}'}
@@ -7410,7 +7478,12 @@ def verify_svix_signature(headers, raw_body, secret, tolerance_secs=300):
     except ValueError:
         return False, 'bad timestamp'
     signed = f'{svix_id}.{ts_hdr}.'.encode() + raw_body
-    expected = _b64.b64encode(_hmac.new(secret.encode(), signed, _h_hashlib.sha256).digest()).decode()
+    # A Svix secret is "whsec_" + base64 key bytes; the HMAC key is the decoded bytes.
+    try:
+        key = _b64.b64decode(secret.split('_', 1)[1]) if secret.startswith('whsec_') else secret.encode()
+    except Exception:
+        key = secret.encode()
+    expected = _b64.b64encode(_hmac.new(key, signed, _h_hashlib.sha256).digest()).decode()
     # signature header may contain multiple space-separated v1,<sig> pairs
     for part in sig_hdr.split(' '):
         if part.startswith('v1,'):
@@ -8132,11 +8205,11 @@ def wf_verify_websites(config, input_ids, log_fn):
         if stored_url:
             try:
                 req = urllib.request.Request(stored_url, method='HEAD', headers={'User-Agent': 'Mozilla/5.0'})
-                alive = urllib.request.urlopen(req, timeout=6).status < 400
+                alive = safe_urlopen(req, timeout=6).status < 400
             except Exception:
                 try:
                     req2 = urllib.request.Request(stored_url, headers={'User-Agent': 'Mozilla/5.0'})
-                    alive = urllib.request.urlopen(req2, timeout=6).status < 400
+                    alive = safe_urlopen(req2, timeout=6).status < 400
                 except Exception:
                     alive = False
         if not alive:
@@ -8853,9 +8926,11 @@ def icp_in_scope(icp_id, tenant_id):
 # Keys a company may set for itself / keys only the platform admin may set.
 COMPANY_SETTING_KEYS = ('from_name', 'from_email', 'reply_to', 'company_name', 'company_address',
                         'footer_text', 'brand_name', 'brand_color', 'calendly_url',
-                        'digest_enabled', 'digest_email', 'imap_host', 'imap_user', 'imap_pass')
-COMPANY_ADMIN_KEYS = ('daily_send_limit',)
-COMPANY_SECRET_KEYS = ('imap_pass',)
+                        'digest_enabled', 'digest_email', 'imap_host', 'imap_user', 'imap_pass', 'theme',
+                        'calendly_signing_key')
+DASHBOARD_THEMES = ('controva', 'ocean', 'emerald', 'violet', 'sunset', 'graphite')
+COMPANY_ADMIN_KEYS = ('daily_send_limit', 'monthly_spend_limit')
+COMPANY_SECRET_KEYS = ('imap_pass', 'calendly_signing_key')
 
 def ensure_m15_tables():
     conn = db_conn(); cur = conn.cursor()
@@ -9004,6 +9079,70 @@ def company_throttle_status(tenant_id):
     if n >= int(limit):
         return False, f"This company's daily send cap is reached ({n}/{limit})"
     return True, ''
+
+# POST routes that spend paid API credit (search, enrichment, AI, research
+# tools, outbound email), and the /lead/<id>/<action> ones that do.
+PAID_POST_PATHS = frozenset((
+    '/search', '/discover', '/enrich', '/enrich-company', '/enrich-csv', '/intent-search',
+    '/verify-websites', '/verify-emails', '/reenrich-missing-emails', '/score', '/generate-assets',
+    '/run-pipeline', '/research/queue', '/icp/run', '/workflows/run', '/check-replies',
+    '/keywords', '/serp', '/competitor', '/ecommerce', '/product-hunt', '/find-emails', '/find-people',
+    '/find-domain', '/domain-intel', '/wayback', '/trends', '/social-scout', '/verify-email',
+    '/backlinks', '/tech-stack', '/company/test-email'))
+PAID_LEAD_ACTIONS = frozenset(('regenerate-email', 'generate-mockup', 'research', 'send'))
+_paid_hits = {}
+
+def company_month_spend(tenant_id):
+    """API cost logged this calendar month by the company's own users."""
+    try:
+        conn = db_conn(); cur = conn.cursor()
+        cur.execute("""SELECT COALESCE(SUM(u.cost), 0) FROM api_usage u
+                       WHERE u.created_at >= date_trunc('month', NOW())
+                         AND u.username IN (SELECT username FROM auth_users WHERE tenant_id = %s)""", (tenant_id,))
+        v = float(cur.fetchone()[0] or 0)
+        cur.close(); conn.close()
+        return v
+    except Exception:
+        return 0.0
+
+def company_spend_limit(tenant_id):
+    own = get_tenant_settings(tenant_id).get('monthly_spend_limit')
+    try:
+        return float(own) if own not in (None, '') else float(CONFIG.get('client_monthly_spend_limit', 100))
+    except (TypeError, ValueError):
+        return float(CONFIG.get('client_monthly_spend_limit', 100))
+
+def company_spend_block(tenant_id):
+    limit = company_spend_limit(tenant_id)
+    if limit <= 0:
+        return None          # 0 = no cap for this company
+    spent = company_month_spend(tenant_id)
+    if spent >= limit:
+        return (f'This month\'s API budget for your company is used up (${spent:.2f} of ${limit:.2f}). '
+                'Ask your account manager to raise it.')
+    return None
+
+def company_rate_ok(tenant_id):
+    now = time.time()
+    hits = [t for t in _paid_hits.get(tenant_id, []) if now - t < 60]
+    if len(hits) >= int(CONFIG.get('client_paid_requests_per_minute', 20)):
+        _paid_hits[tenant_id] = hits
+        return False
+    hits.append(now)
+    _paid_hits[tenant_id] = hits
+    return True
+
+def calendly_signature_ok(key, header, body, tolerance=300):
+    """Calendly's webhook signing (optional per company, set its signing key):
+    Calendly-Webhook-Signature: t=<unix>,v1=<hex HMAC-SHA256(key, '<t>.<body>')>."""
+    if not header:
+        return False
+    parts = dict(p.strip().split('=', 1) for p in header.split(',') if '=' in p)
+    ts, sig = parts.get('t', ''), parts.get('v1', '')
+    if not ts.isdigit() or not sig or abs(int(time.time()) - int(ts)) > tolerance:
+        return False
+    expected = hmac.new(key.encode(), ts.encode() + b'.' + body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, sig)
 
 def calendly_webhook_token(tenant_id):
     st = get_tenant_settings(tenant_id)
@@ -9250,7 +9389,7 @@ def leadhunter_push(detail, config, client_owned=False, reason='manual'):
         headers[(config.get('secret_header') or 'X-ACL-Trigger-Secret').strip()] = secret
     try:
         req = urllib.request.Request(url, data=body, method='POST', headers=headers)
-        resp = urllib.request.urlopen(req, timeout=15)
+        resp = (safe_urlopen(req, 15, allow_http=False) if client_owned else urllib.request.urlopen(req, timeout=15))
         return True, None, {'status_code': resp.status, 'reason': reason}
     except urllib.error.HTTPError as e:
         hint = {401: ' (wrong trigger secret)', 404: ' (unknown or disabled trigger)',
@@ -9707,7 +9846,7 @@ class Handler(BaseHTTPRequestHandler):
         token = ''
         if auth_header and auth_header.startswith('Bearer '):
             token = auth_header.split(' ', 1)[1].strip()
-        if not token:
+        if not token and self.query_token_allowed():
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             token = (qs.get('token') or [''])[0]
         user = auth_check(token)
@@ -9758,7 +9897,7 @@ class Handler(BaseHTTPRequestHandler):
         token = ''
         if auth_header and auth_header.startswith('Bearer '):
             token = auth_header.split(' ', 1)[1].strip()
-        if not token:
+        if not token and self.query_token_allowed():
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             token = (qs.get('token') or [''])[0]
         return auth_check(token)
@@ -9793,6 +9932,50 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return False
 
+    def paid_action_blocked(self, p, body):
+        """Client companies spend the platform's API keys, so their paid
+        actions are capped (monthly spend, per-minute rate, CSV size). Sends
+        the refusal and returns True when blocked."""
+        if not (p in PAID_POST_PATHS or (p.startswith('/lead/') and p.rsplit('/', 1)[-1] in PAID_LEAD_ACTIONS)):
+            return False
+        scope = self.scope_tenant()
+        if scope is None or tenant_is_operator(scope):
+            return False
+        if p == '/enrich-csv':
+            rows = body.get('rows') or []
+            n = len(rows) if isinstance(rows, list) else 0
+            if not n and isinstance(body.get('csv_text'), str):
+                n = max(body['csv_text'].count('\n'), 1)
+            limit = int(CONFIG.get('csv_enrich_max_rows', 500))
+            if n > limit:
+                self.send_json(400, {'error': f'At most {limit} rows per CSV — split the file'}); return True
+        reason = company_spend_block(scope)
+        if reason:
+            self.send_json(402, {'error': reason}); return True
+        if not company_rate_ok(scope):
+            self.send_json(429, {'error': 'Too many paid actions in the last minute — wait a moment and try again'})
+            return True
+        return False
+
+    def query_token_allowed(self):
+        """?token= only for plain-link downloads (CSV), which can't send a
+        header. Anywhere else a token in the URL ends up in history, proxy
+        logs and Referer headers."""
+        p = self.path.split('?')[0]
+        return self.command == 'GET' and (p.endswith('.csv') or p.endswith('/csv'))
+
+    def client_ip(self):
+        """The caller's address. Behind a local reverse proxy (nginx/Caddy on
+        this host) every request comes from 127.0.0.1, which would make one
+        lockout lock everyone out, so trust the proxy's X-Forwarded-For —
+        only then, and only its last hop (the address that reached the proxy)."""
+        ip = self.client_address[0] if self.client_address else ''
+        if ip in ('127.0.0.1', '::1'):
+            fwd = (self.headers.get('X-Forwarded-For') or '').split(',')[-1].strip()
+            if fwd:
+                return fwd[:64]
+        return ip
+
     def job_visible(self, job):
         """Admin sees every job; a client only its own company's."""
         scope = self.scope_tenant()
@@ -9808,6 +9991,11 @@ class Handler(BaseHTTPRequestHandler):
         return False
 
     def send_json(self, code, data):
+        if code >= 500 and get_current_scope() and isinstance(data, dict) and 'error' in data:
+            # Raw exception text (SQL, provider replies, internal URLs) stays in
+            # the server log; a client account gets a plain message.
+            print(f'[error] {self.command} {self.path.split("?")[0]}: {str(data.get("error"))[:500]}')
+            data = {**data, 'error': 'Something went wrong on the server. Please try again.'}
         body = json.dumps(data, ensure_ascii=False).encode('utf-8')
         self.send_response(code)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
@@ -9914,7 +10102,8 @@ class Handler(BaseHTTPRequestHandler):
                 # M15: the company's own branding wins over the server-wide one
                 st = get_tenant_settings(self.scope_tenant())
                 for src, dst in (('brand_name', 'client_brand_name'), ('brand_color', 'client_brand_color'),
-                                 ('calendly_url', 'calendly_url'), ('footer_text', 'client_footer_text')):
+                                 ('calendly_url', 'calendly_url'), ('footer_text', 'client_footer_text'),
+                                 ('theme', 'client_theme')):
                     if st.get(src):
                         out[dst] = st[src]
                 self.send_json(200, out)
@@ -10069,7 +10258,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, {
                     'tenant_id': tid, 'company_name': row[0] if row else '',
                     'is_operator': tenant_is_operator(tid),
-                    'settings': company_settings_view(tid, include_admin_keys=True),
+                    'settings': company_settings_view(tid, include_admin_keys=is_admin),
+                    'spend_this_month': round(company_month_spend(tid), 2),
+                    'spend_limit': company_spend_limit(tid) if not tenant_is_operator(tid) else None,
                     'admin_keys_editable': is_admin,
                     'domains': domains,
                     'readiness': company_send_readiness(tid),
@@ -10523,15 +10714,25 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(500, {'error': str(e)})
             return
 
-        if p == '/webhook/calendly' or p.startswith('/webhook/calendly/'):
+        if p == '/webhook/calendly':
+            # The old shared URL took bookings from anyone on the internet
+            # (no secret) and its reply revealed whether an email was a lead.
+            self.send_json(410, {'error': 'This webhook URL is retired. Use the Calendly webhook URL '
+                                          'shown on the Company page.'})
+            return
+
+        if p.startswith('/webhook/calendly/'):
             try:
-                tenant_id = None
-                if p.startswith('/webhook/calendly/'):
-                    tenant_id = tenant_for_calendly_token(p.rsplit('/', 1)[1])
-                    if not tenant_id:
-                        self.send_json(404, {'error': 'unknown webhook'}); return
+                tenant_id = tenant_for_calendly_token(p.rsplit('/', 1)[1])
+                if not tenant_id:
+                    self.send_json(404, {'error': 'unknown webhook'}); return
+                key = get_tenant_settings(tenant_id).get('calendly_signing_key')
+                if key and not calendly_signature_ok(key, self.headers.get('Calendly-Webhook-Signature'), raw_body):
+                    self.send_json(401, {'error': 'bad signature'}); return
                 result = handle_calendly_webhook(raw_body, tenant_id)
-                self.send_json(200 if result.get('ok') else 400, result)
+                # No match count in the reply: it would say whether an email is a lead.
+                self.send_json(200 if result.get('ok') else 400,
+                               {'ok': bool(result.get('ok'))} if result.get('ok') else result)
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
             return
@@ -10555,6 +10756,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if not self.require_auth():
             return
+        if self.paid_action_blocked(p, body):
+            return
 
         if p == '/auth/login':
             try:
@@ -10563,7 +10766,7 @@ class Handler(BaseHTTPRequestHandler):
                 if '@' in username:
                     username = 'admin' if username in ('admin@controva.com', 'admin@controvallc.com') else username
                 password = str(body.get('password') or '')
-                ip = self.client_address[0] if self.client_address else ''
+                ip = self.client_ip()
 
                 remaining_lock = auth_is_locked(username, ip)
                 if remaining_lock:
@@ -10813,6 +11016,11 @@ class Handler(BaseHTTPRequestHandler):
                             v = max(0, int(v or 0)) or ''
                         except (TypeError, ValueError):
                             self.send_json(400, {'error': 'daily_send_limit must be a number'}); return
+                    elif k == 'monthly_spend_limit':
+                        try:
+                            v = '' if v in (None, '') else round(max(0.0, float(v)), 2)
+                        except (TypeError, ValueError):
+                            self.send_json(400, {'error': 'monthly_spend_limit must be a number'}); return
                     else:
                         v = str(v or '').strip()[:500]
                     if k in ('from_email', 'reply_to', 'digest_email') and v and not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', v):
@@ -10829,6 +11037,8 @@ class Handler(BaseHTTPRequestHandler):
                                                           'the platform admin assigns them in Settings → Sending Domains'}); return
                     if k == 'calendly_url' and v and not v.startswith('https://'):
                         self.send_json(400, {'error': 'calendly_url must start with https://'}); return
+                    if k == 'theme' and v and v not in DASHBOARD_THEMES:
+                        self.send_json(400, {'error': 'theme must be one of ' + ', '.join(DASHBOARD_THEMES)}); return
                     if k == 'brand_color' and v and not re.match(r'^#[0-9a-fA-F]{6}$', v):
                         self.send_json(400, {'error': 'brand_color must look like #1a2b3c'}); return
                     updates[k] = v
@@ -11312,7 +11522,7 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 if country not in MARKET_CONFIG:
                     country = 'us'
-                ckey = {'q': q.lower(), 'country': country}
+                ckey = {'q': q.lower(), 'country': country, 'tenant': current_owner_tenant()}   # per company
                 if not force:
                     cached = get_cached_research('ecommerce', ckey, max_age_hours=24)
                     if cached:
@@ -11338,7 +11548,7 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 if country not in MARKET_CONFIG:
                     country = 'us'
-                ckey = {'cat': category.lower(), 'country': country, 'n': cnt}
+                ckey = {'cat': category.lower(), 'country': country, 'n': cnt, 'tenant': current_owner_tenant()}
                 if not force:
                     cached = get_cached_research('product_hunt', ckey, max_age_hours=12)
                     if cached:
@@ -11628,23 +11838,6 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json(500, {'error': str(e)})
 
-
-        elif p == '/auth/login':
-            try:
-                tok = auth_login(body.get('username',''), body.get('password',''))
-                if tok:
-                    self.send_json(200, {'success': True, 'token': tok})
-                else:
-                    self.send_json(401, {'success': False, 'error': 'Invalid credentials'})
-            except Exception as e:
-                self.send_json(500, {'error': str(e)})
-
-        elif p == '/auth/check':
-            try:
-                user = auth_check(body.get('token', ''))
-                self.send_json(200, {'authenticated': bool(user), 'user': user or None})
-            except Exception as e:
-                self.send_json(500, {'error': str(e)})
 
         elif p == '/send-email':
             if not self.require_admin(): return   # free-form send as the operator

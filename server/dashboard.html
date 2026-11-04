@@ -71,6 +71,80 @@
     --accent-900: 19 78 74;
     --pulse-glow: 32 178 170;
   }
+
+  /* Selectable accent themes (sidebar → Theme). html[data-theme] outranks .dark,
+     so a chosen theme applies in both modes; Controva keeps the defaults above. */
+  html[data-theme="ocean"] {
+    --accent-50: 239 246 255;
+    --accent-100: 219 234 254;
+    --accent-200: 191 219 254;
+    --accent-300: 147 197 253;
+    --accent-400: 96 165 250;
+    --accent-500: 59 130 246;
+    --accent-600: 37 99 235;
+    --accent-700: 29 78 216;
+    --accent-800: 30 64 175;
+    --accent-900: 30 58 138;
+    --pulse-glow: 37 99 235;
+  }
+  html[data-theme="emerald"] {
+    --accent-50: 236 253 245;
+    --accent-100: 209 250 229;
+    --accent-200: 167 243 208;
+    --accent-300: 110 231 183;
+    --accent-400: 52 211 153;
+    --accent-500: 16 185 129;
+    --accent-600: 5 150 105;
+    --accent-700: 4 120 87;
+    --accent-800: 6 95 70;
+    --accent-900: 6 78 59;
+    --pulse-glow: 5 150 105;
+  }
+  html[data-theme="violet"] {
+    --accent-50: 245 243 255;
+    --accent-100: 237 233 254;
+    --accent-200: 221 214 254;
+    --accent-300: 196 181 253;
+    --accent-400: 167 139 250;
+    --accent-500: 139 92 246;
+    --accent-600: 124 58 237;
+    --accent-700: 109 40 217;
+    --accent-800: 91 33 182;
+    --accent-900: 76 29 149;
+    --pulse-glow: 124 58 237;
+  }
+  html[data-theme="sunset"] {
+    --accent-50: 255 247 237;
+    --accent-100: 255 237 213;
+    --accent-200: 254 215 170;
+    --accent-300: 253 186 116;
+    --accent-400: 251 146 60;
+    --accent-500: 249 115 22;
+    --accent-600: 234 88 12;
+    --accent-700: 194 65 12;
+    --accent-800: 154 52 18;
+    --accent-900: 124 45 18;
+    --pulse-glow: 234 88 12;
+  }
+  html[data-theme="graphite"] {
+    --accent-50: 248 250 252;
+    --accent-100: 241 245 249;
+    --accent-200: 226 232 240;
+    --accent-300: 203 213 225;
+    --accent-400: 148 163 184;
+    --accent-500: 100 116 139;
+    --accent-600: 71 85 105;
+    --accent-700: 51 65 85;
+    --accent-800: 30 41 59;
+    --accent-900: 15 23 42;
+    --pulse-glow: 71 85 105;
+  }
+  html.dark[data-theme="graphite"] {
+    --accent-400: 203 213 225;
+    --accent-500: 148 163 184;
+    --accent-600: 100 116 139;
+    --pulse-glow: 148 163 184;
+  }
   body { font-family: 'Manrope', system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
   h1, h2, h3, .font-display { font-family: 'Funnel Display', 'Manrope', system-ui, sans-serif; }
   .scrollbar-thin::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -245,6 +319,35 @@ const useTheme = () => {
     try { localStorage.setItem('theme', theme); } catch (e) {}
   }, [theme]);
   return [theme, () => setTheme(t => t === 'dark' ? 'light' : 'dark')];
+};
+
+// Accent themes: each swaps the --accent-* palette (see the <style> block);
+// light/dark mode stays a separate switch. A user's own pick wins over their
+// company's default (Company → Branding), which wins over Controva.
+const ACCENT_THEMES = [
+  { id: 'controva', label: 'Controva', swatch: ['#e11d48', '#0d9488'] },
+  { id: 'ocean',    label: 'Ocean',    swatch: ['#2563eb', '#2563eb'] },
+  { id: 'emerald',  label: 'Emerald',  swatch: ['#059669', '#059669'] },
+  { id: 'violet',   label: 'Violet',   swatch: ['#7c3aed', '#7c3aed'] },
+  { id: 'sunset',   label: 'Sunset',   swatch: ['#ea580c', '#ea580c'] },
+  { id: 'graphite', label: 'Graphite', swatch: ['#475569', '#94a3b8'] },
+];
+const isAccentTheme = (id) => ACCENT_THEMES.some(t => t.id === id);
+
+const useAccentTheme = (companyDefault) => {
+  const [own, setOwn] = useState(() => {
+    try { const v = localStorage.getItem('accent_theme'); return isAccentTheme(v) ? v : null; } catch (e) { return null; }
+  });
+  const active = own || (isAccentTheme(companyDefault) ? companyDefault : 'controva');
+  useEffect(() => {
+    if (active === 'controva') delete document.documentElement.dataset.theme;
+    else document.documentElement.dataset.theme = active;
+  }, [active]);
+  const choose = (id) => {
+    setOwn(id);
+    try { localStorage.setItem('accent_theme', id); } catch (e) {}
+  };
+  return [active, choose];
 };
 
 // ─────────────────────────────────────────────────
@@ -6363,6 +6466,7 @@ const COMPANY_FIELD_GROUPS = [
   ] },
   { title: 'Meetings', icon: 'Calendar', note: 'Follow-up emails offer this booking link.', fields: [
     ['calendly_url', 'Calendly link', 'https://calendly.com/you/intro'],
+    ['calendly_signing_key', 'Calendly webhook signing key (recommended)', 'from Calendly when you create the webhook', 'password'],
   ] },
   { title: 'Reply inbox', icon: 'Inbox', note: 'The inbox replies arrive in (IMAP). Checked every 15 minutes: replies stop follow-ups, get classified, and count towards your response rate.', fields: [
     ['imap_host', 'IMAP server', 'imap.gmail.com'],
@@ -6463,6 +6567,21 @@ const CompanyPage = () => {
                   <span className="font-mono">{webhookUrl}</span>
                 </div>
               )}
+              {g.title === 'Branding' && (
+                <div><label className="text-xs font-medium text-slate-500 block mb-1">Default colour theme for this company's users</label>
+                  <div className="flex flex-wrap gap-2">
+                    {ACCENT_THEMES.map(t => (
+                      <button key={t.id} type="button" onClick={() => set('theme', t.id)}
+                        className={'flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs border ' + ((form.theme || 'controva') === t.id ? 'border-accent-500 bg-accent-50 dark:bg-accent-900/30' : 'border-slate-200 dark:border-slate-700')}>
+                        <span className="w-3 h-3 rounded-full" style={{ background: t.swatch[0] }} />{t.label}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[11px] text-slate-400 mt-1">Each user can still pick their own in the sidebar.</p></div>
+              )}
+              {g.title === 'Meetings' && form.calendly_signing_key && String(form.calendly_signing_key).startsWith('••••') && (
+                <p className="text-[11px] text-slate-400">Signing key saved — bookings without a valid Calendly signature are refused.</p>
+              )}
               {g.title === 'Reply inbox' && form.imap_pass && String(form.imap_pass).startsWith('••••') && (
                 <p className="text-[11px] text-slate-400">Password saved — leave it as is to keep it, or type a new one.</p>
               )}
@@ -6483,6 +6602,18 @@ const CompanyPage = () => {
             <h3 className="font-semibold text-sm flex items-center gap-2"><Icon name="Lock" /> Limits (admin)</h3>
             <p className="text-xs text-slate-500 mt-1 mb-3">Most emails this company may send per 24 hours, on top of the server-wide caps. Blank = no extra cap.</p>
             <Input type="number" value={form.daily_send_limit ?? ''} onChange={v => set('daily_send_limit', v)} placeholder="e.g. 50" />
+            {!data.is_operator && <>
+              <label className="text-xs font-medium text-slate-500 block mb-1 mt-3">Monthly API budget (USD)</label>
+              <Input type="number" value={form.monthly_spend_limit ?? ''} onChange={v => set('monthly_spend_limit', v)} placeholder={'default ' + (data.spend_limit ?? 100) + ' · 0 = no cap'} />
+            </>}
+          </Card>
+        )}
+        {!data.is_operator && data.spend_limit != null && (
+          <Card>
+            <h3 className="font-semibold text-sm flex items-center gap-2"><Icon name="DollarSign" /> API spend this month</h3>
+            <p className="text-2xl font-bold mt-2">${Number(data.spend_this_month || 0).toFixed(2)}
+              {data.spend_limit > 0 && <span className="text-sm font-normal text-slate-500"> of ${Number(data.spend_limit).toFixed(2)}</span>}</p>
+            <p className="text-xs text-slate-500 mt-1">Searches, enrichment, AI and research tools stop for the month when the budget is used.</p>
           </Card>
         )}
       </div>
@@ -6594,6 +6725,8 @@ const App = ({ role = 'admin' }) => {
     try { localStorage.setItem('sidebar_open', v ? '1' : '0'); } catch (e) {}
   };
   const [brand, setBrand] = useState({ name: 'Controva', color: '' });
+  const [companyTheme, setCompanyTheme] = useState(null);
+  const [accent, setAccent] = useAccentTheme(companyTheme);
   const isAdmin = role === 'admin';
 
   useEffect(() => {
@@ -6601,6 +6734,7 @@ const App = ({ role = 'admin' }) => {
       if (c.client_brand_name || c.client_brand_color) {
         setBrand({ name: c.client_brand_name || 'Controva', color: c.client_brand_color || '' });
       }
+      if (c.client_theme) setCompanyTheme(c.client_theme);
     }).catch(() => {});
   }, []);
 
@@ -6682,6 +6816,17 @@ const App = ({ role = 'admin' }) => {
           ))}
         </nav>
         <div className="p-3 border-t border-slate-200 dark:border-slate-800 space-y-0.5">
+          <div className="px-3 py-2">
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-1.5">Theme</p>
+            <div className="flex gap-1.5" role="radiogroup" aria-label="Colour theme">
+              {ACCENT_THEMES.map(t => (
+                <button key={t.id} type="button" role="radio" aria-checked={accent === t.id} title={t.label}
+                  onClick={() => setAccent(t.id)}
+                  className={'w-6 h-6 rounded-full border-2 transition-transform ' + (accent === t.id ? 'border-slate-900 dark:border-white scale-110' : 'border-transparent hover:scale-105')}
+                  style={{ background: theme === 'dark' ? t.swatch[1] : t.swatch[0] }} />
+              ))}
+            </div>
+          </div>
           <button onClick={toggleTheme} className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium hover:bg-slate-100 dark:hover:bg-slate-800">
             <Icon name={theme === 'dark' ? 'Sun' : 'Moon'} className="w-4 h-4" />
             {theme === 'dark' ? 'Light Mode' : 'Dark Mode'}
