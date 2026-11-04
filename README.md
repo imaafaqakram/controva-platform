@@ -42,14 +42,17 @@ real Pipedrive/Calendly accounts.
 15. [Industry Playbooks, Outcomes & Channel Performance (M14)](#industry-playbooks-outcomes--channel-performance-m14)
 16. [Multiple Client Companies (M15)](#multiple-client-companies-m15)
 17. [Lead Hunter Integration (M16)](#lead-hunter-integration-m16)
-18. [Deployment & CI/CD](#deployment--cicd)
-19. [Configuration & API Keys](#configuration--api-keys)
-20. [Architecture](#architecture)
-21. [Database Schema](#database-schema)
-22. [Troubleshooting](#troubleshooting)
-23. [User Roles](#user-roles)
-24. [Security Checklist](#security-checklist)
-25. [Changelog](#changelog)
+18. [Billing & Plans with Stripe (M17)](#billing--plans-with-stripe-m17)
+19. [Reply Inbox (M18)](#reply-inbox-m18)
+20. [Results Report, Deliverability & Viewers (M19)](#results-report-deliverability--viewers-m19)
+21. [Deployment & CI/CD](#deployment--cicd)
+22. [Configuration & API Keys](#configuration--api-keys)
+23. [Architecture](#architecture)
+24. [Database Schema](#database-schema)
+25. [Troubleshooting](#troubleshooting)
+26. [User Roles](#user-roles)
+27. [Security Checklist](#security-checklist)
+28. [Changelog](#changelog)
 
 ---
 
@@ -166,6 +169,10 @@ Login: `admin` / `CHANGE_ME_BEFORE_DEPLOY` ← **change this immediately**
 | **Leads** | Full table with sort / filter / multi-select / CSV download / Verify Websites |
 | **Pipeline** | Enrich → Score → Generate → AI Research (pain detection); choose enrichment strategy per run |
 | **Outreach** | Review email + mockup before sending; approve/reject/regenerate; reply-classification badges + filter, meeting-booked flag |
+| **Inbox** | Every reply to your outreach: AI-drafted answer to edit and send, and one-click outcomes (M18) |
+| **Performance** | Prospecting KPIs next to your other channels; opens and emails the client results report (M14, M19) |
+| **Company** | The company's sending identity, legal footer, Calendly, reply inbox, branding, digest, CRM, and a DNS check per sending domain (M15, M19) |
+| **Billing** | Plans and the company's Stripe subscription; admin defines plans and can comp a company (M17) |
 | **Analytics** | Charts: leads per day, status breakdown, niche & city breakdown, score distribution |
 | **SEO** | Keyword research, SERP analysis, Google Trends |
 | **Competitors** | Tech stack, social profiles, backlinks, Wayback snapshots |
@@ -572,6 +579,69 @@ the Lead Hunter trigger, with legal advice for your calling rules (TCPA in the U
 
 ---
 
+## Billing & Plans with Stripe (M17)
+
+Sell the platform to client companies on a monthly plan. A **plan** has a price, a monthly API budget
+(what the company's searches, enrichment and AI may cost the platform) and a number of user seats.
+
+| Piece | How it works |
+|---|---|
+| **Plans** | Billing page (admin) → Add plan. "Create the price in Stripe" makes a monthly Stripe Price; or paste an existing `price_…` id. Hidden plans can still be given to a company. |
+| **Subscribe** | A client company picks a plan on its Billing page and pays in **Stripe Checkout**. Card changes, invoices, plan switches and cancelling happen in the **Stripe Customer Portal** (Manage billing). |
+| **Webhooks** | Stripe posts to `/webhook/stripe` (signed, `Stripe-Signature`, 5-minute window, each event applied once): `checkout.session.completed`, `customer.subscription.created/updated/deleted`, `invoice.paid`, `invoice.payment_failed`. The company's status, plan, renewal date and cancel flag follow. |
+| **Enforcement** | Off by default. With **Require a subscription for client companies** on, a company that is not `active`, `trialing`, `past_due` (Stripe is retrying the card) or `comped` gets 402 on paid actions and cannot send; a banner points its users to Billing. The operator's own workspace is never billed or blocked. |
+| **Plan limits** | The plan's API budget replaces the default $100/month (a per-company budget on the Company page still wins). Adding a user beyond the plan's seats is refused. |
+| **Admin overrides** | Comp a company on any plan (free, no Stripe), or reset it to no plan. |
+
+**Setup**: in Stripe, create a restricted or secret key and a webhook endpoint for
+`https://<your host>/webhook/stripe` with the events above; put both in Settings → API Keys
+(`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`) and set `PUBLIC_BASE_URL` so Checkout returns to your
+dashboard. Turn on the Customer Portal in Stripe (Settings → Billing → Customer portal).
+
+---
+
+## Reply Inbox (M18)
+
+Replies the reply checker matched (each company's own IMAP inbox, Company page) land in **Inbox**,
+newest first, with Gemini's classification (interested, objection, not interested, out of office,
+asked to stop) and a one-line summary. The sidebar shows how many still need an answer.
+
+- **Draft with AI** writes an answer from the email you sent and their reply — Claude when its key is
+  set, else Gemini, else a plain template — with the company's Calendly link for interested replies.
+  Optional direction ("offer Thursday afternoon"). The text of their reply is treated as data, never
+  as instructions.
+- **Send reply** goes out from the company's own sending identity and legal footer, through the same
+  suppression list, send caps and billing gate as any outreach email. People who asked to stop cannot
+  be emailed.
+- **Outcomes**: Meeting booked (marks the lead; Lead Hunter gets it if set to), Send to Lead Hunter,
+  Not interested (deal lost, follow-ups stop), Done. Handled replies move to the Handled tab and can be
+  reopened. A follow-up reply to your answer shows up as a new item.
+
+Admin sees every company's replies. Drafting and sending count as paid actions for client companies.
+
+---
+
+## Results Report, Deliverability & Viewers (M19)
+
+**Client results report.** Performance → **Client report** opens a one-page report for the chosen
+period: leads found, qualified, contacted, replies, interested, meetings, deals won and revenue; the
+conversion rates and costs; the comparison with other channels; the businesses that said yes; and the
+meetings booked. **Print / save as PDF** gives a clean PDF to send to the client. **Email report** sends
+it to the company's digest address, and with *Also email last month's results report on the 1st*
+(Company → Daily digest) it goes out automatically each month.
+
+**Deliverability check.** Each sending domain has **Check DNS** (Company page and Settings → Sending
+Domains). It looks up what Gmail and Outlook look up — SPF (on the domain and on `send.<domain>`),
+DKIM (`resend._domainkey`), DMARC and its policy, MX for replies, and MX on `send.` for bounces — and
+says what to fix for each red or amber item. The last result is kept on the domain.
+
+**Read-only viewers.** Settings → Client accounts → join a company → *Viewer*. A viewer sees that
+company's leads, inbox, performance, report, company settings and billing, and can change nothing:
+the server refuses every write from that login (only log out, password change and the session check
+are allowed). Use it for the client's owner or manager who wants to watch results.
+
+---
+
 ## Deployment & CI/CD
 
 ### Auto-deploy (GitHub Actions)
@@ -796,20 +866,19 @@ docker exec leadgen_postgres pg_dump -U leadgen leadgen_db > backup_$(date +%Y%m
 
 ## User Roles
 
-Two roles exist. Every login returns its real role from `auth_users.role` (previously
-hardcoded to `admin` for anyone).
+Three roles exist. Every login returns its real role from `auth_users.role`.
 
 | Role | Access |
 |---|---|
 | `admin` | Everything across every company, including Settings (API keys, sending domains, automation config, user accounts) |
 | `client` | Every operational page plus **Company** settings, for **its own company only** — Settings is inaccessible, gated server-side (not just hidden in the UI). Free-form sending, the server-wide sequence pass and server-wide settings are admin-only |
+| `viewer` | Reads everything a `client` of the same company can read; every write is refused server-side (M19) |
 
 Add client logins in Settings → Client accounts: start a new company or join an existing one.
 An unknown role or a client whose company can't be resolved gets no access, never admin.
 
-A `client` account is auto-seeded on first boot (username `client`) for handing to a
-client/prospect for testing — ask whoever ran the deploy for the password, it's generated
-once and never committed to this repo. Change it via `POST /auth/change-password`.
+No client account is created automatically. A plan can limit how many users (clients and viewers)
+a company has (M17).
 
 ---
 
@@ -828,6 +897,21 @@ Before going to production:
 ---
 
 ## Changelog
+
+### v9.3 — November 2026 (M17–M19: billing, inbox, reports)
+
+**New features**
+- **Billing & plans with Stripe** (M17): plans with a price, API budget and seats; Stripe Checkout and Customer Portal; signed webhooks keep each company's status current; optional "require a subscription" gate; admin comps and overrides.
+- **Reply inbox** (M18): every matched reply in one place, AI-drafted answers sent as the company, one-click outcomes (meeting booked, not interested, Lead Hunter, done).
+- **Client results report** (M19): printable one-page report per period, emailed on demand or on the 1st of each month.
+- **Deliverability check** (M19): SPF, DKIM, DMARC and MX for each sending domain, with what to fix.
+- **Read-only viewer logins** (M19) for a client's owner or manager.
+- **CI**: GitHub Actions runs the simulation suite (now 301 checks, including billing, inbox, report, DNS and viewer isolation) against a fresh Postgres on every push.
+
+**Fixes**
+- The admin Billing and Company pages no longer crash when you leave them.
+
+**After upgrading**: migrations 018–020 run at startup. To take payments, add the Stripe keys and webhook (see M17); nothing is enforced until you turn on *Require a subscription*.
 
 ### v9.2 — November 2026 (themes, security audit)
 

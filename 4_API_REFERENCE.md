@@ -731,6 +731,29 @@ Every company with its users, lead/ICP counts and send readiness. `POST /users/c
 The industry playbooks (`construction_real_estate`, `banking_insurance`, `healthcare_clinics`) with industries, decision-maker titles, typical challenges and compliance notes. `POST /icp/save` accepts `offer` and `industry_template`.
 It also accepts qualification criteria: `require_email`, `require_decision_maker`, `min_rating` (0–5), `min_reviews`, `decision_maker_titles`, `qualification_notes`, `score_weights` (`{icp_fit, pain_severity, intent_signals, quality}`, or null for the default 30/30/20/20).
 
+### Billing (M17)
+- `GET /billing[?tenant_id=…]` — the company's `billing` (`status`, `plan_id`, `plan_name`, `current_period_end`, `cancel_at_period_end`, `block`, `stripe_configured`, `has_customer`), active `plans`, `spend_this_month`, `spend_limit`. Admin also gets `all_plans`, `billing_required`, `webhook_url`.
+- `POST /billing/checkout {"plan_id": 2}` → `{"url": "https://checkout.stripe.com/…"}`. Clients always check out for their own company.
+- `POST /billing/portal {}` → `{"url": "https://billing.stripe.com/…"}`.
+- `POST /billing/plans/save` (admin) `{"id"?, "name", "description", "price": 299, "currency": "usd", "monthly_spend_limit": 50, "max_users": 3, "is_active": true, "sort_order": 0, "stripe_price_id"?: "price_…", "create_in_stripe"?: true}`.
+- `POST /billing/company` (admin) `{"tenant_id", "status": "comped" | "active" | "canceled" | "none", "plan_id"?}`.
+- `POST /config {"billing_required": true}` (admin) turns enforcement on. Blocked companies get **402** on paid actions; `GET /config` returns `billing_block` with the reason.
+- `POST /webhook/stripe` (public) — Stripe events, `Stripe-Signature` required. 400 bad signature, 503 when no webhook secret is set; `{"received": true, "applied": …}` or `{"duplicate": true}`.
+
+### Reply inbox (M18)
+- `GET /inbox?view=open|handled|all` → `{"items": [{id, lead_id, business_name, email_to, subject, our_message, reply, classification, digest, replied_at, handled_at, handled_by, outcome, meeting_booked, company, is_follow_up, answers[]}], "counts": {open, interested, handled}}`.
+- `GET /inbox/count` → `{"open": 3}`.
+- `POST /inbox/{id}/draft {"instructions"?: "…"}` → `{"subject", "body", "source": "claude" | "gemini" | "template"}` (paid action).
+- `POST /inbox/{id}/send {"subject"?, "body"}` → `{"success": true, "message_id"}` (paid action; same gates as outreach).
+- `POST /inbox/{id}/action {"action": "meeting_booked" | "not_interested" | "leadhunter" | "done" | "reopen"}`.
+A reply of another company is 404.
+
+### Results report, deliverability, viewers (M19)
+- `GET /performance/report?from=YYYY-MM-DD&to=YYYY-MM-DD[&tenant_id=…]` → printable HTML (Bearer header required). Clients always get their own company; at most 400 days.
+- `POST /performance/report/email {"from", "to", "tenant_id"?}` → sends it to the company's `digest_email`. Company setting `monthly_report_enabled: true` sends last month's on the 1st.
+- `POST /sending-domains/{id}/dns` → `{"domain", "status": "ok" | "warn" | "fail", "checks": [{key: spf | dkim | dmarc | mx | return_path, label, status, value, fix}], "checked_at"}` (or `error`). Clients may check their own company's domains only; the last result is returned as `dns_report` with the domains.
+- `POST /users/create` accepts `"role": "client" | "viewer"`; a viewer needs `tenant_id`. A viewer's writes get **403** (except `/auth/logout`, `/auth/change-password`, `/auth/check`, `/research-history/list`).
+
 ---
 
 ## Static Files
@@ -826,7 +849,7 @@ When you hit a limit, the API returns an error in the response body explaining w
 
 ## Versioning
 
-Current API version: **8.4** — adds AI research (M7), pain-aware scoring (M8), CRM push
+Current API version: **9.3** — adds billing (M17), the reply inbox (M18), the results report, DNS check and viewer role (M19); 8.4 added AI research (M7), pain-aware scoring (M8), CRM push
 (M9), the phase-2 suite (M10), multi-domain sending + outreach automation (M11), the
 admin activity log (M12), the visual workflow builder + n8n panel (M13), and its six
 additional node types + job-polling fix (v8.4). Fully backwards-compatible with 7.0

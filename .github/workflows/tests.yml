@@ -1,0 +1,80 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  simulation:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: leadgen
+          POSTGRES_PASSWORD: leadgen-ci
+          POSTGRES_DB: leadgen_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U leadgen -d leadgen_db"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      SIM_DATABASE_URL: postgresql://leadgen:leadgen-ci@127.0.0.1:5432/leadgen_db
+      # A throwaway signing secret so the suite can send signed Stripe webhooks.
+      SIM_STRIPE_WHSEC: whsec_ci_only_not_a_real_secret
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install "psycopg2-binary>=2.9" "dnspython>=2.6"
+
+      - name: Syntax check
+        run: python3 -m py_compile server/leads_api.py server/controva_api.py
+
+      - name: Load schema
+        run: psql "$SIM_DATABASE_URL" -v ON_ERROR_STOP=1 -f server/init.sql
+
+      - name: Start app
+        run: |
+          mkdir -p "$RUNNER_TEMP/leadgen/mockups"
+          cp server/dashboard.html "$RUNNER_TEMP/leadgen/"
+          LEADGEN_HOME="$RUNNER_TEMP/leadgen" DB_HOST=127.0.0.1 DB_PORT=5432 \
+            DB_PASS=leadgen-ci ADMIN_PASSWORD=ci-admin-pass STRIPE_WEBHOOK_SECRET="$SIM_STRIPE_WHSEC" \
+            python3 server/leads_api.py > "$RUNNER_TEMP/server.log" 2>&1 &
+
+      - name: Wait for app
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:8080/health; then
+              echo; echo "app is up after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "app did not become healthy within 60s"
+          exit 1
+
+      - name: Run simulation suite
+        run: >
+          python3 testing/simulation/simulate.py
+          --base http://127.0.0.1:8080 --admin-user admin --admin-pass ci-admin-pass
+
+      - name: Server log tail (on failure)
+        if: failure()
+        run: tail -n 200 "$RUNNER_TEMP/server.log" || true
+
+      - name: Upload report and server log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: simulation-results
+          path: |
+            testing/simulation/last_report.json
+            ${{ runner.temp }}/server.log
+          if-no-files-found: warn

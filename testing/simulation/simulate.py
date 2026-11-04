@@ -76,7 +76,11 @@ class Client:
 
 
 def psql(sql):
-    cmd = ["su", "postgres", "-c", 'psql -d leadgen_db -Atc "%s"' % sql.replace('"', '\\"')]
+    url = os.environ.get("SIM_DATABASE_URL")
+    if url:
+        cmd = ["psql", url, "-Atc", sql]
+    else:
+        cmd = ["su", "postgres", "-c", 'psql -d leadgen_db -Atc "%s"' % sql.replace('"', '\\"')]
     p = subprocess.run(cmd, capture_output=True, text=True)
     if p.returncode != 0:
         raise RuntimeError("psql failed: %s\n%s" % (sql, p.stderr))
@@ -531,7 +535,8 @@ def test_admin_only(ctx, A, B):
     # /config GET for client: no internal config
     st, text, js = cA.get("/config")
     check(S, "client GET /config returns only cosmetic keys",
-          st == 200 and js and set(js) <= {"client_brand_name", "client_brand_color", "calendly_url", "client_footer_text"},
+          st == 200 and js and set(js) <= {"client_brand_name", "client_brand_color", "calendly_url", "client_footer_text",
+                                       "client_theme", "billing_block"},
           req_detail(cA))
     # admin sees both companies (sanity)
     st, text, js = ctx["admin"].get("/companies")
@@ -895,6 +900,188 @@ def test_functional(ctx, A, B):
     check(S, "A can bulk-delete own lead", st == 200 and gone == "0", "%s gone=%s" % (req_detail(cA), gone))
 
 
+def stripe_hook(event, secret):
+    body = json.dumps(event).encode()
+    t = str(int(time.time()))
+    sig = hmac.new(secret.encode(), t.encode() + b"." + body, hashlib.sha256).hexdigest()
+    req = urllib.request.Request(ARGS.base.rstrip("/") + "/webhook/stripe", data=body, method="POST",
+                                 headers={"Content-Type": "application/json", "Stripe-Signature": "t=%s,v1=%s" % (t, sig)})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return r.status, json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        return e.code, {}
+
+
+def test_billing(ctx, A, B):
+    """M17: plans, subscription gate, Stripe webhooks."""
+    S = "billing"
+    admin, cA, cB, sfx = ctx["admin"], ctx["A"], ctx["B"], ctx["sfx"]
+    st, _, js = cA.post("/billing/plans/save", {"name": "Hack-" + sfx, "price": 1})
+    check(S, "client cannot create a plan", st == 403, req_detail(cA))
+    st, _, js = admin.post("/billing/plans/save", {"name": "SimPlan-" + sfx, "price": 49, "monthly_spend_limit": 7,
+                                                   "max_users": 2, "is_active": True, "stripe_price_id": "price_sim_" + sfx})
+    plan = (js or {}).get("id")
+    check(S, "admin creates a plan", st == 200 and plan, req_detail(admin))
+    st, _, js = cA.get("/billing")
+    check(S, "client sees active plans and its status", st == 200 and any(p.get("id") == plan for p in (js or {}).get("plans", []))
+          and (js or {}).get("billing", {}).get("status") == "none", req_detail(cA))
+    st, _, _ = cA.post("/billing/company", {"tenant_id": ctx["tidA"], "status": "comped"})
+    check(S, "client cannot comp itself", st == 403, req_detail(cA))
+    st, _, _ = http("POST", "/webhook/stripe", None, {"id": "evt_x", "type": "checkout.session.completed"})
+    check(S, "unsigned Stripe webhook refused", st in (400, 503), "HTTP %s" % st)
+    try:
+        admin.post("/config", {"billing_required": True})
+        st, _, js = cA.post("/keywords", {"keyword": ""})
+        check(S, "required + no subscription: paid action is 402", st == 402, req_detail(cA))
+        st, _, js = cA.get("/config")
+        check(S, "required + no subscription: /config carries the banner", bool((js or {}).get("billing_block")), req_detail(cA))
+        st, _, _ = admin.post("/keywords", {"keyword": ""})
+        check(S, "operator never blocked by billing", st != 402, "HTTP %s" % st)
+        secret = os.environ.get("SIM_STRIPE_WHSEC")
+        if secret:
+            ev = {"id": "evt_sim_%s" % sfx, "type": "checkout.session.completed",
+                  "data": {"object": {"mode": "subscription", "customer": "cus_sim_" + sfx, "subscription": "sub_sim_" + sfx,
+                                      "client_reference_id": ctx["tidA"], "metadata": {"tenant_id": ctx["tidA"], "plan_id": str(plan)}}}}
+            st, js = stripe_hook(ev, secret)
+            check(S, "signed checkout.session.completed applied", st == 200 and js.get("applied") == "subscribed", "HTTP %s %s" % (st, js))
+            st, js = stripe_hook(ev, secret)
+            check(S, "same Stripe event twice is a no-op", st == 200 and js.get("duplicate"), "HTTP %s %s" % (st, js))
+            st, _, js = cA.get("/billing")
+            check(S, "subscribed company gets the plan budget", (js or {}).get("billing", {}).get("status") == "active"
+                  and (js or {}).get("spend_limit") == 7, req_detail(cA))
+            st, _, _ = cA.post("/keywords", {"keyword": ""})
+            check(S, "subscribed company no longer 402", st != 402, req_detail(cA))
+            st, _, js = admin.post("/users/create", {"username": "simA3_" + sfx, "password": ctx["pw"], "tenant_id": ctx["tidA"]})
+            check(S, "plan seat limit enforced (2 users)", st == 409, req_detail(admin))
+            st, js = stripe_hook({"id": "evt_sim2_%s" % sfx, "type": "customer.subscription.deleted",
+                                  "data": {"object": {"id": "sub_sim_" + sfx, "customer": "cus_sim_" + sfx, "status": "canceled"}}}, secret)
+            st2, _, _ = cA.post("/keywords", {"keyword": ""})
+            check(S, "canceled subscription blocks again", st == 200 and st2 == 402, "hook %s, keywords %s" % (st, st2))
+        st, _, js = cB.post("/keywords", {"keyword": ""})
+        check(S, "other company still blocked", st == 402, req_detail(cB))
+        admin.post("/billing/company", {"tenant_id": ctx["tidB"], "status": "comped", "plan_id": plan})
+        st, _, _ = cB.post("/keywords", {"keyword": ""})
+        check(S, "admin comp unblocks a company", st != 402, req_detail(cB))
+    finally:
+        admin.post("/config", {"billing_required": False})
+        psql("UPDATE plans SET is_active = FALSE WHERE id = %s" % int(plan or 0))
+
+
+def paid_post(client, path, body):
+    """A paid action, waiting out the per-minute rate limit once if an
+    earlier section used it up."""
+    st, text, js = client.post(path, body)
+    if st == 429:
+        time.sleep(61)
+        st, text, js = client.post(path, body)
+    return st, text, js
+
+
+def test_inbox(ctx, A, B):
+    """M18: replies stay inside their company; drafting, sending, outcomes."""
+    S = "inbox"
+    cA, cB, sfx = ctx["A"], ctx["B"], ctx["sfx"]
+    rows = {}
+    for d in (A, B):
+        lid = psql("SELECT id FROM leads WHERE tenant_id = %s AND lead_type IS NULL ORDER BY created_at LIMIT 1" % sq(d["tid"]))
+        d["live_lead"] = {"id": lid.split("\n")[0].strip(), "email": "live.%s.%s@example.test" % (d["key"].lower(), sfx)}
+    for d, cls, text in ((A, "interested", "Yes, call me Thursday %s" % sfx), (B, "objection", "BetaReply-%s" % sfx)):
+        rows[d["key"]] = psql(
+            "INSERT INTO outreach_log (tenant_id, lead_id, email_to, email_subject, email_body, status, sent_at, replied_at, "
+            "reply_content, reply_classification, reply_digest) VALUES (%s,%s,%s,'Hello','Our pitch','replied',NOW()-INTERVAL '2 days',"
+            "NOW(),%s,%s,%s) RETURNING id" % (sq(d["tid"]), sq(d["live_lead"]["id"]), sq(d["live_lead"]["email"]), sq(text), sq(cls),
+                                              sq("<img src=x onerror=alert(1)> digest " + d["key"]))).split("\n")[0].strip()
+    st, _, js = cA.get("/inbox")
+    ids = {i["id"] for i in (js or {}).get("items", [])}
+    check(S, "A's inbox has A's reply", rows["A"] in ids, req_detail(cA))
+    check(S, "A's inbox has no B reply", rows["B"] not in ids, req_detail(cA))
+    st, _, js = cA.get("/inbox/count")
+    check(S, "inbox count", st == 200 and (js or {}).get("open", 0) >= 1, req_detail(cA))
+    for verb, body in (("draft", {}), ("send", {"body": "hi"}), ("action", {"action": "done"})):
+        st, _, _ = paid_post(cA, "/inbox/%s/%s" % (rows["B"], verb), body)
+        check(S, "A cannot %s B's reply" % verb, st == 404, req_detail(cA))
+    st, _, _ = paid_post(cA, "/inbox/not-a-uuid/draft", {})
+    check(S, "malformed reply id is 404", st == 404, req_detail(cA))
+    st, _, js = paid_post(cA, "/inbox/%s/draft" % rows["A"], {})
+    check(S, "draft for own reply", st == 200 and (js or {}).get("body") and (js or {}).get("subject", "").startswith("Re:"), req_detail(cA))
+    st, _, _ = paid_post(cA, "/inbox/%s/send" % rows["A"], {"body": "  "})
+    check(S, "empty reply refused", st == 400, req_detail(cA))
+    st, _, js = cA.post("/inbox/%s/action" % rows["A"], {"action": "meeting_booked"})
+    booked = psql("SELECT meeting_booked FROM leads WHERE id = %s" % sq(A["live_lead"]["id"]))
+    check(S, "meeting_booked outcome marks the lead", st == 200 and booked == "t", req_detail(cA))
+    st, _, js = cA.get("/inbox?view=handled")
+    check(S, "handled reply moves to Handled", any(i["id"] == rows["A"] and i["outcome"] == "meeting_booked"
+                                                 for i in (js or {}).get("items", [])), req_detail(cA))
+    st, _, _ = cA.post("/inbox/%s/action" % rows["A"], {"action": "reopen"})
+    st, _, js = cA.get("/inbox")
+    check(S, "reopen puts it back", any(i["id"] == rows["A"] for i in (js or {}).get("items", [])), req_detail(cA))
+    st, _, _ = cA.post("/inbox/%s/action" % rows["A"], {"action": "explode"})
+    check(S, "unknown outcome refused", st == 400, req_detail(cA))
+    st, _, js = ctx["admin"].get("/inbox?view=all")
+    ids = {i["id"] for i in (js or {}).get("items", [])}
+    check(S, "admin inbox spans companies", rows["A"] in ids and rows["B"] in ids, req_detail(ctx["admin"]))
+    ctx["inbox_rows"] = rows
+
+
+def test_report_dns_viewer(ctx, A, B):
+    """M19: results report, deliverability check, read-only viewers."""
+    S = "report-dns-viewer"
+    admin, cA, sfx = ctx["admin"], ctx["A"], ctx["sfx"]
+    rng = "from=%s&to=%s" % ((date.today() - timedelta(days=30)).isoformat(), date.today().isoformat())
+    st, html, _ = http("GET", "/performance/report?" + rng, cA.token, raw=True)
+    CLIENT_RESPONSES.append(("A", "GET", "/performance/report", st, html))
+    check(S, "A's report renders", st == 200 and "<html" in html and "Brand-A-" + sfx in html, "HTTP %s" % st)
+    check(S, "report escapes reply text", "<img src=x" not in html and "&lt;img src=x" in html, html[:300])
+    st, html, _ = http("GET", "/performance/report?%s&tenant_id=%s" % (rng, ctx["tidB"]), cA.token, raw=True)
+    CLIENT_RESPONSES.append(("A", "GET", "/performance/report?tenant_id=B", st, html))
+    check(S, "A asking for B's report gets its own", st == 200 and "Brand-B-" + sfx not in html and "Brand-A-" + sfx in html, "HTTP %s" % st)
+    st, _, _ = http("GET", "/performance/report?from=bad", cA.token)
+    check(S, "report rejects bad dates", st == 400, "HTTP %s" % st)
+    st, _, _ = http("GET", "/performance/report")
+    check(S, "report needs a login", st == 401, "HTTP %s" % st)
+    st, html, _ = http("GET", "/performance/report?%s&tenant_id=%s" % (rng, ctx["tidB"]), admin.token, raw=True)
+    check(S, "admin can open any company's report", st == 200 and "Brand-B-" + sfx in html, "HTTP %s" % st)
+    # deliverability: a domain assigned to B is not A's to check
+    did = psql("INSERT INTO sending_domains (domain, from_email, from_name, tenant_id, is_active) VALUES (%s,%s,'Sim',%s,FALSE) RETURNING id"
+               % (sq("mail-b-%s.invalid" % sfx), sq("x@mail-b-%s.invalid" % sfx), sq(ctx["tidB"]))).split("\n")[0].strip()
+    st, _, _ = cA.post("/sending-domains/%s/dns" % did, {})
+    check(S, "A cannot DNS-check B's domain", st == 404, req_detail(cA))
+    st, _, js = ctx["B"].post("/sending-domains/%s/dns" % did, {})
+    check(S, "B can DNS-check its own domain", st == 200 and (js or {}).get("status") in ("ok", "warn", "fail"), req_detail(ctx["B"]))
+    st, _, _ = cA.post("/sending-domains/abc/dns", {})
+    check(S, "malformed domain id is 404", st == 404, req_detail(cA))
+    psql("DELETE FROM sending_domains WHERE id = %s" % int(did))
+    # viewer
+    vu = "simV_" + sfx
+    st, _, _ = admin.post("/users/create", {"username": vu, "password": ctx["pw"], "role": "viewer"})
+    check(S, "viewer must join an existing company", st == 400, req_detail(admin))
+    st, _, _ = admin.post("/users/create", {"username": vu, "password": ctx["pw"], "role": "admin", "tenant_id": ctx["tidB"]})
+    check(S, "cannot create an admin through /users/create", st == 400, req_detail(admin))
+    st, _, js = admin.post("/users/create", {"username": vu, "password": ctx["pw"], "role": "viewer", "tenant_id": ctx["tidB"]})
+    check(S, "create viewer in company B", st == 200 and (js or {}).get("role") == "viewer", req_detail(admin))
+    st, _, js = http("POST", "/auth/login", None, {"username": vu, "password": ctx["pw"]})
+    if not check(S, "viewer logs in", st == 200 and (js or {}).get("user", {}).get("role") == "viewer", "HTTP %s %s" % (st, js)):
+        return
+    V = Client("V", vu, ctx["pw"], js["token"])
+    st, _, js = V.get("/leads")
+    ids = {l.get("id") for l in (js or {}).get("leads", [])}
+    b_now = set(psql("SELECT id FROM leads WHERE tenant_id = %s AND lead_type IS NULL" % sq(ctx["tidB"])).split())
+    a_now = set(psql("SELECT id FROM leads WHERE tenant_id = %s" % sq(ctx["tidA"])).split())
+    check(S, "viewer reads its company's leads", b_now and b_now <= ids, req_detail(V))
+    check(S, "viewer sees no other company's leads", not (a_now & ids), req_detail(V))
+    st, _, _ = V.post("/auth/check", {})
+    check(S, "viewer session check allowed", st == 200, req_detail(V))
+    rows = ctx.get("inbox_rows", {})
+    for path, body in (("/icp/save", {"name": "x"}), ("/company/settings/save", {"settings": {"from_name": "x"}}),
+                       ("/keywords", {"keyword": "x"}), ("/billing/checkout", {"plan_id": 1}),
+                       ("/inbox/%s/send" % rows.get("B", uuid.uuid4()), {"body": "x"}), ("/leads/delete", {"ids": [B["live_lead"]["id"]]}),
+                       ("/performance/save", {"channel": "meta_ads"})):
+        st, _, _ = V.post(path, body)
+        check(S, "viewer POST %s refused" % path.split("/")[1], st == 403, req_detail(V))
+    still = psql("SELECT COUNT(*) FROM leads WHERE id = %s" % sq(B["live_lead"]["id"]))
+    check(S, "viewer delete attempt changed nothing", still == "1", still)
+
 def main():
     global ARGS
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -936,6 +1123,9 @@ def main():
     test_admin_only(ctx, A, B)
     test_functional(ctx, A, B)
     test_hardening(ctx, A, B)
+    test_billing(ctx, A, B)
+    test_inbox(ctx, A, B)
+    test_report_dns_viewer(ctx, A, B)
     test_secrets(ctx, A, B)       # last: scans every client response collected above
 
     # ------------------------------------------------------------------ report
